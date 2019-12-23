@@ -1,17 +1,24 @@
-.eunit
-*.o
-*.beam
-*.plt
 erl_crash.dump
-.concrete/DEV_MODE
+.sw?
+.*.sw?
+*.beam
+/.erlang.mk/
+/cover/
+/deps/
+/ebin/
+/logs/
+/plugins/
+/xrefr
+elvis
+callgrind*
+ct.coverdata
+test/ct.cover.spec
+_build
 
-# rebar 2.x
-.rebar
-rel/example_project
-ebin/*.beam
-deps
+rabbitmq_rtopic_exchange.d
+*.plt
+*.d
 
-# rebar 3
-.rebar3
-_build/
-_checkouts/
+*.jar
+
+
