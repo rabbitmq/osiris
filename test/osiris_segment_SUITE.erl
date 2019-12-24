@@ -105,14 +105,28 @@ read_chunk_parsed_multiple_chunks(Config) ->
 write_multi_segment(Config) ->
     S0 = osiris_segment:init(?config(dir, Config),
                              #{max_segment_size => 10 * 1000 * 1000}),
-    Data = crypto:strong_rand_bytes(1000),
-    BatchOf10 = [Data || _ <- lists:seq(1, 100)],
+    Data = crypto:strong_rand_bytes(10000),
+    BatchOf10 = [Data || _ <- lists:seq(1, 10)],
     _S1 = lists:foldl(
            fun (_, Acc) ->
                    osiris_segment:write(BatchOf10, Acc)
            end, S0, lists:seq(1, 101)),
+    Segs = filelib:wildcard(filename:join(?config(dir, Config), "*.segment")),
+    ?assertEqual(2, length(Segs)),
 
-    NumSegs = length(filelib:wildcard(filename:join(?config(dir, Config), "*.segment"))),
-    ?assertEqual(2, NumSegs),
+    %% ensure all records can be read
+    R0 = osiris_segment:init_reader(0, ?config(dir, Config), #{}),
+
+    R1 = lists:foldl(
+                fun (_, Acc0) ->
+                        {Records = [_|_], Acc} = osiris_segment:read_chunk_parsed(Acc0),
+
+                        ?assert(is_list(Records)),
+                        % ct:pal("offsets ~w", [element(1, lists:unzip(Records))]),
+                        ?assertEqual(10, length(Records)),
+                        Acc
+                end, R0, lists:seq(1, 101)),
+    ?assertEqual(1010, osiris_segment:next_offset(R1)),
     ok.
+
 %% Utility

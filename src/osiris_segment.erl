@@ -3,6 +3,7 @@
 -export([
          init/2,
          write/2,
+         accept_chunk/2,
          next_offset/1,
 
          init_reader/3,
@@ -85,11 +86,8 @@ init(Dir, Config) ->
              next_offset = NextOffset,
              index_fd = IdxFd}.
 
-write(Blobs, #?MODULE{cfg = #cfg{directory = Dir,
-                                 max_size = MaxSize},
-                      fd = Fd,
-                      index_fd = IdxFd,
-                      segment_size = SegSize,
+write(Blobs, #?MODULE{cfg = #cfg{
+                                 },
                       next_offset = Next} = State) ->
     %% assigns indexes to all blobs
     %% checks segment size
@@ -105,22 +103,38 @@ write(Blobs, #?MODULE{cfg = #cfg{directory = Dir,
                             {NextOff+1, [Data | Acc]}
                     end, {Next, []}, Blobs),
     Size = erlang:iolist_size(IoList),
-    NextOffset = Next + length(Blobs),
     Chunk = [<<"CHNK">>,
              <<Next:64/unsigned,
                (length(Blobs)):32/unsigned,
                0:32/integer,
                Size:32/unsigned>>,
              IoList],
+    NextOffset = Next + length(Blobs),
+    write_chunk(Chunk, NextOffset, State).
 
+accept_chunk(<<"CHNK", Next:64/unsigned,
+               Num:32/unsigned, _/binary>> = Chunk,
+             State) ->
+    NextOffset = Next + Num,
+    write_chunk(Chunk, NextOffset, State).
+
+
+write_chunk(Chunk, NextOffset,
+            #?MODULE{cfg = #cfg{directory = Dir,
+                                max_size = MaxSize},
+                     fd = Fd,
+                     index_fd = IdxFd,
+                     segment_size = SegSize,
+                     next_offset = Next} = State) ->
+    Size = erlang:iolist_size(Chunk),
     {ok, Cur} = file:position(Fd, cur),
     ok = file:write(Fd, Chunk),
     ok = file:write(IdxFd, <<Next:64/unsigned, Cur:32/unsigned>>),
     case file:position(Fd, cur) of
         {ok, After} when After >= MaxSize ->
             %% need a new segment file
-            file:close(Fd),
-            file:close(IdxFd),
+            ok = file:close(Fd),
+            ok = file:close(IdxFd),
             Filename = make_file_name(NextOffset, "segment"),
             IdxFilename = make_file_name(NextOffset, "index"),
             {ok, Fd2} = file:open(filename:join(Dir, Filename),
@@ -171,8 +185,9 @@ init_reader(StartOffset, Dir, _Config) ->
     end.
 
 
-read_chunk_parsed(#?MODULE{fd = Fd,
-                           next_offset = _Next} = State) ->
+read_chunk_parsed(#?MODULE{cfg = #cfg{directory = Dir},
+                           fd = Fd,
+                           next_offset = Next} = State) ->
     %% reads the next chunk of entries, parsed
     %% NB: this may return records before the requested index,
     %% that is fine - the reading process can do the appropriate filtering
@@ -186,12 +201,20 @@ read_chunk_parsed(#?MODULE{fd = Fd,
             %% parse blob data into records
             Records = parse_records(Offs, BlobData, []),
             {Records, State#?MODULE{next_offset = Offs + NumBlobs}};
+        eof ->
+            ok = file:close(Fd),
+            %% open next segment file and start there if it exists
+            SegFile = make_file_name(Next, "segment"),
+            {ok, Fd2} = file:open(filename:join(Dir, SegFile),
+                                  [raw, binary, read]),
+            read_chunk_parsed(State#?MODULE{fd = Fd2});
         Invalid ->
-            {invalid_chunk_header, Invalid}
+            {error, {invalid_chunk_header, Invalid}}
     end.
 
 
-next_chunk(State, HandleFun, HandlerState) ->
+next_chunk(HandleFun, HandlerState,
+           #?MODULE{fd = Fd} = State) ->
     %% passes the file handle, HandlerState Offset and Total Chunk Length
     %% to the HandlerFun
     %% This is to be used by replicator readers that use file:sendfile/3 to
@@ -201,6 +224,8 @@ next_chunk(State, HandleFun, HandlerState) ->
     %% one it returns {eof, State}
     %% the reader can then register with the osiris writer process to be notified
     %% next time a write happens
+    {ok, Pos} = file:position(Fd, cur),
+    %% read the header
     {HandlerState, State}.
 
 

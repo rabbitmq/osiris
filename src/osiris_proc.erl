@@ -14,9 +14,7 @@
 %% notifies replicator and reader processes of the new max index
 %% manages incoming max index
 
--define(SYNC_INTERVAL, 5).
-
--record(?MODULE, {}).
+-record(?MODULE, {segment = osiris_segment:state()}).
 
 -opaque state() :: #?MODULE{}.
 
@@ -30,13 +28,18 @@ start_link(Config) ->
 -spec init(file:filename()) -> {ok, state()}.
 init(Dir) ->
     process_flag(trap_exit, true),
+    process_flag(message_queue_data, off_heap),
     ok = ra_lib:make_dir(Dir),
-    % MetaFile = filename:join(Dir, "meta.dets"),
-    {ok, #?MODULE{}}.
+    Segment = osiris_segment:init(Dir, #{}),
+    {ok, #?MODULE{segment = Segment}}.
 
-handle_batch(_Commands, #?MODULE{} = State) ->
+handle_batch(Commands, #?MODULE{segment = Seg0} = State) ->
+    %% filter write commands
+    Records = [R || {write, R} <- Commands],
+
+    Seg = osiris_segment:write(Records, Seg0),
     %% write to log and index files
-    {ok, [], State}.
+    {ok, [], State#?MODULE{segment = Seg}}.
 
 terminate(_, #?MODULE{}) ->
     ok.
