@@ -7,7 +7,7 @@
 %% replicates and confirms latest offset back to primary
 
 %% API functions
--export([start_link/0]).
+-export([start/3, start_replica/2, start_link/2]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -17,11 +17,41 @@
          terminate/2,
          code_change/3]).
 
--record(state, {}).
+-record(state, {port,
+                listening_socket,
+                socket}).
 
 %%%===================================================================
 %%% API functions
 %%%===================================================================
+
+start(Node, Name, PortRange) ->
+    %% READERS pumps data on replicas!!! replicas are the gen_tcp listeners - whch is
+    %% different from this
+    %% master unaware of replicas
+    %% TODO if we select from a range, how do we know in the other side
+    %% which one have we selected???
+    rpc:call(Node, ?MODULE, start_replica, [Name, PortRange]).
+ 
+start_replica(Name, PortRange) ->
+    %% TODO What's the Id? How many replicas do we have?
+    %% TODO How do we know the name of the segment to write to disk?
+    %% TODO another replica for the index?
+    Self = self(),
+    case supervisor:start_child(osiris_sup, #{id => Name,
+                                              start => {?MODULE, start_link, [Self, PortRange]},
+                                              restart => transient,
+                                              shutdown => 5000,
+                                              type => worker,
+                                              modules => [?MODULE]}) of
+        {error, _} = E ->
+            E;
+        _ ->
+            receive
+                {port, Port} ->
+                    Port
+            end
+    end.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -30,8 +60,8 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+start_link(Caller, PortRange) ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE, [Caller, PortRange], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -48,8 +78,21 @@ start_link() ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([]) ->
-    {ok, #state{}}.
+init([Caller, _PortRange]) ->
+    Port = 5679,
+    Self = self(),
+    {ok, LSock} = gen_tcp:listen(Port, [binary, {packet, raw}, {active, true}]),
+    Caller ! {port, Port},
+    spawn_link(fun() -> accept(LSock, Self) end),
+    {ok, #state{port = Port,
+                listening_socket = LSock}}.
+
+accept(LSock, Process) ->
+    %% TODO what if we have more than 1 connection?
+    {ok, Sock} = gen_tcp:accept(LSock),
+    Process ! {socket, Sock},
+    gen_tcp:controlling_process(Sock, Process),
+    accept(LSock, Process).
 
 %%--------------------------------------------------------------------
 %% @private
@@ -92,7 +135,16 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info(_Info, State) ->
+handle_info({socket, Socket}, State) ->
+    {noreply, State#state{socket = Socket}};
+handle_info({tcp, Socket, Bin}, #state{socket = Socket} = State) ->
+    ct:pal("Received ~p~n", [Bin]),
+    {noreply, State};
+handle_info({tcp_closed, Socket}, #state{socket = Socket} = State) ->
+    ct:pal("Socket closed ~n", []),
+    {noreply, State#state{socket = Socket}};
+handle_info({tcp_error, Socket, Error}, #state{socket = Socket} = State) ->
+    ct:pal("Socket error ~p~n", [Error]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------
