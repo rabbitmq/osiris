@@ -40,7 +40,7 @@ init_per_group(_Group, Config) ->
 end_per_group(_Group, _Config) ->
     ok.
 
-init_per_testcase(TestCase, Config) ->
+init_per_testcase(_TestCase, Config) ->
     application:ensure_all_started(osiris),
     Config.
 
@@ -53,10 +53,10 @@ end_per_testcase(_TestCase, _Config) ->
 %%% Test cases
 %%%===================================================================
 
-init_replica(Config) ->
+init_replica(_Config) ->
     Port = osiris_replica:start(node(), replica, {10, 100}),
     ?assert(erlang:is_integer(Port)),
-    
+
     {ok, Sock} = gen_tcp:connect("localhost", Port, 
                                  [binary, {packet, 0}]),
     ok = gen_tcp:send(Sock, "Some Data"),

@@ -8,7 +8,7 @@
 %% replicate read records
 
 %% API functions
--export([start_link/0]).
+-export([start_link/4]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -18,7 +18,9 @@
          terminate/2,
          code_change/3]).
 
--record(state, {}).
+-record(state, {segment :: osiris_segment:state(),
+                socket :: gen_tcp:socket(),
+                leader_pid :: pid()}).
 
 %%%===================================================================
 %%% API functions
@@ -31,8 +33,9 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link() ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+start_link(Host, Port, LeaderPid, StartOffset) ->
+    gen_server:start_link({local, ?MODULE}, ?MODULE,
+                          [Host, Port, LeaderPid, StartOffset], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -49,8 +52,13 @@ start_link() ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([]) ->
-    {ok, #state{}}.
+init([Host, Port, LeaderPid, StartOffset]) ->
+    osiris_proc:init_reader(LeaderPid, StartOffset),
+    {ok, Sock} = gen_tcp:connect(Host, Port, [binary, {packet, 0}]),
+    %% register data listener with osiris_proc
+    ok = osiris_proc:register_data_listener(LeaderPid, StartOffset -1),
+    {ok, #state{socket = Sock,
+                leader_pid = LeaderPid}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -80,8 +88,23 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast(_Msg, State) ->
-    {noreply, State}.
+handle_cast({more_data, _LastOffset},
+            #state{segment = Seg0,
+                   leader_pid = LeaderPid,
+                   socket = Sock} = State) ->
+    {ok, Seg} = do_sendfile(Sock, Seg0),
+    LastOffset = osiris_segment:next_offset(Seg) - 1,
+    ok = osiris_proc:register_data_listener(LeaderPid, LastOffset),
+    {noreply, State#state{segment = Seg}}.
+
+do_sendfile(Sock, Seg0) ->
+    case osiris_segment:send_file(Sock, Seg0) of
+        {ok, Seg} ->
+            do_sendfile(Sock, Seg);
+        {end_of_stream, Seg} ->
+            {ok, Seg}
+    end.
+
 
 %%--------------------------------------------------------------------
 %% @private

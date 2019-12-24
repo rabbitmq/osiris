@@ -20,7 +20,7 @@ all() ->
 
 all_tests() ->
     [
-     test1
+     single_node_write
     ].
 
 groups() ->
@@ -41,8 +41,8 @@ end_per_group(_Group, _Config) ->
     ok.
 
 init_per_testcase(_TestCase, Config) ->
-    PrivDir = ?config(data_dir, Config),
-    ok = osiris:start(PrivDir),
+    _PrivDir = ?config(priv_dir, Config),
+    application:ensure_all_started(osiris),
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
@@ -54,9 +54,10 @@ end_per_testcase(_TestCase, _Config) ->
 %%%===================================================================
 
 single_node_write(Config) ->
-    _PrivDir = ?config(data_dir, Config),
-    Name = ?config(cluster_name, Config),
-    {ok, _Started, []} = osiris:start_cluster(Name, [{Name, node()}]),
+    _PrivDir = ?config(priv_dir, Config),
+    % Name = ?config(cluster_name, Config),
+    Name = atom_to_list(?FUNCTION_NAME),
+    {ok, Leader, _Replicas} = osiris:start_cluster(Name, []),
     ok = osiris:write({Name, node()}, 42, <<"mah-data">>),
     receive
         {osiris_written, Name, [42]} ->

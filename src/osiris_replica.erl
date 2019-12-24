@@ -7,7 +7,7 @@
 %% replicates and confirms latest offset back to primary
 
 %% API functions
--export([start/3, start_replica/2, start_link/2]).
+-export([start/3, start_link/1]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -17,41 +17,43 @@
          terminate/2,
          code_change/3]).
 
--record(state, {port,
-                listening_socket,
-                socket}).
+%% holds static or rarely changing fields
+-record(cfg, {directory :: file:filename(),
+              port :: non_neg_integer(),
+              listening_socket :: gen_tcp:socket(),
+              socket:: gen_tcp:socket()
+             }).
+
+-record(?MODULE, {cfg :: #cfg{},
+                  segment :: osiris_segment:state()}).
+
+-opaque state() :: #?MODULE{}.
+
+-export_type([
+              state/0
+              ]).
 
 %%%===================================================================
 %%% API functions
 %%%===================================================================
 
-start(Node, Name, PortRange) ->
+start(Node, Name, LeaderPid) ->
     %% READERS pumps data on replicas!!! replicas are the gen_tcp listeners - whch is
     %% different from this
     %% master unaware of replicas
     %% TODO if we select from a range, how do we know in the other side
     %% which one have we selected???
-    rpc:call(Node, ?MODULE, start_replica, [Name, PortRange]).
- 
-start_replica(Name, PortRange) ->
     %% TODO What's the Id? How many replicas do we have?
     %% TODO How do we know the name of the segment to write to disk?
     %% TODO another replica for the index?
-    Self = self(),
-    case supervisor:start_child(osiris_sup, #{id => Name,
-                                              start => {?MODULE, start_link, [Self, PortRange]},
-                                              restart => transient,
-                                              shutdown => 5000,
-                                              type => worker,
-                                              modules => [?MODULE]}) of
-        {error, _} = E ->
-            E;
-        _ ->
-            receive
-                {port, Port} ->
-                    Port
-            end
-    end.
+    supervisor:start_child({osiris_replica_sup, Node},
+                           #{id => Name,
+                             start => {?MODULE, start_link,
+                                       [LeaderPid]},
+                             restart => transient,
+                             shutdown => 5000,
+                             type => worker,
+                             modules => [?MODULE]}) .
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -60,8 +62,8 @@ start_replica(Name, PortRange) ->
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link(Caller, PortRange) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, [Caller, PortRange], []).
+start_link(LeaderPid) ->
+    gen_server:start_link(?MODULE, [LeaderPid], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -78,14 +80,35 @@ start_link(Caller, PortRange) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([Caller, _PortRange]) ->
-    Port = 5679,
+init([LeaderPid]) ->
+    Port = 5679, %% TODO: use locally configured port range
     Self = self(),
     {ok, LSock} = gen_tcp:listen(Port, [binary, {packet, raw}, {active, true}]),
-    Caller ! {port, Port},
     spawn_link(fun() -> accept(LSock, Self) end),
-    {ok, #state{port = Port,
-                listening_socket = LSock}}.
+
+    {ok, Dir} = application:get_env(data_dir),
+    Segment = osiris_segment:init(Dir, #{}),
+    NextOffset = osiris_segment:next_offset(Segment),
+    %% spawn reader process on leader node
+    Host = "", %% TODO
+    Node = node(LeaderPid),
+    case supervisor:start_child({osiris_replica_reader_sup, Node},
+                                #{
+                                  id => make_ref(),
+                                  start => {?MODULE, start_link,
+                                            [Host, Port, LeaderPid,
+                                             Dir, NextOffset]},
+                                  restart => transient,
+                                  shutdown => 5000,
+                                  type => worker,
+                                  modules => [?MODULE]}) of
+        {ok, _} ->
+            ok;
+        {ok, _, _} ->
+            ok
+    end,
+    {ok, #?MODULE{cfg = #cfg{port = Port,
+                             listening_socket = LSock}}}.
 
 accept(LSock, Process) ->
     %% TODO what if we have more than 1 connection?
@@ -135,15 +158,23 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({socket, Socket}, State) ->
-    {noreply, State#state{socket = Socket}};
-handle_info({tcp, Socket, Bin}, #state{socket = Socket} = State) ->
+handle_info({socket, Socket}, #?MODULE{cfg = Cfg} = State) ->
+
+    {noreply, State#?MODULE{cfg = Cfg#cfg{socket = Socket}}};
+handle_info({tcp, Socket, Bin},
+            #?MODULE{cfg = #cfg{socket = Socket},
+                     segment = Segment0} = State) ->
+    %% validate chunk
+    _LastOffset = parse_chunk(Bin),
+    Segment = osiris_segment:accept_chunk(Bin, Segment0),
+    %% TODO: reply back to leader with LastOffset after write
     ct:pal("Received ~p~n", [Bin]),
-    {noreply, State};
-handle_info({tcp_closed, Socket}, #state{socket = Socket} = State) ->
+    {noreply, State#?MODULE{segment = Segment}};
+handle_info({tcp_closed, Socket}, #?MODULE{cfg = #cfg{socket = Socket}} = State) ->
     ct:pal("Socket closed ~n", []),
-    {noreply, State#state{socket = Socket}};
-handle_info({tcp_error, Socket, Error}, #state{socket = Socket} = State) ->
+    {noreply, State};
+handle_info({tcp_error, Socket, Error},
+            #?MODULE{cfg = #cfg{socket = Socket}} = State) ->
     ct:pal("Socket error ~p~n", [Error]),
     {noreply, State}.
 
@@ -175,3 +206,13 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+
+parse_chunk(<<"CHNK",
+              FirstOffset:64/unsigned,
+              NumRecords:32/unsigned,
+              _Crc:32/integer,
+              Size:32/unsigned,
+              _/binary>> = Chunk) ->
+    true = byte_size(Chunk) == (Size + 24),
+    FirstOffset + NumRecords.

@@ -5,10 +5,10 @@
          write/2,
          accept_chunk/2,
          next_offset/1,
+         send_file/2,
 
          init_reader/3,
          read_chunk_parsed/1,
-         next_chunk/3,
          close/1
 
 
@@ -118,7 +118,6 @@ accept_chunk(<<"CHNK", Next:64/unsigned,
     NextOffset = Next + Num,
     write_chunk(Chunk, NextOffset, State).
 
-
 write_chunk(Chunk, NextOffset,
             #?MODULE{cfg = #cfg{directory = Dir,
                                 max_size = MaxSize},
@@ -213,8 +212,33 @@ read_chunk_parsed(#?MODULE{cfg = #cfg{directory = Dir},
     end.
 
 
-next_chunk(HandleFun, HandlerState,
-           #?MODULE{fd = Fd} = State) ->
+send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
+                         fd = Fd,
+                         next_offset = Next} = State) ->
+    {ok, Pos} = file:position(Fd, cur),
+    case file:read(Fd, 24) of
+        <<"CHNK",
+          Offs:64/unsigned,
+          NumRecords:32/unsigned,
+          _Crc:32/integer,
+          DataSize:32/unsigned>> ->
+            %% read header
+            {ok, _} = file:sendfile(Fd, Sock, Pos, DataSize + 24, []),
+            {ok, State#?MODULE{next_offset = Offs + NumRecords}};
+        eof ->
+            ok = file:close(Fd),
+            %% open next segment file and start there if it exists
+            SegFile = make_file_name(Next, "segment"),
+            case file:open(filename:join(Dir, SegFile),
+                           [raw, binary, read]) of
+                {ok, Fd2} ->
+                    send_file(Sock, State#?MODULE{fd = Fd2});
+                {error, enoent} ->
+                    {end_of_stream, State}
+            end
+    end.
+
+    %% TODO: does sendfile increment the Fd pos?
     %% passes the file handle, HandlerState Offset and Total Chunk Length
     %% to the HandlerFun
     %% This is to be used by replicator readers that use file:sendfile/3 to
@@ -224,12 +248,10 @@ next_chunk(HandleFun, HandlerState,
     %% one it returns {eof, State}
     %% the reader can then register with the osiris writer process to be notified
     %% next time a write happens
-    {ok, Pos} = file:position(Fd, cur),
     %% read the header
-    {HandlerState, State}.
 
 
-close(State) ->
+close(_State) ->
     %% close fd
     ok.
 

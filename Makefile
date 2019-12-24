@@ -2,6 +2,12 @@ PROJECT = osiris
 PROJECT_DESCRIPTION = New project
 PROJECT_VERSION = 0.1.0
 
+define PROJECT_ENV
+[
+	{data_dir, "/tmp/osiris"}
+]
+endef
+
 LOCAL_DEPS = sasl crypto
 dep_gen_batch_server = hex 0.8.2
 DEPS = gen_batch_server
