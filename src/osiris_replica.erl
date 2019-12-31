@@ -45,7 +45,7 @@ start(Node, Name, LeaderPid) ->
     %% which one have we selected???
     %% TODO What's the Id? How many replicas do we have?
     %% TODO How do we know the name of the segment to write to disk?
-    %% TODO another replica for the index?
+    %%` TODO another replica for the index?
     supervisor:start_child({osiris_replica_sup, Node},
                            #{id => Name,
                              start => {?MODULE, start_link,
@@ -90,25 +90,25 @@ init([LeaderPid]) ->
     Segment = osiris_segment:init(Dir, #{}),
     NextOffset = osiris_segment:next_offset(Segment),
     %% spawn reader process on leader node
-    Host = "", %% TODO
+    Host = "localhost", %% TODO
     Node = node(LeaderPid),
     case supervisor:start_child({osiris_replica_reader_sup, Node},
                                 #{
                                   id => make_ref(),
-                                  start => {?MODULE, start_link,
-                                            [Host, Port, LeaderPid,
-                                             Dir, NextOffset]},
+                                  start => {osiris_replica_reader, start_link,
+                                            [Host, Port, LeaderPid, NextOffset]},
                                   restart => transient,
                                   shutdown => 5000,
                                   type => worker,
-                                  modules => [?MODULE]}) of
+                                  modules => [osiris_replica_reader]}) of
         {ok, _} ->
             ok;
         {ok, _, _} ->
             ok
     end,
     {ok, #?MODULE{cfg = #cfg{port = Port,
-                             listening_socket = LSock}}}.
+                             listening_socket = LSock},
+                  segment = Segment}}.
 
 accept(LSock, Process) ->
     %% TODO what if we have more than 1 connection?

@@ -46,7 +46,7 @@ init_per_testcase(_TestCase, Config) ->
     Config.
 
 end_per_testcase(_TestCase, _Config) ->
-    ok = osiris:stop(),
+    ok = application:stop(osiris),
     ok.
 
 %%%===================================================================
@@ -58,9 +58,9 @@ single_node_write(Config) ->
     % Name = ?config(cluster_name, Config),
     Name = atom_to_list(?FUNCTION_NAME),
     {ok, Leader, _Replicas} = osiris:start_cluster(Name, []),
-    ok = osiris:write({Name, node()}, 42, <<"mah-data">>),
+    ok = osiris:write(Leader, 42, <<"mah-data">>),
     receive
-        {osiris_written, Name, [42]} ->
+        {osiris_written, [42]} ->
             ok
     after 2000 ->
               exit(osiris_written_timeout)

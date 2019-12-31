@@ -54,12 +54,14 @@ end_per_testcase(_TestCase, _Config) ->
 %%%===================================================================
 
 init_replica(_Config) ->
-    Port = osiris_replica:start(node(), replica, {10, 100}),
-    ?assert(erlang:is_integer(Port)),
-
-    {ok, Sock} = gen_tcp:connect("localhost", Port, 
+    {ok, Pid} = osiris_writer:start(replica, #{}),
+    ?assertMatch({ok, _}, osiris_replica:start(node(), replica, Pid)),
+    {ok, Sock} = gen_tcp:connect("localhost", 5679, 
                                  [binary, {packet, 0}]),
-    ok = gen_tcp:send(Sock, "Some Data"),
+
+    Chunk = osiris_segment:chunk([<<"Some">>, <<"Data">>], 0),
+
+    ok = gen_tcp:send(Sock, Chunk),
     ok = gen_tcp:close(Sock),
 
     ok.

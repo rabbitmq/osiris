@@ -9,9 +9,9 @@
 
          init_reader/3,
          read_chunk_parsed/1,
-         close/1
+         close/1,
 
-
+         chunk/2
          ]).
 
 -define(DEFAULT_MAX_SEGMENT_SIZE, 500 * 1000 * 1000).
@@ -94,6 +94,11 @@ write(Blobs, #?MODULE{cfg = #cfg{
     %% rolls over to new segment file if needed
     %% Records range in ETS segment lookup table
     %% Writes every n blob index/offsets to index file
+    Chunk = chunk(Blobs, Next),
+    NextOffset = Next + length(Blobs),
+    write_chunk(Chunk, NextOffset, State).
+
+chunk(Blobs, Next) ->
     {_, IoList} = lists:foldr(
                     fun (B, {NextOff, Acc}) ->
                             Data = [
@@ -103,14 +108,12 @@ write(Blobs, #?MODULE{cfg = #cfg{
                             {NextOff+1, [Data | Acc]}
                     end, {Next, []}, Blobs),
     Size = erlang:iolist_size(IoList),
-    Chunk = [<<"CHNK">>,
-             <<Next:64/unsigned,
-               (length(Blobs)):32/unsigned,
-               0:32/integer,
-               Size:32/unsigned>>,
-             IoList],
-    NextOffset = Next + length(Blobs),
-    write_chunk(Chunk, NextOffset, State).
+    [<<"CHNK">>,
+     <<Next:64/unsigned,
+       (length(Blobs)):32/unsigned,
+       0:32/integer,
+       Size:32/unsigned>>,
+     IoList].    
 
 accept_chunk(<<"CHNK", Next:64/unsigned,
                Num:32/unsigned, _/binary>> = Chunk,
@@ -281,9 +284,14 @@ find_last_offset(Dir) ->
     case SegFiles of
         [LastIdxFile | _ ] ->
             {ok, Data} = file:read_file(LastIdxFile),
-            Pos = byte_size(Data) - 12,
-            <<_:64/unsigned, FilePos:32/unsigned>> = binary:part(Data, Pos, 12),
-            FilePos;
+            case Data of
+                <<>> ->
+                    -1;
+                _ ->
+                    Pos = byte_size(Data) - 12,
+                    <<_:64/unsigned, FilePos:32/unsigned>> = binary:part(Data, Pos, 12),
+                    FilePos
+            end;
         _ ->
             -1
     end.

@@ -6,7 +6,7 @@
          start/2,
          init_reader/2,
          register_data_listener/2,
-         write/3,
+         write/4,
          init/1,
          handle_batch/2,
          terminate/2,
@@ -48,8 +48,8 @@ init_reader(Pid, StartOffset) when node(Pid) == node() ->
 register_data_listener(Pid, Offset) ->
     ok = gen_batch_server:cast(Pid, {register_data_listener, self(), Offset}).
 
-write(Pid, Corr, Data) ->
-    gen_batch_server:cast(Pid, {write, Corr, Data}).
+write(Pid, Sender, Corr, Data) ->
+    gen_batch_server:cast(Pid, {write, Sender, Corr, Data}).
 
 -spec init(map()) -> {ok, state()}.
 init(#{name := Name}) ->
@@ -58,14 +58,18 @@ init(#{name := Name}) ->
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
     filelib:ensure_dir(Dir),
-    ok = file:make_dir(Dir),
+    case file:make_dir(Dir) of
+        ok -> ok;
+        {error, eexist} -> ok;
+        E -> throw(E)
+    end,
     Segment = osiris_segment:init(Dir, #{}),
     {ok, #?MODULE{directory  = Dir,
                   segment = Segment}}.
 
 handle_batch(Commands, #?MODULE{segment = Seg0} = State0) ->
     %% filter write commands
-    {Records, Replies, Corrs, State1} = handle_commands(Commands, State0, {[], []}),
+    {Records, Replies, Corrs, State1} = handle_commands(Commands, State0, {[], [], #{}}),
     Seg = osiris_segment:write(Records, Seg0),
     maps:map(
       fun (P, V) ->

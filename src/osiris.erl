@@ -20,16 +20,18 @@
               state/0
               ]).
 
-start_cluster(Name, Replicas)
-  when is_list(Name) ->
-    true = validate_base64uri(Name),
+start_cluster(List, Replicas)
+  when is_list(List) ->
+    %% Why does the name have to be a list? We need an atom as process name for the gen_batch_server
+    true = validate_base64uri(List),
+    Name = list_to_atom(List),
     {ok, Pid} = osiris_writer:start(Name, #{}),
     ReplicaPids  = [element(2, osiris_replica:start(N, Name, Pid))
                     || N <- Replicas],
     {ok, Pid, ReplicaPids}.
 
 write(Pid, Corr, Data) ->
-    osiris_writer:write(Pid, Corr, Data).
+    osiris_writer:write(Pid, self(), Corr, Data).
 
 
 -spec validate_base64uri(string()) -> boolean().

@@ -53,10 +53,11 @@ start_link(Host, Port, LeaderPid, StartOffset) ->
 %% @end
 %%--------------------------------------------------------------------
 init([Host, Port, LeaderPid, StartOffset]) ->
-    osiris_proc:init_reader(LeaderPid, StartOffset),
+    osiris_writer:init_reader(LeaderPid, StartOffset),
+    ct:pal("CONNECT TO ~p:~p ~n", [Host, Port]),
     {ok, Sock} = gen_tcp:connect(Host, Port, [binary, {packet, 0}]),
     %% register data listener with osiris_proc
-    ok = osiris_proc:register_data_listener(LeaderPid, StartOffset -1),
+    ok = osiris_writer:register_data_listener(LeaderPid, StartOffset -1),
     {ok, #state{socket = Sock,
                 leader_pid = LeaderPid}}.
 
@@ -94,7 +95,7 @@ handle_cast({more_data, _LastOffset},
                    socket = Sock} = State) ->
     {ok, Seg} = do_sendfile(Sock, Seg0),
     LastOffset = osiris_segment:next_offset(Seg) - 1,
-    ok = osiris_proc:register_data_listener(LeaderPid, LastOffset),
+    ok = osiris_writer:register_data_listener(LeaderPid, LastOffset),
     {noreply, State#state{segment = Seg}}.
 
 do_sendfile(Sock, Seg0) ->
