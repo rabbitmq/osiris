@@ -8,6 +8,8 @@
 
 %% API functions
 -export([start/3, start_link/1]).
+%% Test
+-export([get_port/1]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -65,6 +67,9 @@ start(Node, Name, LeaderPid) ->
 start_link(LeaderPid) ->
     gen_server:start_link(?MODULE, [LeaderPid], []).
 
+get_port(Server) ->
+    gen_server:call(Server, get_port).
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -81,9 +86,9 @@ start_link(LeaderPid) ->
 %% @end
 %%--------------------------------------------------------------------
 init([LeaderPid]) ->
-    Port = 5679, %% TODO: use locally configured port range
+    {ok, {Min, Max}} = application:get_env(port_range),
+    {Port, LSock} = open_tcp_port(Min, Max), %% TODO: use locally configured port range
     Self = self(),
-    {ok, LSock} = gen_tcp:listen(Port, [binary, {packet, raw}, {active, true}]),
     spawn_link(fun() -> accept(LSock, Self) end),
 
     {ok, Dir} = application:get_env(data_dir),
@@ -110,6 +115,19 @@ init([LeaderPid]) ->
                              listening_socket = LSock},
                   segment = Segment}}.
 
+
+open_tcp_port(M, M) ->
+    throw({error, all_busy});
+open_tcp_port(Min, Max) ->
+    case gen_tcp:listen(Min, [binary, {packet, raw}, {active, true}]) of
+        {ok, LSock} ->
+            {Min, LSock};
+        {error, eaddrinuse} ->
+            open_tcp_port(Min + 1, Max);
+        E ->
+            throw(E)
+    end.
+
 accept(LSock, Process) ->
     %% TODO what if we have more than 1 connection?
     {ok, Sock} = gen_tcp:accept(LSock),
@@ -131,6 +149,8 @@ accept(LSock, Process) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_call(get_port, _From, #?MODULE{cfg = #cfg{port = Port}} = State) ->
+    {reply, Port, State};
 handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.

@@ -41,12 +41,11 @@ end_per_group(_Group, _Config) ->
     ok.
 
 init_per_testcase(_TestCase, Config) ->
-    application:ensure_all_started(osiris),
-    Config.
+    Apps = application:ensure_all_started(osiris),
+    [{started_apps, Apps} | Config].
 
-end_per_testcase(_TestCase, _Config) ->
-    %% TODO ensure to stop all deps
-    ok = application:stop(osiris),
+end_per_testcase(_TestCase, Config) ->
+    [application:stop(App) || App <- lists:reverse(?config(started_apps, Config))],
     ok.
 
 %%%===================================================================
@@ -55,10 +54,12 @@ end_per_testcase(_TestCase, _Config) ->
 
 init_replica(_Config) ->
     {ok, Pid} = osiris_writer:start(replica, #{}),
-    ?assertMatch({ok, _}, osiris_replica:start(node(), replica, Pid)),
-    {ok, Sock} = gen_tcp:connect("localhost", 5679, 
-                                 [binary, {packet, 0}]),
+    {ok, Child} = osiris_replica:start(node(), replica, Pid),
 
+    Port = osiris_replica:get_port(Child),
+    {ok, Sock} = gen_tcp:connect("localhost", Port,
+                                 [binary, {packet, 0}]),
+    
     Chunk = osiris_segment:chunk([<<"Some">>, <<"Data">>], 0),
 
     ok = gen_tcp:send(Sock, Chunk),

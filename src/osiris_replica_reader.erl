@@ -54,7 +54,6 @@ start_link(Host, Port, LeaderPid, StartOffset) ->
 %%--------------------------------------------------------------------
 init([Host, Port, LeaderPid, StartOffset]) ->
     osiris_writer:init_reader(LeaderPid, StartOffset),
-    ct:pal("CONNECT TO ~p:~p ~n", [Host, Port]),
     {ok, Sock} = gen_tcp:connect(Host, Port, [binary, {packet, 0}]),
     %% register data listener with osiris_proc
     ok = osiris_writer:register_data_listener(LeaderPid, StartOffset -1),

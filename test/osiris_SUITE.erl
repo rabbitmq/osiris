@@ -41,12 +41,11 @@ end_per_group(_Group, _Config) ->
     ok.
 
 init_per_testcase(_TestCase, Config) ->
-    _PrivDir = ?config(priv_dir, Config),
-    application:ensure_all_started(osiris),
-    Config.
+    Apps = application:ensure_all_started(osiris),
+    [{started_apps, Apps} | Config].
 
-end_per_testcase(_TestCase, _Config) ->
-    ok = application:stop(osiris),
+end_per_testcase(_TestCase, Config) ->
+    [application:stop(App) || App <- lists:reverse(?config(started_apps, Config))],
     ok.
 
 %%%===================================================================
