@@ -95,13 +95,14 @@ init([LeaderPid]) ->
     Segment = osiris_segment:init(Dir, #{}),
     NextOffset = osiris_segment:next_offset(Segment),
     %% spawn reader process on leader node
-    Host = "localhost", %% TODO
+    {ok, HostName} = inet:gethostname(),
+    {ok, Ip} = inet:getaddr(HostName, inet),
     Node = node(LeaderPid),
     case supervisor:start_child({osiris_replica_reader_sup, Node},
                                 #{
                                   id => make_ref(),
                                   start => {osiris_replica_reader, start_link,
-                                            [Host, Port, LeaderPid, NextOffset]},
+                                            [Ip, Port, LeaderPid, NextOffset]},
                                   restart => transient,
                                   shutdown => 5000,
                                   type => worker,
