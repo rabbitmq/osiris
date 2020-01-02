@@ -20,10 +20,11 @@
          code_change/3]).
 
 %% holds static or rarely changing fields
--record(cfg, {directory :: file:filename(),
+-record(cfg, {leader_pid :: pid(),
+              directory :: file:filename(),
               port :: non_neg_integer(),
               listening_socket :: gen_tcp:socket(),
-              socket:: gen_tcp:socket()
+              socket :: undefined | gen_tcp:socket()
              }).
 
 -record(?MODULE, {cfg :: #cfg{},
@@ -87,7 +88,8 @@ get_port(Server) ->
 %%--------------------------------------------------------------------
 init([LeaderPid]) ->
     {ok, {Min, Max}} = application:get_env(port_range),
-    {Port, LSock} = open_tcp_port(Min, Max), %% TODO: use locally configured port range
+    %% TODO: use locally configured port range
+    {Port, LSock} = open_tcp_port(Min, Max),
     Self = self(),
     spawn_link(fun() -> accept(LSock, Self) end),
 
@@ -112,7 +114,10 @@ init([LeaderPid]) ->
         {ok, _, _} ->
             ok
     end,
-    {ok, #?MODULE{cfg = #cfg{port = Port,
+    %% TODO: monitor leader pid
+    {ok, #?MODULE{cfg = #cfg{leader_pid = LeaderPid,
+                             directory = Dir,
+                             port = Port,
                              listening_socket = LSock},
                   segment = Segment}}.
 
@@ -183,13 +188,13 @@ handle_info({socket, Socket}, #?MODULE{cfg = Cfg} = State) ->
 
     {noreply, State#?MODULE{cfg = Cfg#cfg{socket = Socket}}};
 handle_info({tcp, Socket, Bin},
-            #?MODULE{cfg = #cfg{socket = Socket},
+            #?MODULE{cfg = #cfg{socket = Socket,
+                                leader_pid = LeaderPid},
                      segment = Segment0} = State) ->
     %% validate chunk
-    _LastOffset = parse_chunk(Bin),
+    FirstOffset = parse_chunk(Bin),
     Segment = osiris_segment:accept_chunk(Bin, Segment0),
-    %% TODO: reply back to leader with LastOffset after write
-    ct:pal("Received ~p~n", [Bin]),
+    ok = osiris_writer:ack(LeaderPid, FirstOffset),
     {noreply, State#?MODULE{segment = Segment}};
 handle_info({tcp_closed, Socket}, #?MODULE{cfg = #cfg{socket = Socket}} = State) ->
     ct:pal("Socket closed ~n", []),
@@ -228,12 +233,11 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-
 parse_chunk(<<"CHNK",
               FirstOffset:64/unsigned,
-              NumRecords:32/unsigned,
+              _NumRecords:32/unsigned,
               _Crc:32/integer,
               Size:32/unsigned,
-              _/binary>> = Chunk) ->
+              _Record/binary>> = Chunk) ->
     true = byte_size(Chunk) == (Size + 24),
-    FirstOffset + NumRecords.
+    FirstOffset.

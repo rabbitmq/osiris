@@ -34,8 +34,7 @@
 %% @end
 %%--------------------------------------------------------------------
 start_link(Host, Port, LeaderPid, StartOffset) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE,
-                          [Host, Port, LeaderPid, StartOffset], []).
+    gen_server:start_link(?MODULE, [Host, Port, LeaderPid, StartOffset], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -52,12 +51,14 @@ start_link(Host, Port, LeaderPid, StartOffset) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([Host, Port, LeaderPid, StartOffset]) ->
-    osiris_writer:init_reader(LeaderPid, StartOffset),
+init([Host, Port, LeaderPid, StartOffset] = Args) ->
+    Segment = osiris_writer:init_reader(LeaderPid, StartOffset),
+    logger:info("starting replica reader with ~w", [Args]),
     {ok, Sock} = gen_tcp:connect(Host, Port, [binary, {packet, 0}]),
     %% register data listener with osiris_proc
     ok = osiris_writer:register_data_listener(LeaderPid, StartOffset -1),
-    {ok, #state{socket = Sock,
+    {ok, #state{segment = Segment,
+                socket = Sock,
                 leader_pid = LeaderPid}}.
 
 %%--------------------------------------------------------------------

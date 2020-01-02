@@ -6,6 +6,7 @@
          start/2,
          init_reader/2,
          register_data_listener/2,
+         ack/2,
          write/4,
          init/1,
          handle_batch/2,
@@ -18,8 +19,12 @@
 %% notifies replicator and reader processes of the new max index
 %% manages incoming max index
 
--record(?MODULE, {directory :: file:filename(),
+-record(?MODULE, {name :: string(),
+                  replicas :: [node()],
+                  directory :: file:filename(),
                   segment = osiris_segment:state(),
+                  pending_writes = #{} :: #{osiris_segment:offset() =>
+                                            {[node()], #{pid() => [term()]}}},
                   data_listeners = [] :: [{pid(), osiris_segment:offset()}]}).
 
 -opaque state() :: #?MODULE{}.
@@ -48,11 +53,15 @@ init_reader(Pid, StartOffset) when node(Pid) == node() ->
 register_data_listener(Pid, Offset) ->
     ok = gen_batch_server:cast(Pid, {register_data_listener, self(), Offset}).
 
+ack(LeaderPid, Offset) ->
+    gen_batch_server:cast(LeaderPid, {ack, node(), Offset}).
+
 write(Pid, Sender, Corr, Data) ->
     gen_batch_server:cast(Pid, {write, Sender, Corr, Data}).
 
 -spec init(map()) -> {ok, state()}.
-init(#{name := Name}) ->
+init(#{name := Name,
+       replica_nodes := Replicas}) ->
     {ok, DataDir} = application:get_env(data_dir),
     Dir = filename:join(DataDir, Name),
     process_flag(trap_exit, true),
@@ -64,19 +73,22 @@ init(#{name := Name}) ->
         E -> throw(E)
     end,
     Segment = osiris_segment:init(Dir, #{}),
-    {ok, #?MODULE{directory  = Dir,
+    {ok, #?MODULE{name = Name,
+                  replicas = Replicas,
+                  directory  = Dir,
                   segment = Segment}}.
 
 handle_batch(Commands, #?MODULE{segment = Seg0} = State0) ->
+
     %% filter write commands
-    {Records, Replies, Corrs, State1} = handle_commands(Commands, State0, {[], [], #{}}),
+    {Records, Replies, Corrs, State1} = handle_commands(Commands, State0,
+                                                        {[], [], #{}}),
+    %% TODO handle empty replicas
+    Next = osiris_segment:next_offset(Seg0),
     Seg = osiris_segment:write(Records, Seg0),
-    maps:map(
-      fun (P, V) ->
-              P ! {osiris_written, lists:reverse(V)}
-      end, Corrs),
+    State2 = update_pending(Next, Corrs, State1),
     %% write to log and index files
-    State = notify_listeners(State1#?MODULE{segment = Seg}),
+    State = notify_listeners(State2#?MODULE{segment = Seg}),
     {ok, Replies, State}.
 
 terminate(_, #?MODULE{}) ->
@@ -85,6 +97,28 @@ terminate(_, #?MODULE{}) ->
 format_status(State) ->
     State.
 
+%% Internal
+
+
+update_pending(_Next, Corrs, #?MODULE{name = Name,
+                                      replicas = []} = State) ->
+    _ = notify_writers(Name, Corrs),
+    State;
+update_pending(Next, Corrs, #?MODULE{replicas = Replicas,
+                                     pending_writes = Pending0} = State) ->
+    case Corrs of
+        _  when map_size(Corrs) == 0 ->
+            State;
+        _ ->
+            State#?MODULE{pending_writes =
+                          Pending0#{Next => {Replicas, Corrs}}}
+    end.
+
+notify_writers(Name, Corrs) ->
+    maps:map(
+      fun (P, V) ->
+              P ! {osiris_written, Name, lists:reverse(V)}
+      end, Corrs).
 
 handle_commands([], State, {Records, Replies, Corrs}) ->
     {lists:reverse(Records), Replies, Corrs, State};
@@ -96,6 +130,23 @@ handle_commands([{cast, {write, Pid, Corr, R}} | Rem], State,
 handle_commands([{cast, {register_data_listener, Pid, Offset}} | Rem],
                 #?MODULE{data_listeners = Listeners} = State0, Acc) ->
     State = State0#?MODULE{data_listeners = [{Pid, Offset} | Listeners]},
+    handle_commands(Rem, State, Acc);
+handle_commands([{cast, {ack, ReplicaNode, Offset}} | Rem],
+                #?MODULE{name = Name,
+                         pending_writes = Pending0} = State0, Acc) ->
+    Pending = case maps:get(Offset, Pending0) of
+                  {[ReplicaNode], Corrs} ->
+                      ct:pal("last ack ~w", [Offset]),
+                      _ = notify_writers(Name, Corrs),
+                      maps:remove(Offset, Pending0);
+                  {Reps, Corrs} ->
+                      Reps1 = lists:delete(ReplicaNode, Reps),
+                      maps:update(Offset,
+                                  {Reps1, Corrs},
+                                  Pending0)
+              end,
+    ct:pal("ack ~w ~w ~w ~w", [self(), ReplicaNode, Offset, Pending]),
+    State = State0#?MODULE{pending_writes = Pending},
     handle_commands(Rem, State, Acc);
 handle_commands([{call, From, get_directory} | Rem],
                 #?MODULE{directory = Dir} = State, {Records, Replies, Corrs}) ->

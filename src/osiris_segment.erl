@@ -37,15 +37,19 @@
 
 -type offset() :: non_neg_integer().
 
+-type config() :: #{}.
+
+-type record() :: {offset(), iodata()}.
+
 %% holds static or rarely changing fields
 -record(cfg, {directory :: file:filename(),
               mode :: read | write,
-              max_size :: non_neg_integer()
+              max_size = ?DEFAULT_MAX_SEGMENT_SIZE :: non_neg_integer()
              }).
 
 -record(?MODULE, {cfg :: #cfg{},
                   fd :: file:io_device(),
-                  index_fd :: file:io_device(),
+                  index_fd :: undefined | file:io_device(),
                   segment_size = 0 :: non_neg_integer(),
                   next_offset = 0 :: offset()}).
 
@@ -53,14 +57,12 @@
 
 -export_type([
               state/0,
-              offset/0
+              offset/0,
+              record/0,
+              config/0
               ]).
 
-make_file_name(N, Suff) ->
-    lists:flatten(io_lib:format("~20..0B.~s", [N, Suff])).
-
-
-
+-spec init(file:filename(), config()) -> state().
 init(Dir, Config) ->
     %% scan directory for segments if in write mode
     %% re-builds segment lookup ETS table (used by readers)
@@ -86,8 +88,10 @@ init(Dir, Config) ->
              next_offset = NextOffset,
              index_fd = IdxFd}.
 
-write(Blobs, #?MODULE{cfg = #cfg{
-                                 },
+-spec write([iodata()], state()) -> state().
+write([], #?MODULE{cfg = #cfg{}} = State) ->
+    State;
+write(Blobs, #?MODULE{cfg = #cfg{},
                       next_offset = Next} = State) ->
     %% assigns indexes to all blobs
     %% checks segment size
@@ -98,63 +102,18 @@ write(Blobs, #?MODULE{cfg = #cfg{
     NextOffset = Next + length(Blobs),
     write_chunk(Chunk, NextOffset, State).
 
-chunk(Blobs, Next) ->
-    {_, IoList} = lists:foldr(
-                    fun (B, {NextOff, Acc}) ->
-                            Data = [
-                                    <<(iolist_size(B)):32/unsigned>>,
-                                    <<NextOff:64/unsigned>>,
-                                    B],
-                            {NextOff+1, [Data | Acc]}
-                    end, {Next, []}, Blobs),
-    Size = erlang:iolist_size(IoList),
-    [<<"CHNK">>,
-     <<Next:64/unsigned,
-       (length(Blobs)):32/unsigned,
-       0:32/integer,
-       Size:32/unsigned>>,
-     IoList].    
-
+-spec accept_chunk(binary(), state()) -> state().
 accept_chunk(<<"CHNK", Next:64/unsigned,
                Num:32/unsigned, _/binary>> = Chunk,
              State) ->
     NextOffset = Next + Num,
     write_chunk(Chunk, NextOffset, State).
 
-write_chunk(Chunk, NextOffset,
-            #?MODULE{cfg = #cfg{directory = Dir,
-                                max_size = MaxSize},
-                     fd = Fd,
-                     index_fd = IdxFd,
-                     segment_size = SegSize,
-                     next_offset = Next} = State) ->
-    Size = erlang:iolist_size(Chunk),
-    {ok, Cur} = file:position(Fd, cur),
-    ok = file:write(Fd, Chunk),
-    ok = file:write(IdxFd, <<Next:64/unsigned, Cur:32/unsigned>>),
-    case file:position(Fd, cur) of
-        {ok, After} when After >= MaxSize ->
-            %% need a new segment file
-            ok = file:close(Fd),
-            ok = file:close(IdxFd),
-            Filename = make_file_name(NextOffset, "segment"),
-            IdxFilename = make_file_name(NextOffset, "index"),
-            {ok, Fd2} = file:open(filename:join(Dir, Filename),
-                                 [raw, binary, append]),
-            {ok, IdxFd2} = file:open(filename:join(Dir, IdxFilename),
-                                    [raw, binary, append]),
-            State#?MODULE{fd = Fd2,
-                          index_fd = IdxFd2,
-                          next_offset = NextOffset,
-                          segment_size = SegSize + Size};
-        _ ->
-            State#?MODULE{next_offset = NextOffset,
-                          segment_size = SegSize + Size}
-    end.
-
+-spec next_offset(state()) -> offset().
 next_offset(#?MODULE{next_offset = Next}) ->
     Next.
 
+-spec init_reader(offset(), file:filename(), config()) -> state().
 init_reader(StartOffset, Dir, _Config) ->
     %% find the appopriate segment and scan the index to find the
     %% postition of the next chunk to read
@@ -171,7 +130,6 @@ init_reader(StartOffset, Dir, _Config) ->
         [StartSegment | _] ->
             {ok, Fd} = file:open(StartSegment, [raw, binary, read]),
             IndexFile = filename:rootname(StartSegment) ++ ".index",
-            ct:pal("index file ~s", [IndexFile]),
             {ok, Data} = file:read_file(IndexFile),
             FilePos = scan_index(Data, StartOffset),
 
@@ -187,6 +145,10 @@ init_reader(StartOffset, Dir, _Config) ->
     end.
 
 
+-spec read_chunk_parsed(state()) ->
+    {ok, [record()], state()} |
+    {error, end_of_stream} |
+    {error, {invalid_chunk_header, term()}}.
 read_chunk_parsed(#?MODULE{cfg = #cfg{directory = Dir},
                            fd = Fd,
                            next_offset = Next} = State) ->
@@ -207,6 +169,8 @@ read_chunk_parsed(#?MODULE{cfg = #cfg{directory = Dir},
             ok = file:close(Fd),
             %% open next segment file and start there if it exists
             SegFile = make_file_name(Next, "segment"),
+            %% TODO check for error and return end_of_stream if the file
+            %% does not exist
             {ok, Fd2} = file:open(filename:join(Dir, SegFile),
                                   [raw, binary, read]),
             read_chunk_parsed(State#?MODULE{fd = Fd2});
@@ -215,18 +179,21 @@ read_chunk_parsed(#?MODULE{cfg = #cfg{directory = Dir},
     end.
 
 
+-spec send_file(gen_tcp:socket(), state()) ->
+    {ok, state()} | {end_of_stream, state()}.
 send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                          fd = Fd,
                          next_offset = Next} = State) ->
     {ok, Pos} = file:position(Fd, cur),
     case file:read(Fd, 24) of
-        <<"CHNK",
-          Offs:64/unsigned,
-          NumRecords:32/unsigned,
-          _Crc:32/integer,
-          DataSize:32/unsigned>> ->
+        {ok, <<"CHNK",
+               Offs:64/unsigned,
+               NumRecords:32/unsigned,
+               _Crc:32/integer,
+               DataSize:32/unsigned>>} ->
             %% read header
             {ok, _} = file:sendfile(Fd, Sock, Pos, DataSize + 24, []),
+            {ok, _} = file:position(Fd, DataSize + 24),
             {ok, State#?MODULE{next_offset = Offs + NumRecords}};
         eof ->
             ok = file:close(Fd),
@@ -241,25 +208,14 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
             end
     end.
 
-    %% TODO: does sendfile increment the Fd pos?
-    %% passes the file handle, HandlerState Offset and Total Chunk Length
-    %% to the HandlerFun
-    %% This is to be used by replicator readers that use file:sendfile/3 to
-    %% replicate the data
-    %% updates it's own state for the offset of the next one
-    %% If there is no more data in the file and the current file is the last
-    %% one it returns {eof, State}
-    %% the reader can then register with the osiris writer process to be notified
-    %% next time a write happens
-    %% read the header
-
-
 close(_State) ->
     %% close fd
     ok.
 
 %% Internal
 
+scan_index(<<>>, _Offset) ->
+    0;
 scan_index(<<_:64/unsigned, Pos:32/unsigned>>, _Offset) ->
     Pos;
 scan_index(<<O:64/unsigned, Pos:32/unsigned, Rem/binary>>, Offset)  ->
@@ -295,6 +251,57 @@ find_last_offset(Dir) ->
         _ ->
             -1
     end.
+
+chunk(Blobs, Next) ->
+    {_, IoList} = lists:foldr(
+                    fun (B, {NextOff, Acc}) ->
+                            Data = [
+                                    <<(iolist_size(B)):32/unsigned>>,
+                                    <<NextOff:64/unsigned>>,
+                                    B],
+                            {NextOff+1, [Data | Acc]}
+                    end, {Next, []}, Blobs),
+    Size = erlang:iolist_size(IoList),
+    [<<"CHNK">>,
+     <<Next:64/unsigned,
+       (length(Blobs)):32/unsigned,
+       0:32/integer,
+       Size:32/unsigned>>,
+     IoList].
+
+write_chunk(Chunk, NextOffset,
+            #?MODULE{cfg = #cfg{directory = Dir,
+                                max_size = MaxSize},
+                     fd = Fd,
+                     index_fd = IdxFd,
+                     segment_size = SegSize,
+                     next_offset = Next} = State) ->
+    Size = erlang:iolist_size(Chunk),
+    {ok, Cur} = file:position(Fd, cur),
+    ok = file:write(Fd, Chunk),
+    ok = file:write(IdxFd, <<Next:64/unsigned, Cur:32/unsigned>>),
+    case file:position(Fd, cur) of
+        {ok, After} when After >= MaxSize ->
+            %% need a new segment file
+            ok = file:close(Fd),
+            ok = file:close(IdxFd),
+            Filename = make_file_name(NextOffset, "segment"),
+            IdxFilename = make_file_name(NextOffset, "index"),
+            {ok, Fd2} = file:open(filename:join(Dir, Filename),
+                                 [raw, binary, append]),
+            {ok, IdxFd2} = file:open(filename:join(Dir, IdxFilename),
+                                     [raw, binary, append]),
+            State#?MODULE{fd = Fd2,
+                          index_fd = IdxFd2,
+                          next_offset = NextOffset,
+                          segment_size = SegSize + Size};
+        _ ->
+            State#?MODULE{next_offset = NextOffset,
+                          segment_size = SegSize + Size}
+    end.
+
+make_file_name(N, Suff) ->
+    lists:flatten(io_lib:format("~20..0B.~s", [N, Suff])).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
