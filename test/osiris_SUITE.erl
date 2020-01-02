@@ -88,6 +88,18 @@ cluster_write(Config) ->
               flush(),
               exit(osiris_written_timeout)
     end,
+    Self = self(),
+    _ = spawn(LeaderNode,
+              fun () ->
+                      Seg0 = osiris_writer:init_reader(Leader, 0),
+                      {[{0, <<"mah-data">>}], _Seg} = osiris_segment:read_chunk_parsed(Seg0),
+                      Self ! read_data_ok
+              end),
+    receive
+        read_data_ok -> ok
+    after 2000 ->
+              exit(read_data_ok_timeout)
+    end,
     ok.
 
 %% Utility
