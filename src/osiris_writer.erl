@@ -6,6 +6,7 @@
          start/2,
          init_reader/2,
          register_data_listener/2,
+         register_offset_listener/2,
          ack/2,
          write/4,
          init/1,
@@ -20,12 +21,16 @@
 %% manages incoming max index
 
 -record(?MODULE, {name :: string(),
+                  offset_ref :: atomics:atomics_ref(),
                   replicas :: [node()],
                   directory :: file:filename(),
                   segment = osiris_segment:state(),
                   pending_writes = #{} :: #{osiris_segment:offset() =>
                                             {[node()], #{pid() => [term()]}}},
-                  data_listeners = [] :: [{pid(), osiris_segment:offset()}]}).
+                  data_listeners = [] :: [{pid(), osiris_segment:offset()}],
+                  offset_listeners = [] :: [{pid(), osiris_segment:offset()}],
+                  committed_offset = -1 :: osiris_segment:offset()
+                 }).
 
 -opaque state() :: #?MODULE{}.
 
@@ -47,11 +52,14 @@ start_link(Config) ->
 
 
 init_reader(Pid, StartOffset) when node(Pid) == node() ->
-    Dir = gen_batch_server:call(Pid, get_directory),
-    osiris_segment:init_reader(StartOffset, Dir, #{}).
+    Ctx = gen_batch_server:call(Pid, get_reader_context),
+    osiris_segment:init_reader(StartOffset, Ctx).
 
 register_data_listener(Pid, Offset) ->
     ok = gen_batch_server:cast(Pid, {register_data_listener, self(), Offset}).
+
+register_offset_listener(Pid, Offset) ->
+    ok = gen_batch_server:cast(Pid, {register_offset_listener, self(), Offset}).
 
 ack(LeaderPid, Offset) ->
     gen_batch_server:cast(LeaderPid, {ack, node(), Offset}).
@@ -72,8 +80,10 @@ init(#{name := Name,
         {error, eexist} -> ok;
         E -> throw(E)
     end,
+    Ref = atomics:new(1, []),
     Segment = osiris_segment:init(Dir, Config),
     {ok, #?MODULE{name = Name,
+                  offset_ref = Ref,
                   replicas = Replicas,
                   directory  = Dir,
                   segment = Segment}}.
@@ -88,7 +98,9 @@ handle_batch(Commands, #?MODULE{segment = Seg0} = State0) ->
     Seg = osiris_segment:write(Records, Seg0),
     State2 = update_pending(Next, Corrs, State1),
     %% write to log and index files
-    State = notify_listeners(State2#?MODULE{segment = Seg}),
+    State = notify_offset_listeners(
+              notify_data_listeners(
+                State2#?MODULE{segment = Seg})),
     {ok, Replies, State}.
 
 terminate(_, #?MODULE{}) ->
@@ -99,11 +111,12 @@ format_status(State) ->
 
 %% Internal
 
-
-update_pending(_Next, Corrs, #?MODULE{name = Name,
-                                      replicas = []} = State) ->
+update_pending(Next, Corrs, #?MODULE{name = Name,
+                                     offset_ref = Ref,
+                                     replicas = []} = State) ->
     _ = notify_writers(Name, Corrs),
-    State;
+    atomics:put(Ref, 1, Next),
+    State#?MODULE{committed_offset = Next};
 update_pending(Next, Corrs, #?MODULE{replicas = Replicas,
                                      pending_writes = Pending0} = State) ->
     case Corrs of
@@ -131,29 +144,39 @@ handle_commands([{cast, {register_data_listener, Pid, Offset}} | Rem],
                 #?MODULE{data_listeners = Listeners} = State0, Acc) ->
     State = State0#?MODULE{data_listeners = [{Pid, Offset} | Listeners]},
     handle_commands(Rem, State, Acc);
+handle_commands([{cast, {register_offset_listener, Pid, Offset}} | Rem],
+                #?MODULE{offset_listeners = Listeners} = State0, Acc) ->
+    State = State0#?MODULE{offset_listeners = [{Pid, Offset} | Listeners]},
+    handle_commands(Rem, State, Acc);
 handle_commands([{cast, {ack, ReplicaNode, Offset}} | Rem],
                 #?MODULE{name = Name,
+                         committed_offset = COffs0,
+                         offset_ref = Ref,
                          pending_writes = Pending0} = State0, Acc) ->
-    Pending = case maps:get(Offset, Pending0) of
-                  {[ReplicaNode], Corrs} ->
-                      _ = notify_writers(Name, Corrs),
-                      maps:remove(Offset, Pending0);
-                  {Reps, Corrs} ->
-                      Reps1 = lists:delete(ReplicaNode, Reps),
-                      maps:update(Offset,
-                                  {Reps1, Corrs},
-                                  Pending0)
-              end,
-    State = State0#?MODULE{pending_writes = Pending},
+    {COffs, Pending} = case maps:get(Offset, Pending0) of
+                           {[ReplicaNode], Corrs} ->
+                               _ = notify_writers(Name, Corrs),
+                               atomics:put(Ref, 1, Offset),
+                               {Offset, maps:remove(Offset, Pending0)};
+                           {Reps, Corrs} ->
+                               Reps1 = lists:delete(ReplicaNode, Reps),
+                               {COffs0, maps:update(Offset,
+                                                    {Reps1, Corrs},
+                                                    Pending0)}
+                       end,
+    State = State0#?MODULE{pending_writes = Pending,
+                           committed_offset = COffs},
     handle_commands(Rem, State, Acc);
-handle_commands([{call, From, get_directory} | Rem],
-                #?MODULE{directory = Dir} = State, {Records, Replies, Corrs}) ->
-    Reply = {reply, From, Dir},
+handle_commands([{call, From, get_reader_context} | Rem],
+                #?MODULE{offset_ref = Ref,
+                         directory = Dir} = State, {Records, Replies, Corrs}) ->
+    Reply = {reply, From, #{dir => Dir,
+                            offset_ref => Ref}},
     handle_commands(Rem, State, {Records, [Reply | Replies], Corrs}).
 
 
-notify_listeners(#?MODULE{segment = Seg,
-                          data_listeners = L0} = State) ->
+notify_data_listeners(#?MODULE{segment = Seg,
+                               data_listeners = L0} = State) ->
     LastOffset = osiris_segment:next_offset(Seg) - 1,
     {Notify, L} = lists:splitwith(fun ({_Pid, O}) ->
                                           O < LastOffset
@@ -162,3 +185,11 @@ notify_listeners(#?MODULE{segment = Seg,
      || {P, _} <- Notify],
     State#?MODULE{data_listeners = L}.
 
+notify_offset_listeners(#?MODULE{name = Name,
+                                 committed_offset = COffs,
+                                 offset_listeners = L0} = State) ->
+    {Notify, L} = lists:splitwith(fun ({_Pid, O}) ->
+                                          O =< COffs
+                                  end, L0),
+    [P ! {osiris_offset, Name, COffs} || {P, _} <- Notify],
+    State#?MODULE{offset_listeners = L}.

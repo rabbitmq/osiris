@@ -82,7 +82,7 @@ write_batch(Config) ->
 read_chunk_parsed(Config) ->
     S0 = osiris_segment:init(?config(dir, Config), #{}),
     _S1 = osiris_segment:write([<<"hi">>], S0),
-    R0 = osiris_segment:init_reader(0, ?config(dir, Config), #{}),
+    R0 = osiris_segment:init_reader(0, #{dir => ?config(dir, Config)}),
     ?assertMatch({[{0, <<"hi">>}], _},
                  osiris_segment:read_chunk_parsed(R0)),
     ok.
@@ -91,13 +91,13 @@ read_chunk_parsed_multiple_chunks(Config) ->
     S0 = osiris_segment:init(?config(dir, Config), #{}),
     S1 = osiris_segment:write([<<"hi">>, <<"hi-there">>], S0),
     _S2 = osiris_segment:write([<<"hi-again">>], S1),
-    R0 = osiris_segment:init_reader(0, ?config(dir, Config), #{}),
+    R0 = osiris_segment:init_reader(0, #{dir => ?config(dir, Config)}),
     {[{0, <<"hi">>}, {1, <<"hi-there">>}], R1} =
         osiris_segment:read_chunk_parsed(R0),
     ?assertMatch({[{2, <<"hi-again">>}], _},
                  osiris_segment:read_chunk_parsed(R1)),
     %% open another reader at a later index
-    R2 = osiris_segment:init_reader(2, ?config(dir, Config), #{}),
+    R2 = osiris_segment:init_reader(2, #{dir => ?config(dir, Config)}),
     ?assertMatch({[{2, <<"hi-again">>}], _},
                  osiris_segment:read_chunk_parsed(R2)),
     ok.
@@ -115,7 +115,7 @@ write_multi_segment(Config) ->
     ?assertEqual(2, length(Segs)),
 
     %% ensure all records can be read
-    R0 = osiris_segment:init_reader(0, ?config(dir, Config), #{}),
+    R0 = osiris_segment:init_reader(0, #{dir => ?config(dir, Config)}),
 
     R1 = lists:foldl(
                 fun (_, Acc0) ->

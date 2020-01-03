@@ -22,7 +22,9 @@ all_tests() ->
     [
      single_node_write,
      cluster_write,
-     read_validate
+     read_validate,
+     single_node_offset_listener,
+     cluster_offset_listener
     ].
 
 groups() ->
@@ -47,7 +49,8 @@ init_per_testcase(TestCase, Config) ->
     Dir = filename:join(PrivDir, TestCase),
     application:load(osiris),
     application:set_env(osiris, data_dir, Dir),
-    Apps = application:ensure_all_started(osiris),
+    {ok, Apps} = application:ensure_all_started(osiris),
+    file:make_dir(Dir),
     [{data_dir, Dir},
      {cluster_name, TestCase},
      {started_apps, Apps} | Config].
@@ -60,8 +63,7 @@ end_per_testcase(_TestCase, Config) ->
 %%% Test cases
 %%%===================================================================
 
-single_node_write(Config) ->
-    _PrivDir = ?config(priv_dir, Config),
+single_node_write(_Config) ->
     Name = atom_to_list(?FUNCTION_NAME),
     {ok, Leader, _Replicas} = osiris:start_cluster(Name, []),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
@@ -77,7 +79,7 @@ single_node_write(Config) ->
 cluster_write(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    [LeaderNode | Replicas] = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
+    [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
     {ok, Leader, _Replicas} = rpc:call(LeaderNode, osiris, start_cluster,
                                        [atom_to_list(Name), Replicas]),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
@@ -100,14 +102,55 @@ cluster_write(Config) ->
     after 2000 ->
               exit(read_data_ok_timeout)
     end,
+    [slave:stop(N) || N <- Nodes],
     ok.
 
+single_node_offset_listener(_Config) ->
+    Name = atom_to_list(?FUNCTION_NAME),
+    {ok, Leader, _Replicas} = osiris:start_cluster(Name, []),
+    Seg0 = osiris_writer:init_reader(Leader, 0),
+    osiris_writer:register_offset_listener(Leader, 0),
+    ok = osiris:write(Leader, 42, <<"mah-data">>),
+    receive
+        {osiris_offset, _Name, 0} ->
+            {[{0, <<"mah-data">>}], Seg} = osiris_segment:read_chunk_parsed(Seg0),
+            {end_of_stream, _} = osiris_segment:read_chunk_parsed(Seg),
+            ok
+    after 2000 ->
+              flush(),
+              exit(osiris_offset_timeout)
+    end,
+    ok.
+
+cluster_offset_listener(Config) ->
+    PrivDir = ?config(data_dir, Config),
+    Name = atom_to_list(?FUNCTION_NAME),
+    [_ | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
+    {ok, Leader, _Replicas} = osiris:start_cluster(Name, Replicas),
+    Seg0 = osiris_writer:init_reader(Leader, 0),
+    osiris_writer:register_offset_listener(Leader,
+                                           osiris_segment:next_offset(Seg0)),
+    ok = osiris:write(Leader, 42, <<"mah-data">>),
+    receive
+        {osiris_offset, _Name, 0} ->
+            {[{0, <<"mah-data">>}], Seg} = osiris_segment:read_chunk_parsed(Seg0),
+            slave:stop(hd(Replicas)),
+            ok = osiris:write(Leader, 43, <<"mah-data2">>),
+            timer:sleep(10),
+            {end_of_stream, _} = osiris_segment:read_chunk_parsed(Seg),
+            ok
+    after 2000 ->
+              flush(),
+              exit(osiris_offset_timeout)
+    end,
+    [slave:stop(N) || N <- Nodes],
+    ok.
 
 read_validate(Config) ->
-    PrivDir = ?config(priv_dir, Config),
+    PrivDir = ?config(data_dir, Config),
     Name = atom_to_list(?FUNCTION_NAME),
     Num = 100000,
-    [LeaderNode | Replicas] = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
+    [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
     {ok, Leader, _Replicas} = rpc:call(LeaderNode, osiris, start_cluster,
                                        [Name, Replicas]),
      timer:sleep(500),
@@ -116,6 +159,7 @@ read_validate(Config) ->
     {Time, _} = timer:tc(fun () -> write_n(Leader, Num, #{}) end),
     ct:pal("~b writes took ~wms", [Num, Time div 1000]),
 
+    [slave:stop(N) || N <- Nodes],
     ok.
 
 %% Utility

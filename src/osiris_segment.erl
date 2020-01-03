@@ -7,7 +7,7 @@
          next_offset/1,
          send_file/2,
 
-         init_reader/3,
+         init_reader/2,
          read_chunk_parsed/1,
          close/1,
 
@@ -50,6 +50,7 @@
 -record(?MODULE, {cfg :: #cfg{},
                   fd :: file:io_device(),
                   index_fd :: undefined | file:io_device(),
+                  offset_ref :: undefined | file:io_device(),
                   segment_size = 0 :: non_neg_integer(),
                   next_offset = 0 :: offset()}).
 
@@ -116,8 +117,8 @@ accept_chunk(Binary, State)
 next_offset(#?MODULE{next_offset = Next}) ->
     Next.
 
--spec init_reader(offset(), file:filename(), config()) -> state().
-init_reader(StartOffset, Dir, _Config) ->
+-spec init_reader(offset(), config()) -> state().
+init_reader(StartOffset, #{dir := Dir} = Config) ->
     %% find the appopriate segment and scan the index to find the
     %% postition of the next chunk to read
     SegFiles = lists:sort(filelib:wildcard(filename:join(Dir, "*.segment"))),
@@ -135,12 +136,14 @@ init_reader(StartOffset, Dir, _Config) ->
             IndexFile = filename:rootname(StartSegment) ++ ".index",
             {ok, Data} = file:read_file(IndexFile),
             FilePos = scan_index(Data, StartOffset),
+            Ref = maps:get(offset_ref, Config, undefined),
 
             %% scan the index to find nearest chunk offset to position
             %% the file cursor at
             {ok, FilePos} = file:position(Fd, FilePos),
             #?MODULE{cfg = #cfg{directory = Dir,
                                 mode = write},
+                     offset_ref = Ref,
                      next_offset = StartOffset,
                      fd = Fd};
         _ ->
@@ -150,33 +153,48 @@ init_reader(StartOffset, Dir, _Config) ->
 
 -spec read_chunk_parsed(state()) ->
     {ok, [record()], state()} |
-    {error, end_of_stream} |
+    {end_of_stream, state()} |
     {error, {invalid_chunk_header, term()}}.
 read_chunk_parsed(#?MODULE{cfg = #cfg{directory = Dir},
                            fd = Fd,
+                           offset_ref = Ref,
                            next_offset = Next} = State) ->
     %% reads the next chunk of entries, parsed
     %% NB: this may return records before the requested index,
     %% that is fine - the reading process can do the appropriate filtering
+    COffs = case Ref of
+                undefined -> undefined;
+                _ ->
+                    atomics:get(Ref, 1)
+            end,
     case file:read(Fd, 4 + 8 + 4 + 4 + 4) of
         {ok, <<"CHNK",
                Offs:64/unsigned,
                NumBlobs:32/unsigned,
                _Crc:32/integer,
-               DataSize:32/unsigned>>} ->
+               DataSize:32/unsigned>>}
+          when Ref == undefined orelse COffs >= Offs ->
             {ok, BlobData} = file:read(Fd, DataSize),
             %% parse blob data into records
             Records = parse_records(Offs, BlobData, []),
             {Records, State#?MODULE{next_offset = Offs + NumBlobs}};
+        {ok, _} ->
+            %% set the position back for the next read
+            {ok, _} = file:position(Fd, {cur, -24}),
+            {end_of_stream, State};
         eof ->
             ok = file:close(Fd),
             %% open next segment file and start there if it exists
             SegFile = make_file_name(Next, "segment"),
             %% TODO check for error and return end_of_stream if the file
             %% does not exist
-            {ok, Fd2} = file:open(filename:join(Dir, SegFile),
-                                  [raw, binary, read]),
-            read_chunk_parsed(State#?MODULE{fd = Fd2});
+            case file:open(filename:join(Dir, SegFile),
+                           [raw, binary, read]) of
+                {ok, Fd2} ->
+                    read_chunk_parsed(State#?MODULE{fd = Fd2});
+                {error, enoent} ->
+                    {end_of_stream, State}
+            end;
         Invalid ->
             {error, {invalid_chunk_header, Invalid}}
     end.
