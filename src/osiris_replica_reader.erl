@@ -54,7 +54,8 @@ start_link(Host, Port, LeaderPid, StartOffset) ->
 init([Host, Port, LeaderPid, StartOffset] = Args) ->
     Segment = osiris_writer:init_reader(LeaderPid, StartOffset),
     logger:info("starting replica reader with ~w", [Args]),
-    {ok, Sock} = gen_tcp:connect(Host, Port, [binary, {packet, 0}]),
+    {ok, Sock} = gen_tcp:connect(Host, Port, [binary, {packet, 0},
+                                              {nodelay, true}]),
     %% register data listener with osiris_proc
     ok = osiris_writer:register_data_listener(LeaderPid, StartOffset -1),
     {ok, #state{segment = Segment,

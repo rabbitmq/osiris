@@ -61,7 +61,7 @@ write(Pid, Sender, Corr, Data) ->
 
 -spec init(map()) -> {ok, state()}.
 init(#{name := Name,
-       replica_nodes := Replicas}) ->
+       replica_nodes := Replicas} = Config) ->
     {ok, DataDir} = application:get_env(data_dir),
     Dir = filename:join(DataDir, Name),
     process_flag(trap_exit, true),
@@ -72,7 +72,7 @@ init(#{name := Name,
         {error, eexist} -> ok;
         E -> throw(E)
     end,
-    Segment = osiris_segment:init(Dir, #{}),
+    Segment = osiris_segment:init(Dir, Config),
     {ok, #?MODULE{name = Name,
                   replicas = Replicas,
                   directory  = Dir,
@@ -136,7 +136,6 @@ handle_commands([{cast, {ack, ReplicaNode, Offset}} | Rem],
                          pending_writes = Pending0} = State0, Acc) ->
     Pending = case maps:get(Offset, Pending0) of
                   {[ReplicaNode], Corrs} ->
-                      ct:pal("last ack ~w", [Offset]),
                       _ = notify_writers(Name, Corrs),
                       maps:remove(Offset, Pending0);
                   {Reps, Corrs} ->
@@ -145,7 +144,6 @@ handle_commands([{cast, {ack, ReplicaNode, Offset}} | Rem],
                                   {Reps1, Corrs},
                                   Pending0)
               end,
-    ct:pal("ack ~w ~w ~w ~w", [self(), ReplicaNode, Offset, Pending]),
     State = State0#?MODULE{pending_writes = Pending},
     handle_commands(Rem, State, Acc);
 handle_commands([{call, From, get_directory} | Rem],

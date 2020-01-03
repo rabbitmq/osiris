@@ -27,7 +27,10 @@
               socket :: undefined | gen_tcp:socket()
              }).
 
+-type parse_state() :: undefined | binary() | {iolist(), non_neg_integer()}.
+
 -record(?MODULE, {cfg :: #cfg{},
+                  parse_state :: parse_state(),
                   segment :: osiris_segment:state()}).
 
 -opaque state() :: #?MODULE{}.
@@ -190,12 +193,18 @@ handle_info({socket, Socket}, #?MODULE{cfg = Cfg} = State) ->
 handle_info({tcp, Socket, Bin},
             #?MODULE{cfg = #cfg{socket = Socket,
                                 leader_pid = LeaderPid},
+                     parse_state = ParseState0,
                      segment = Segment0} = State) ->
     %% validate chunk
-    FirstOffset = parse_chunk(Bin),
-    Segment = osiris_segment:accept_chunk(Bin, Segment0),
-    ok = osiris_writer:ack(LeaderPid, FirstOffset),
-    {noreply, State#?MODULE{segment = Segment}};
+    {ParseState, OffsetChunks} = parse_chunk(Bin, ParseState0, []),
+    Segment = lists:foldl(
+                fun({FirstOffset, B}, Acc0) ->
+                        Acc = osiris_segment:accept_chunk(B, Acc0),
+                        ok = osiris_writer:ack(LeaderPid, FirstOffset),
+                        Acc
+                end, Segment0, OffsetChunks),
+    {noreply, State#?MODULE{segment = Segment,
+                            parse_state = ParseState}};
 handle_info({tcp_closed, Socket}, #?MODULE{cfg = #cfg{socket = Socket}} = State) ->
     ct:pal("Socket closed ~n", []),
     {noreply, State};
@@ -233,11 +242,117 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
+parse_chunk(<<>>, ParseState, Acc) ->
+    {ParseState, lists:reverse(Acc)};
+parse_chunk(<< "CHNK",
+               FirstOffset:64/unsigned,
+               _NumRecords:32/unsigned,
+               _Crc:32/integer,
+               Size:32/unsigned,
+               _Record:Size/binary,
+               Rem/binary>> = All, undefined, Acc) ->
+    % true = byte_size(Chunk) == (Size + 24),
+    TotalSize = Size + 24,
+    <<Chunk:TotalSize/binary, _/binary>> = All,
+    parse_chunk(Rem, undefined, [{FirstOffset, Chunk} | Acc]);
+parse_chunk(Bin, undefined, Acc)
+  when byte_size(Bin) =< 24 ->
+    {Bin, lists:reverse(Acc)};
 parse_chunk(<<"CHNK",
               FirstOffset:64/unsigned,
               _NumRecords:32/unsigned,
               _Crc:32/integer,
               Size:32/unsigned,
-              _Record/binary>> = Chunk) ->
-    true = byte_size(Chunk) == (Size + 24),
-    FirstOffset.
+              Partial/binary>> = All, undefined, Acc) ->
+    {{FirstOffset, [All], Size - byte_size(Partial)},
+     Acc};
+parse_chunk(Bin, PartialHeaderBin, Acc)
+  when is_binary( PartialHeaderBin) ->
+    %% TODO: slight inneficiency but partial headers should be relatively
+    %% rare
+    parse_chunk(<<PartialHeaderBin/binary, Bin/binary>>, undefined, Acc);
+parse_chunk(Bin, {FirstOffset, IOData, RemSize}, Acc)
+  when byte_size(Bin) >= RemSize ->
+    <<Final:RemSize/binary, Rem/binary>> = Bin,
+    parse_chunk(Rem, undefined,
+                [{FirstOffset, lists:reverse([Final | IOData])} | Acc]);
+parse_chunk(Bin, {FirstOffset, IOData, RemSize}, Acc) ->
+    {{FirstOffset, [Bin | IOData], RemSize - byte_size(Bin)}, Acc}.
+
+-ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
+
+parse_chunk_test() ->
+    Bin = <<67,72,78,75,0,0,0,0,0,0,0,147,0,0,0,33,0,0,0,0,
+            0,0,2,148,0,0,0,8,0,0,0,0,0,0,0,179,0,0,0,0,0,0,
+            3,85,0,0,0,8,0,0,0,0,0,0,0,178,0,0,0,0,0,0,3,84,
+            0,0,0,8,0,0,0,0,0,0,0,177,0,0,0,0,0,0,3,83,0,0,
+            0,8,0,0,0,0,0,0,0,176,0,0,0,0,0,0,3,82,0,0,0,8,
+            0,0,0,0,0,0,0,175,0,0,0,0,0,0,3,81,0,0,0,8,0,0,
+            0,0,0,0,0,174,0,0,0,0,0,0,3,80,0,0,0,8,0,0,0,0,
+            0,0,0,173,0,0,0,0,0,0,3,79,0,0,0,8,0,0,0,0,0,0,
+            0,172,0,0,0,0,0,0,3,78,0,0,0,8,0,0,0,0,0,0,0,
+            171,0,0,0,0,0,0,3,77,0,0,0,8,0,0,0,0,0,0,0,170,
+            0,0,0,0,0,0,3,76,0,0,0,8,0,0,0,0,0,0,0,169,0,0,
+            0,0,0,0,3,75,0,0,0,8,0,0,0,0,0,0,0,168,0,0,0,0,
+            0,0,3,74,0,0,0,8,0,0,0,0,0,0,0,167,0,0,0,0,0,0,
+            3,73,0,0,0,8,0,0,0,0,0,0,0,166,0,0,0,0,0,0,3,72,
+            0,0,0,8,0,0,0,0,0,0,0,165,0,0,0,0,0,0,3,71,0,0,
+            0,8,0,0,0,0,0,0,0,164,0,0,0,0,0,0,3,70,0,0,0,8,
+            0,0,0,0,0,0,0,163,0,0,0,0,0,0,3,69,0,0,0,8,0,0,
+            0,0,0,0,0,162,0,0,0,0,0,0,3,68,0,0,0,8,0,0,0,0,
+            0,0,0,161,0,0,0,0,0,0,3,67,0,0,0,8,0,0,0,0,0,0,
+            0,160,0,0,0,0,0,0,3,66,0,0,0,8,0,0,0,0,0,0,0,
+            159,0,0,0,0,0,0,3,65,0,0,0,8,0,0,0,0,0,0,0,158,
+            0,0,0,0,0,0,3,64,0,0,0,8,0,0,0,0,0,0,0,157,0,0,
+            0,0,0,0,3,63,0,0,0,8,0,0,0,0,0,0,0,156,0,0,0,0,
+            0,0,3,62,0,0,0,8,0,0,0,0,0,0,0,155,0,0,0,0,0,0,
+            3,61,0,0,0,8,0,0,0,0,0,0,0,154,0,0,0,0,0,0,3,60,
+            0,0,0,8,0,0,0,0,0,0,0,153,0,0,0,0,0,0,3,59,0,0,
+            0,8,0,0,0,0,0,0,0,152,0,0,0,0,0,0,3,58,0,0,0,8,
+            0,0,0,0,0,0,0,151,0,0,0,0,0,0,3,57,0,0,0,8,0,0,
+            0,0,0,0,0,150,0,0,0,0,0,0,3,56,0,0,0,8,0,0,0,0,
+            0,0,0,149,0,0,0,0,0,0,3,55,0,0,0,8,0,0,0,0,0,0,
+            0,148,0,0,0,0,0,0,3,54,0,0,0,8,0,0,0,0,0,0,0,
+            147,0,0,0,0,0,0,3,53,67,72,78,75,0,0,0,0,0,0,0,
+            180,0,0,0,38,0,0,0,0,0,0,2,248,0,0,0,8,0,0,0,0,
+            0,0,0,217,0,0,0,0,0,0,3,52,0,0,0,8,0,0,0,0,0,0,
+            0,216,0,0,0,0,0,0,3,51,0,0,0,8,0,0,0,0,0,0,0,
+            215,0,0,0,0,0,0,3,50,0,0,0,8,0,0,0,0,0,0,0,214,
+            0,0,0,0,0,0,3,49,0,0,0,8,0,0,0,0,0,0,0,213,0,0,
+            0,0,0,0,3,48,0,0,0,8,0,0,0,0,0,0,0,212,0,0,0,0,
+            0,0,3,47,0,0,0,8,0,0,0,0,0,0,0,211,0,0,0,0,0,0,
+            3,46,0,0,0,8,0,0,0,0,0,0,0,210,0,0,0,0,0,0,3,45,
+            0,0,0,8,0,0,0,0,0,0,0,209,0,0,0,0,0,0,3,44,0,0,
+            0,8,0,0,0,0,0,0,0,208,0,0,0,0,0,0,3,43,0,0,0,8,
+            0,0,0,0,0,0,0,207,0,0,0,0,0,0,3,42,0,0,0,8,0,0,
+            0,0,0,0,0,206,0,0,0,0,0,0,3,41,0,0,0,8,0,0,0,0,
+            0,0,0,205,0,0,0,0,0,0,3,40,0,0,0,8,0,0,0,0,0,0,
+            0,204,0,0,0,0,0,0,3,39,0,0,0,8,0,0,0,0,0,0,0,
+            203,0,0,0,0,0,0,3,38,0,0,0,8,0,0,0,0,0,0,0,202,
+            0,0,0,0,0,0,3,37,0,0,0,8,0,0,0,0>>,
+
+    {P, _} = parse_chunk(Bin, undefined, []),
+    Next = <<0,0,0,201,0,0,0,0,0,0,3,36,0,0,0,8,0,0,0,0,0,0,0,200,
+             0,0,0,0,0,0,3,35,0,0,0,8,0,0,0,0,0,0,0,199,0,0,0,0,0,
+             0,3,34,0,0,0,8,0,0,0,0,0,0,0,198,0,0,0,0,0,0,3,33,0,
+             0,0,8,0,0,0,0,0,0,0,197,0,0,0,0,0,0,3,32,0,0,0,8,0,0,
+             0,0,0,0,0,196,0,0,0,0,0,0,3,31,0,0,0,8,0,0,0,0,0,0,0,
+             195,0,0,0,0,0,0,3,30,0,0,0,8,0,0,0,0,0,0,0,194,0,0,0,
+             0,0,0,3,29,0,0,0,8,0,0,0,0,0,0,0,193,0,0,0,0,0,0,3,
+             28,0,0,0,8,0,0,0,0,0,0,0,192,0,0,0,0,0,0,3,27,0,0,0,
+             8,0,0,0,0,0,0,0,191,0,0,0,0,0,0,3,26,0,0,0,8,0,0,0,0,
+             0,0,0,190,0,0,0,0,0,0,3,25,0,0,0,8,0,0,0,0,0,0,0,189,
+             0,0,0,0,0,0,3,24,0,0,0,8,0,0,0,0,0,0,0,188,0,0,0,0,0,
+             0,3,23,0,0,0,8,0,0,0,0,0,0,0,187,0,0,0,0,0,0,3,22,0,
+             0,0,8,0,0,0,0,0,0,0,186,0,0,0,0,0,0,3,21,0,0,0,8,0,0,
+             0,0,0,0,0,185,0,0,0,0,0,0,3,20,0,0,0,8,0,0,0,0,0,0,0,
+             184,0,0,0,0,0,0,3,19,0,0,0,8,0,0,0,0,0,0,0,183,0,0,0,
+             0,0,0,3,18,0,0,0,8,0,0,0,0,0,0,0,182,0,0,0,0,0,0,3,
+             17,0,0,0,8,0,0,0,0,0,0,0,181,0,0,0,0,0,0,3,16,0,0,0,
+             8,0,0,0,0,0,0,0,180,0,0,0,0,0,0,3,15>>,
+    Res = parse_chunk(Next, P, []),
+    ?debugFmt("~p", [Res]),
+    ok.
+
+-endif.

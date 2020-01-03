@@ -102,12 +102,15 @@ write(Blobs, #?MODULE{cfg = #cfg{},
     NextOffset = Next + length(Blobs),
     write_chunk(Chunk, NextOffset, State).
 
--spec accept_chunk(binary(), state()) -> state().
-accept_chunk(<<"CHNK", Next:64/unsigned,
-               Num:32/unsigned, _/binary>> = Chunk,
+-spec accept_chunk(iodata(), state()) -> state().
+accept_chunk([<<"CHNK", Next:64/unsigned,
+                Num:32/unsigned, _/binary>> | _] = Chunk,
              State) ->
     NextOffset = Next + Num,
-    write_chunk(Chunk, NextOffset, State).
+    write_chunk(Chunk, NextOffset, State);
+accept_chunk(Binary, State)
+  when is_binary(Binary) ->
+    accept_chunk([Binary], State).
 
 -spec next_offset(state()) -> offset().
 next_offset(#?MODULE{next_offset = Next}) ->
@@ -193,15 +196,15 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                DataSize:32/unsigned>>} ->
             %% read header
             {ok, _} = file:sendfile(Fd, Sock, Pos, DataSize + 24, []),
-            {ok, _} = file:position(Fd, DataSize + 24),
+            {ok, _} = file:position(Fd, Pos + DataSize + 24),
             {ok, State#?MODULE{next_offset = Offs + NumRecords}};
         eof ->
-            ok = file:close(Fd),
             %% open next segment file and start there if it exists
             SegFile = make_file_name(Next, "segment"),
             case file:open(filename:join(Dir, SegFile),
                            [raw, binary, read]) of
                 {ok, Fd2} ->
+                    ok = file:close(Fd),
                     send_file(Sock, State#?MODULE{fd = Fd2});
                 {error, enoent} ->
                     {end_of_stream, State}
