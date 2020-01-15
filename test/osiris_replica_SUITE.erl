@@ -20,6 +20,7 @@ all() ->
 
 all_tests() ->
     [
+        dummy
     ].
 
 groups() ->
@@ -51,3 +52,5 @@ end_per_testcase(_TestCase, Config) ->
 %%% Test cases
 %%%===================================================================
 
+dummy(_Config) ->
+    ok.
