@@ -63,9 +63,10 @@ end_per_testcase(_TestCase, Config) ->
 %%% Test cases
 %%%===================================================================
 
-single_node_write(_Config) ->
+single_node_write(Config) ->
     Name = atom_to_list(?FUNCTION_NAME),
-    {ok, Leader, _Replicas} = osiris:start_cluster(Name, []),
+    {ok, Leader, _Replicas} = osiris:start_cluster(Name, [],
+                                                   #{dir => ?config(data_dir, Config)}),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
     receive
         {osiris_written, _Name, [42]} ->
@@ -80,8 +81,9 @@ cluster_write(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
     [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
+    OConf = #{dir => ?config(data_dir, Config)},
     {ok, Leader, _Replicas} = rpc:call(LeaderNode, osiris, start_cluster,
-                                       [atom_to_list(Name), Replicas]),
+                                       [atom_to_list(Name), Replicas, OConf ]),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
     receive
         {osiris_written, _, [42]} ->
@@ -105,9 +107,10 @@ cluster_write(Config) ->
     [slave:stop(N) || N <- Nodes],
     ok.
 
-single_node_offset_listener(_Config) ->
+single_node_offset_listener(Config) ->
     Name = atom_to_list(?FUNCTION_NAME),
-    {ok, Leader, _Replicas} = osiris:start_cluster(Name, []),
+    OConf = #{dir => ?config(data_dir, Config)},
+    {ok, Leader, _Replicas} = osiris:start_cluster(Name, [], OConf),
     Seg0 = osiris_writer:init_reader(Leader, 0),
     osiris_writer:register_offset_listener(Leader, 0),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
@@ -150,10 +153,11 @@ read_validate(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = atom_to_list(?FUNCTION_NAME),
     Num = 100000,
+    OConf = #{dir => ?config(data_dir, Config)},
     [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
     {ok, Leader, _Replicas} = rpc:call(LeaderNode, osiris, start_cluster,
                                        [Name, Replicas]),
-     timer:sleep(500),
+    timer:sleep(500),
     % {ok, Leader, _Replicas} = osiris:start_cluster(Name, [],
     %                                                #{max_segment_size => 320000}),
     {Time, _} = timer:tc(fun () -> write_n(Leader, Num, #{}) end),

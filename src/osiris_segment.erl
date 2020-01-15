@@ -117,8 +117,14 @@ accept_chunk(Binary, State)
 next_offset(#?MODULE{next_offset = Next}) ->
     Next.
 
--spec init_reader(offset(), config()) -> state().
-init_reader(StartOffset, #{dir := Dir} = Config) ->
+-spec init_reader(undefined | offset(), config()) -> state().
+init_reader(StartOffset0, #{dir := Dir} = Config) ->
+    StartOffset = case StartOffset0 of
+                      undefined ->
+                          maps:get(committed_offset, Config, 0);
+                      _ ->
+                          StartOffset0
+                  end,
     %% find the appopriate segment and scan the index to find the
     %% postition of the next chunk to read
     SegFiles = lists:sort(filelib:wildcard(filename:join(Dir, "*.segment"))),
@@ -147,7 +153,7 @@ init_reader(StartOffset, #{dir := Dir} = Config) ->
                      next_offset = StartOffset,
                      fd = Fd};
         _ ->
-            exit(no_segment)
+            exit({no_segment, Dir})
     end.
 
 
@@ -183,7 +189,6 @@ read_chunk_parsed(#?MODULE{cfg = #cfg{directory = Dir},
             {ok, _} = file:position(Fd, {cur, -24}),
             {end_of_stream, State};
         eof ->
-            ok = file:close(Fd),
             %% open next segment file and start there if it exists
             SegFile = make_file_name(Next, "segment"),
             %% TODO check for error and return end_of_stream if the file
@@ -191,6 +196,7 @@ read_chunk_parsed(#?MODULE{cfg = #cfg{directory = Dir},
             case file:open(filename:join(Dir, SegFile),
                            [raw, binary, read]) of
                 {ok, Fd2} ->
+                    ok = file:close(Fd),
                     read_chunk_parsed(State#?MODULE{fd = Fd2});
                 {error, enoent} ->
                     {end_of_stream, State}
@@ -213,8 +219,9 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                _Crc:32/integer,
                DataSize:32/unsigned>>} ->
             %% read header
-            {ok, _} = file:sendfile(Fd, Sock, Pos, DataSize + 24, []),
-            {ok, _} = file:position(Fd, Pos + DataSize + 24),
+            ToSend = DataSize + 24,
+            ok = sendfile(Fd, Sock, Pos, ToSend),
+            {ok, _} = file:position(Fd, Pos + ToSend),
             {ok, State#?MODULE{next_offset = Offs + NumRecords}};
         eof ->
             %% open next segment file and start there if it exists
@@ -323,6 +330,20 @@ write_chunk(Chunk, NextOffset,
 
 make_file_name(N, Suff) ->
     lists:flatten(io_lib:format("~20..0B.~s", [N, Suff])).
+
+
+sendfile(_Fd, _Sock, _Pos, 0) ->
+    ok;
+sendfile(Fd, Sock, Pos, ToSend) ->
+    case file:sendfile(Fd, Sock, Pos, ToSend, []) of
+        {ok, 0} ->
+            error_logger:info_msg("sendfile sent 0 out of ~b bytes",
+                                  [ToSend]),
+            timer:sleep(5),
+            sendfile(Fd, Sock, Pos, ToSend);
+        {ok, BytesSent} ->
+            sendfile(Fd, Sock, Pos + BytesSent, ToSend - BytesSent)
+    end.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

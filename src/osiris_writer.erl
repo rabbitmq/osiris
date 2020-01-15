@@ -21,8 +21,9 @@
 %% manages incoming max index
 
 -record(?MODULE, {name :: string(),
+                  reference :: term(),
                   offset_ref :: atomics:atomics_ref(),
-                  replicas :: [node()],
+                  replicas = [] :: [node()],
                   directory :: file:filename(),
                   segment = osiris_segment:state(),
                   pending_writes = #{} :: #{osiris_segment:offset() =>
@@ -70,8 +71,13 @@ write(Pid, Sender, Corr, Data) ->
 -spec init(map()) -> {ok, state()}.
 init(#{name := Name,
        replica_nodes := Replicas} = Config) ->
-    {ok, DataDir} = application:get_env(data_dir),
-    Dir = filename:join(DataDir, Name),
+    Dir0 = case Config of
+              #{dir := D} -> D;
+              _ ->
+                  {ok, D} = application:get_env(data_dir),
+                  D
+          end,
+    Dir = filename:join(Dir0, Name),
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
     filelib:ensure_dir(Dir),
@@ -80,10 +86,13 @@ init(#{name := Name,
         {error, eexist} -> ok;
         E -> throw(E)
     end,
-    Ref = atomics:new(1, []),
+    ORef = atomics:new(1, []),
     Segment = osiris_segment:init(Dir, Config),
     {ok, #?MODULE{name = Name,
-                  offset_ref = Ref,
+                  %% reference used for notification
+                  %% if not provided use the name
+                  reference = maps:get(reference, Config, Name),
+                  offset_ref = ORef,
                   replicas = Replicas,
                   directory  = Dir,
                   segment = Segment}}.
@@ -94,13 +103,17 @@ handle_batch(Commands, #?MODULE{segment = Seg0} = State0) ->
     {Records, Replies, Corrs, State1} = handle_commands(Commands, State0,
                                                         {[], [], #{}}),
     %% TODO handle empty replicas
-    Next = osiris_segment:next_offset(Seg0),
-    Seg = osiris_segment:write(Records, Seg0),
-    State2 = update_pending(Next, Corrs, State1),
+    State2 = case Records of
+                 [] ->
+                     State1;
+                 _ ->
+                     Next = osiris_segment:next_offset(Seg0),
+                     Seg = osiris_segment:write(Records, Seg0),
+                     update_pending(Next, Corrs, State1#?MODULE{segment = Seg})
+             end,
     %% write to log and index files
     State = notify_offset_listeners(
-              notify_data_listeners(
-                State2#?MODULE{segment = Seg})),
+              notify_data_listeners(State2)),
     {ok, Replies, State}.
 
 terminate(_, #?MODULE{}) ->
@@ -111,11 +124,11 @@ format_status(State) ->
 
 %% Internal
 
-update_pending(Next, Corrs, #?MODULE{name = Name,
-                                     offset_ref = Ref,
+update_pending(Next, Corrs, #?MODULE{reference = Ref,
+                                     offset_ref = OffsRef,
                                      replicas = []} = State) ->
-    _ = notify_writers(Name, Corrs),
-    atomics:put(Ref, 1, Next),
+    _ = notify_writers(Ref, Corrs),
+    atomics:put(OffsRef, 1, Next),
     State#?MODULE{committed_offset = Next};
 update_pending(Next, Corrs, #?MODULE{replicas = Replicas,
                                      pending_writes = Pending0} = State) ->
@@ -149,14 +162,14 @@ handle_commands([{cast, {register_offset_listener, Pid, Offset}} | Rem],
     State = State0#?MODULE{offset_listeners = [{Pid, Offset} | Listeners]},
     handle_commands(Rem, State, Acc);
 handle_commands([{cast, {ack, ReplicaNode, Offset}} | Rem],
-                #?MODULE{name = Name,
+                #?MODULE{reference = Ref,
                          committed_offset = COffs0,
-                         offset_ref = Ref,
+                         offset_ref = ORef,
                          pending_writes = Pending0} = State0, Acc) ->
     {COffs, Pending} = case maps:get(Offset, Pending0) of
                            {[ReplicaNode], Corrs} ->
-                               _ = notify_writers(Name, Corrs),
-                               atomics:put(Ref, 1, Offset),
+                               _ = notify_writers(Ref, Corrs),
+                               atomics:put(ORef, 1, Offset),
                                {Offset, maps:remove(Offset, Pending0)};
                            {Reps, Corrs} ->
                                Reps1 = lists:delete(ReplicaNode, Reps),
@@ -168,11 +181,16 @@ handle_commands([{cast, {ack, ReplicaNode, Offset}} | Rem],
                            committed_offset = COffs},
     handle_commands(Rem, State, Acc);
 handle_commands([{call, From, get_reader_context} | Rem],
-                #?MODULE{offset_ref = Ref,
+                #?MODULE{offset_ref = ORef,
+                         committed_offset = COffs,
                          directory = Dir} = State, {Records, Replies, Corrs}) ->
     Reply = {reply, From, #{dir => Dir,
-                            offset_ref => Ref}},
-    handle_commands(Rem, State, {Records, [Reply | Replies], Corrs}).
+                            committed_offset => max(0, COffs),
+                            offset_ref => ORef}},
+    handle_commands(Rem, State, {Records, [Reply | Replies], Corrs});
+handle_commands([_Unk | Rem], State, Acc) ->
+    error_logger:info_msg("osiris_writer unknown command ~w", [_Unk]),
+    handle_commands(Rem, State, Acc).
 
 
 notify_data_listeners(#?MODULE{segment = Seg,
@@ -185,11 +203,11 @@ notify_data_listeners(#?MODULE{segment = Seg,
      || {P, _} <- Notify],
     State#?MODULE{data_listeners = L}.
 
-notify_offset_listeners(#?MODULE{name = Name,
+notify_offset_listeners(#?MODULE{reference = Ref,
                                  committed_offset = COffs,
                                  offset_listeners = L0} = State) ->
     {Notify, L} = lists:splitwith(fun ({_Pid, O}) ->
                                           O =< COffs
                                   end, L0),
-    [P ! {osiris_offset, Name, COffs} || {P, _} <- Notify],
+    [P ! {osiris_offset, Ref, COffs} || {P, _} <- Notify],
     State#?MODULE{offset_listeners = L}.
