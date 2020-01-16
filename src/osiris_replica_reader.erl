@@ -53,9 +53,12 @@ start_link(Host, Port, LeaderPid, StartOffset) ->
 %%--------------------------------------------------------------------
 init([Host, Port, LeaderPid, StartOffset] = Args) ->
     Segment = osiris_writer:init_reader(LeaderPid, StartOffset),
-    logger:info("starting replica reader with ~w", [Args]),
+    error_logger:info_msg("starting replica reader with ~w~n", [Args]),
+    SndBuf = 146988 * 10,
     {ok, Sock} = gen_tcp:connect(Host, Port, [binary, {packet, 0},
-                                              {nodelay, true}]),
+                                              {nodelay, true},
+                                              {sndbuf, SndBuf}]),
+    error_logger:info_msg("gen tcp opts snd buf~p", [inet:getopts(Sock, [sndbuf])]),
     %% register data listener with osiris_proc
     ok = osiris_writer:register_data_listener(LeaderPid, StartOffset -1),
     {ok, #state{segment = Segment,

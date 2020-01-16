@@ -186,6 +186,7 @@ read_chunk_parsed(#?MODULE{cfg = #cfg{directory = Dir},
             {Records, State#?MODULE{next_offset = Offs + NumBlobs}};
         {ok, _} ->
             %% set the position back for the next read
+            % error_logger:info_msg("osiris_segment end coff~w", [COffs]),
             {ok, _} = file:position(Fd, {cur, -24}),
             {end_of_stream, State};
         eof ->
@@ -337,9 +338,10 @@ sendfile(_Fd, _Sock, _Pos, 0) ->
 sendfile(Fd, Sock, Pos, ToSend) ->
     case file:sendfile(Fd, Sock, Pos, ToSend, []) of
         {ok, 0} ->
-            error_logger:info_msg("sendfile sent 0 out of ~b bytes",
-                                  [ToSend]),
-            timer:sleep(5),
+            % error_logger:info_msg("sendfile sent 0 out of ~b bytes~n",
+            %                       [ToSend]),
+            % timer:sleep(1),
+            % erlang:yield(),
             sendfile(Fd, Sock, Pos, ToSend);
         {ok, BytesSent} ->
             sendfile(Fd, Sock, Pos + BytesSent, ToSend - BytesSent)

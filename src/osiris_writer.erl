@@ -205,9 +205,15 @@ notify_data_listeners(#?MODULE{segment = Seg,
 
 notify_offset_listeners(#?MODULE{reference = Ref,
                                  committed_offset = COffs,
+                                 segment = Seg,
                                  offset_listeners = L0} = State) ->
     {Notify, L} = lists:splitwith(fun ({_Pid, O}) ->
                                           O =< COffs
                                   end, L0),
-    [P ! {osiris_offset, Ref, COffs} || {P, _} <- Notify],
+    [begin
+         Next = osiris_segment:next_offset(Seg),
+         error_logger:info_msg("osiris_writer offset listner ~w CO: ~w Next ~w LO: ~w",
+                               [P, COffs, Next, O]),
+         P ! {osiris_offset, Ref, COffs}
+     end || {P, O} <- Notify],
     State#?MODULE{offset_listeners = L}.

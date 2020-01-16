@@ -22,6 +22,7 @@ all_tests() ->
     [
      single_node_write,
      cluster_write,
+     read_validate_single_node,
      read_validate,
      single_node_offset_listener,
      cluster_offset_listener
@@ -149,18 +150,42 @@ cluster_offset_listener(Config) ->
     [slave:stop(N) || N <- Nodes],
     ok.
 
+read_validate_single_node(Config) ->
+    _PrivDir = ?config(data_dir, Config),
+    Name = atom_to_list(?FUNCTION_NAME),
+    Num = 1000000,
+    OConf = #{dir => ?config(data_dir, Config)},
+    {ok, Leader, []} = osiris:start_cluster(Name, [], OConf),
+    timer:sleep(500),
+    write_n(Leader, Num, #{}),
+    Seg0 = osiris_writer:init_reader(Leader, 0),
+
+    validate_read(Num, Seg0),
+    ok.
+
+
 read_validate(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = atom_to_list(?FUNCTION_NAME),
-    Num = 100000,
+    Num = 2000000,
     OConf = #{dir => ?config(data_dir, Config)},
-    [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
-    {ok, Leader, _Replicas} = rpc:call(LeaderNode, osiris, start_cluster,
-                                       [Name, Replicas]),
+    Replicas = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2]],
+    {ok, Leader, [_,_]} = osiris:start_cluster(Name, Replicas, OConf),
     timer:sleep(500),
-    % {ok, Leader, _Replicas} = osiris:start_cluster(Name, [],
-    %                                                #{max_segment_size => 320000}),
-    {Time, _} = timer:tc(fun () -> write_n(Leader, Num, #{}) end),
+    {Time, _} = timer:tc(fun () ->
+                                 Self = self(),
+                                 spawn(fun () ->
+                                               write_n(Leader, Num div 2, #{}),
+                                               Self ! done
+                                       end),
+                                 write_n(Leader, Num div 2, #{}),
+                                 receive
+                                     done ->
+                                         ok
+                                 after 1000 * 60 ->
+                                           exit(blah)
+                                 end
+                         end),
     ct:pal("~b writes took ~wms", [Num, Time div 1000]),
 
     [slave:stop(N) || N <- Nodes],
@@ -168,13 +193,16 @@ read_validate(Config) ->
 
 %% Utility
 
-write_n(_Pid, 0, Written) ->
+write_n(Pid, N, Written) ->
+    write_n(Pid, N, 0, Written).
+
+write_n(_Pid, N, N, Written) ->
     %% wait for all written events;
     wait_for_written(Written),
     ok;
-write_n(Pid, N, Written) ->
-    ok = osiris:write(Pid, N, <<N:64/integer>>),
-    write_n(Pid, N - 1, Written#{N => ok}).
+write_n(Pid, N, Next, Written) ->
+    ok = osiris:write(Pid, Next, <<Next:64/integer>>),
+    write_n(Pid, N, Next + 1, Written#{Next => ok}).
 
 wait_for_written(Written0) ->
     receive
@@ -186,10 +214,22 @@ wait_for_written(Written0) ->
                 _ ->
                     wait_for_written(Written)
             end
-    after 2000 ->
+    after 1000 * 60 ->
               flush(),
               exit(osiris_written_timeout)
     end.
+
+
+validate_read(N, Seg) ->
+    validate_read(N, 0, Seg).
+
+validate_read(N, N, Seg0) ->
+    {end_of_stream, _Seg} = osiris_segment:read_chunk_parsed(Seg0),
+    ok;
+validate_read(Max, Next, Seg0) ->
+    {[{_Offs, <<N:64/integer>>} | _] = Recs, Seg} = osiris_segment:read_chunk_parsed(Seg0),
+    ?assertEqual(Next, N),
+    validate_read(Max, Next + length(Recs), Seg).
 
 start_slave(N, PrivDir) ->
     Dir0 = filename:join(PrivDir, N),

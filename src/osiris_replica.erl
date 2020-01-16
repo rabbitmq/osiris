@@ -135,7 +135,13 @@ init(#{name := Name,
 open_tcp_port(M, M) ->
     throw({error, all_busy});
 open_tcp_port(Min, Max) ->
-    case gen_tcp:listen(Min, [binary, {packet, raw}, {active, true}]) of
+    RcvBuf = 408300 * 5,
+    case gen_tcp:listen(Min, [binary,
+                              {packet, raw},
+                              {active, true},
+                              {buffer, RcvBuf * 2},
+                              {recbuf, RcvBuf}
+                             ]) of
         {ok, LSock} ->
             {Min, LSock};
         {error, eaddrinuse} ->
@@ -147,6 +153,8 @@ open_tcp_port(Min, Max) ->
 accept(LSock, Process) ->
     %% TODO what if we have more than 1 connection?
     {ok, Sock} = gen_tcp:accept(LSock),
+
+    io:format("sock opts ~w", [inet:getopts(Sock, [buffer, recbuf])]),
     Process ! {socket, Sock},
     gen_tcp:controlling_process(Sock, Process),
     accept(LSock, Process).
