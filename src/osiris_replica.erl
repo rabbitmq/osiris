@@ -7,7 +7,7 @@
 %% replicates and confirms latest offset back to primary
 
 %% API functions
--export([start/3, start_link/1]).
+-export([start/3, start_link/1, stop/2]).
 %% Test
 -export([get_port/1]).
 
@@ -59,6 +59,10 @@ start(Node, Name, Config) ->
                              shutdown => 5000,
                              type => worker,
                              modules => [?MODULE]}) .
+
+stop(Node, Name) ->
+    ok = supervisor:terminate_child({osiris_replica_sup, Node}, Name),
+    ok = supervisor:delete_child({osiris_replica_sup, Node}, Name).
 
 %%--------------------------------------------------------------------
 %% @doc

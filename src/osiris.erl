@@ -3,6 +3,7 @@
 -export([
          start_cluster/2,
          start_cluster/3,
+         stop_cluster/2,
          write/3
          ]).
 
@@ -40,6 +41,16 @@ start_cluster(Name0, Replicas, Config)
                                                    Config#{leader_pid => Pid}))
                    || N <- Replicas],
     {ok, Pid, ReplicaPids}.
+
+stop_cluster(Name0, Replicas)
+  when is_list(Name0) orelse
+       is_atom(Name0) orelse
+       is_binary(Name0) ->
+    true = validate_base64uri(to_string(Name0)),
+    Name = list_to_atom(Name0),
+    ok = osiris_writer:stop(Name),
+    [ok = osiris_replica:stop(N, Name) || N <- Replicas],
+    ok.
 
 write(Pid, Corr, Data) ->
     osiris_writer:write(Pid, self(), Corr, Data).

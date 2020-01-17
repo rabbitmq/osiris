@@ -8,7 +8,7 @@
 %% replicate read records
 
 %% API functions
--export([start_link/4]).
+-export([start_link/4, stop/1]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -35,6 +35,9 @@
 %%--------------------------------------------------------------------
 start_link(Host, Port, LeaderPid, StartOffset) ->
     gen_server:start_link(?MODULE, [Host, Port, LeaderPid, StartOffset], []).
+
+stop(Pid) ->
+    gen_server:cast(Pid, stop).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -100,7 +103,9 @@ handle_cast({more_data, _LastOffset},
     {ok, Seg} = do_sendfile(Sock, Seg0),
     LastOffset = osiris_segment:next_offset(Seg) - 1,
     ok = osiris_writer:register_data_listener(LeaderPid, LastOffset),
-    {noreply, State#state{segment = Seg}}.
+    {noreply, State#state{segment = Seg}};
+handle_cast(stop, State) ->
+    {stop, normal, State}.
 
 do_sendfile(Sock, Seg0) ->
     case osiris_segment:send_file(Sock, Seg0) of

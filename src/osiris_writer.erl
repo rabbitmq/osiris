@@ -12,7 +12,8 @@
          init/1,
          handle_batch/2,
          terminate/2,
-         format_status/1
+         format_status/1,
+         stop/1
         ]).
 
 %% primary osiris process
@@ -45,6 +46,10 @@ start(Name, Config0) ->
                              restart => transient,
                              shutdown => 5000,
                              type => worker}).
+
+stop(Name) ->
+    ok = supervisor:terminate_child(osiris_writer_sup, Name),
+    ok = supervisor:delete_child(osiris_writer_sup, Name).
 
 -spec start_link(Config :: map()) ->
     {ok, pid()} | {error, {already_started, pid()}}.
@@ -116,7 +121,8 @@ handle_batch(Commands, #?MODULE{segment = Seg0} = State0) ->
               notify_data_listeners(State2)),
     {ok, Replies, State}.
 
-terminate(_, #?MODULE{}) ->
+terminate(_, #?MODULE{data_listeners = Listeners}) ->
+    [osiris_replica_reader:stop(Pid) || {Pid, _} <- Listeners],
     ok.
 
 format_status(State) ->
