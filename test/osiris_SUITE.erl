@@ -210,7 +210,10 @@ cluster_restart(Config) ->
 
     ok = rpc:call(LeaderNode, osiris, stop_cluster, [atom_to_list(Name), Replicas]),
     
-   {ok, Leader1, _} = rpc:call(LeaderNode, osiris, restart_cluster, [atom_to_list(Name), Replicas, OConf]),
+    {ok, Leader1} = rpc:call(LeaderNode, osiris, restart_server, [atom_to_list(Name), Replicas, OConf]),
+    [{ok, _Replica} = rpc:call(LeaderNode, osiris, restart_replica,
+                               [atom_to_list(Name), Leader1, Replica, OConf])
+     || Replica <- Replicas],
 
     ok = osiris:write(Leader1, 43, <<"after-restart">>),
     receive

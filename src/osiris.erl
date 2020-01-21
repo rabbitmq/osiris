@@ -6,7 +6,8 @@
          stop_cluster/2,
          write/3,
          restart_cluster/2,
-         restart_cluster/3
+         restart_server/3,
+         restart_replica/4
          ]).
 
 -define(BASE64_URI_CHARS,
@@ -55,7 +56,7 @@ stop_cluster(Name0, Replicas)
     ok.
 
 restart_cluster(Name0, Replicas) ->
-    start_cluster(Name0, Replicas, #{}).
+    restart_cluster(Name0, Replicas, #{}).
 
 restart_cluster(Name0, Replicas, Config)
   when is_list(Name0) orelse
@@ -70,6 +71,30 @@ restart_cluster(Name0, Replicas, Config)
                                                    Config#{leader_pid => Pid}))
                    || N <- Replicas],
     {ok, Pid, ReplicaPids}.
+
+restart_server(Name0, Replicas) ->
+    restart_server(Name0, Replicas, #{}).
+
+restart_server(Name0, Replicas, Config)
+  when is_list(Name0) orelse
+       is_atom(Name0) orelse
+       is_binary(Name0) ->
+    %% Why does the name have to be a list? We need an atom as process name
+    %% for the gen_batch_server
+    true = validate_base64uri(to_string(Name0)),
+    Name = list_to_atom(Name0),
+    osiris_writer:start(Name, Config#{replica_nodes => Replicas}).
+
+restart_replica(Name0, Leader, Replica) ->
+    restart_replica(Name0, Leader, Replica, #{}).
+
+restart_replica(Name0, Leader, Replica, Config)
+  when is_list(Name0) orelse
+       is_atom(Name0) orelse
+       is_binary(Name0) ->
+    true = validate_base64uri(to_string(Name0)),
+    Name = list_to_atom(Name0),
+    osiris_replica:start(Replica, Name, Config#{leader_pid => Leader}).
 
 write(Pid, Corr, Data) ->
     osiris_writer:write(Pid, self(), Corr, Data).
