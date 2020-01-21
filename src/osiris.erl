@@ -6,7 +6,9 @@
          stop_cluster/2,
          write/3,
          restart_cluster/2,
+         restart_server/2,
          restart_server/3,
+         restart_replica/3,
          restart_replica/4
          ]).
 

@@ -290,13 +290,15 @@ chunk(Blobs, Next) ->
                                     B],
                             {NextOff+1, [Data | Acc]}
                     end, {Next, []}, Blobs),
-    Size = erlang:iolist_size(IoList),
+    % Bin = term_to_binary(IoList, [{compressed, 9}]),
+    Bin = IoList,
+    Size = erlang:iolist_size(Bin),
     [<<"CHNK">>,
      <<Next:64/unsigned,
        (length(Blobs)):32/unsigned,
        0:32/integer,
        Size:32/unsigned>>,
-     IoList].
+     Bin].
 
 write_chunk(Chunk, NextOffset,
             #?MODULE{cfg = #cfg{directory = Dir,

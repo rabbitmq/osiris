@@ -21,11 +21,15 @@
 %% notifies replicator and reader processes of the new max index
 %% manages incoming max index
 
--record(?MODULE, {name :: string(),
-                  reference :: term(),
-                  offset_ref :: atomics:atomics_ref(),
-                  replicas = [] :: [node()],
-                  directory :: file:filename(),
+-record(cfg, {name :: string(),
+              ext_reference :: term(),
+              offset_ref :: atomics:atomics_ref(),
+              replicas = [] :: [node()],
+              directory :: file:filename(),
+              counter :: counters:counters_ref()
+             }).
+
+-record(?MODULE, {cfg :: #cfg{},
                   segment = osiris_segment:state(),
                   pending_writes = #{} :: #{osiris_segment:offset() =>
                                             {[node()], #{pid() => [term()]}}},
@@ -73,6 +77,11 @@ ack(LeaderPid, Offset) ->
 write(Pid, Sender, Corr, Data) ->
     gen_batch_server:cast(Pid, {write, Sender, Corr, Data}).
 
+-define(COUNTER_FIELDS,
+        [batches,
+         offset,
+         committed_offset]).
+
 -spec init(map()) -> {ok, state()}.
 init(#{name := Name,
        replica_nodes := Replicas} = Config) ->
@@ -93,28 +102,38 @@ init(#{name := Name,
     end,
     ORef = atomics:new(1, []),
     Segment = osiris_segment:init(Dir, Config),
-    {ok, #?MODULE{name = Name,
-                  %% reference used for notification
-                  %% if not provided use the name
-                  reference = maps:get(reference, Config, Name),
-                  offset_ref = ORef,
-                  replicas = Replicas,
-                  directory  = Dir,
+    {ok, #?MODULE{cfg = #cfg{name = Name,
+                             %% reference used for notification
+                             %% if not provided use the name
+                             ext_reference = maps:get(reference, Config, Name),
+                             offset_ref = ORef,
+                             replicas = Replicas,
+                             directory  = Dir,
+                             %% TODO: there is no GC of counter registrations
+                             counter = osiris_counters:new({?MODULE, self()},
+                                                           ?COUNTER_FIELDS)},
                   segment = Segment}}.
 
-handle_batch(Commands, #?MODULE{segment = Seg0} = State0) ->
+handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt},
+                                segment = Seg0} = State0) ->
 
     %% filter write commands
     {Records, Replies, Corrs, State1} = handle_commands(Commands, State0,
                                                         {[], [], #{}}),
+    %% incr batch counter
+    counters:add(Cnt, 1, 1),
     %% TODO handle empty replicas
     State2 = case Records of
                  [] ->
                      State1;
                  _ ->
-                     Next = osiris_segment:next_offset(Seg0),
+                     ThisBatchOffs = osiris_segment:next_offset(Seg0),
                      Seg = osiris_segment:write(Records, Seg0),
-                     update_pending(Next, Corrs, State1#?MODULE{segment = Seg})
+                     LastOffs = osiris_segment:next_offset(Seg) - 1,
+                     %% update written
+                     counters:put(Cnt, 2, LastOffs),
+                     update_pending(ThisBatchOffs, Corrs,
+                                    State1#?MODULE{segment = Seg})
              end,
     %% write to log and index files
     State = notify_offset_listeners(
@@ -130,20 +149,24 @@ format_status(State) ->
 
 %% Internal
 
-update_pending(Next, Corrs, #?MODULE{reference = Ref,
-                                     offset_ref = OffsRef,
-                                     replicas = []} = State) ->
+update_pending(BatchOffs, Corrs,
+               #?MODULE{cfg = #cfg{ext_reference = Ref,
+                                   counter = Cnt,
+                                   offset_ref = OffsRef,
+                                   replicas = []}} = State) ->
     _ = notify_writers(Ref, Corrs),
-    atomics:put(OffsRef, 1, Next),
-    State#?MODULE{committed_offset = Next};
-update_pending(Next, Corrs, #?MODULE{replicas = Replicas,
-                                     pending_writes = Pending0} = State) ->
+    atomics:put(OffsRef, 1, BatchOffs),
+    counters:put(Cnt, 2, BatchOffs),
+    State#?MODULE{committed_offset = BatchOffs};
+update_pending(BatchOffs, Corrs,
+               #?MODULE{cfg = #cfg{replicas = Replicas},
+                        pending_writes = Pending0} = State) ->
     case Corrs of
         _  when map_size(Corrs) == 0 ->
             State;
         _ ->
             State#?MODULE{pending_writes =
-                          Pending0#{Next => {Replicas, Corrs}}}
+                          Pending0#{BatchOffs => {Replicas, Corrs}}}
     end.
 
 notify_writers(Name, Corrs) ->
@@ -168,14 +191,16 @@ handle_commands([{cast, {register_offset_listener, Pid, Offset}} | Rem],
     State = State0#?MODULE{offset_listeners = [{Pid, Offset} | Listeners]},
     handle_commands(Rem, State, Acc);
 handle_commands([{cast, {ack, ReplicaNode, Offset}} | Rem],
-                #?MODULE{reference = Ref,
+                #?MODULE{cfg = #cfg{ext_reference = Ref,
+                                    counter = Cnt,
+                                    offset_ref = ORef},
                          committed_offset = COffs0,
-                         offset_ref = ORef,
                          pending_writes = Pending0} = State0, Acc) ->
     {COffs, Pending} = case maps:get(Offset, Pending0) of
                            {[ReplicaNode], Corrs} ->
                                _ = notify_writers(Ref, Corrs),
                                atomics:put(ORef, 1, Offset),
+                               counters:put(Cnt, 2, Offset),
                                {Offset, maps:remove(Offset, Pending0)};
                            {Reps, Corrs} ->
                                Reps1 = lists:delete(ReplicaNode, Reps),
@@ -187,9 +212,10 @@ handle_commands([{cast, {ack, ReplicaNode, Offset}} | Rem],
                            committed_offset = COffs},
     handle_commands(Rem, State, Acc);
 handle_commands([{call, From, get_reader_context} | Rem],
-                #?MODULE{offset_ref = ORef,
-                         committed_offset = COffs,
-                         directory = Dir} = State, {Records, Replies, Corrs}) ->
+                #?MODULE{cfg = #cfg{offset_ref = ORef,
+                                    directory = Dir},
+                         committed_offset = COffs} = State,
+                {Records, Replies, Corrs}) ->
     Reply = {reply, From, #{dir => Dir,
                             committed_offset => max(0, COffs),
                             offset_ref => ORef}},
@@ -202,14 +228,12 @@ handle_commands([_Unk | Rem], State, Acc) ->
 notify_data_listeners(#?MODULE{segment = Seg,
                                data_listeners = L0} = State) ->
     LastOffset = osiris_segment:next_offset(Seg) - 1,
-    {Notify, L} = lists:splitwith(fun ({_Pid, O}) ->
-                                          O < LastOffset
-                                  end, L0),
+    {Notify, L} = lists:splitwith(fun ({_Pid, O}) -> O < LastOffset end, L0),
     [gen_server:cast(P, {more_data, LastOffset})
      || {P, _} <- Notify],
     State#?MODULE{data_listeners = L}.
 
-notify_offset_listeners(#?MODULE{reference = Ref,
+notify_offset_listeners(#?MODULE{cfg = #cfg{ext_reference = Ref},
                                  committed_offset = COffs,
                                  segment = Seg,
                                  offset_listeners = L0} = State) ->

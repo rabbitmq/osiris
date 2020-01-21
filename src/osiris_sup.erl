@@ -8,6 +8,7 @@ start_link() ->
 	supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
+    osiris_counters:init(),
     SupFlags = #{strategy => one_for_all, intensity => 5, period => 5},
     Replica = #{id => osiris_replica_sup,
                 type => supervisor,
