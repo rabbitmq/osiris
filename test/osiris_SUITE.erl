@@ -114,10 +114,10 @@ single_node_offset_listener(Config) ->
     OConf = #{dir => ?config(data_dir, Config)},
     {ok, Leader, _Replicas} = osiris:start_cluster(Name, [], OConf),
     Seg0 = osiris_writer:init_reader(Leader, 0),
-    osiris_writer:register_offset_listener(Leader, 0),
+    osiris_writer:register_offset_listener(Leader),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
     receive
-        {osiris_offset, _Name, 0} ->
+        {osiris_offset, _Name, _} ->
             {[{0, <<"mah-data">>}], Seg} = osiris_segment:read_chunk_parsed(Seg0),
             {end_of_stream, _} = osiris_segment:read_chunk_parsed(Seg),
             ok
@@ -133,11 +133,11 @@ cluster_offset_listener(Config) ->
     [_ | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
     {ok, Leader, _Replicas} = osiris:start_cluster(Name, Replicas),
     Seg0 = osiris_writer:init_reader(Leader, 0),
-    osiris_writer:register_offset_listener(Leader,
-                                           osiris_segment:next_offset(Seg0)),
+    osiris_writer:register_offset_listener(Leader),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
     receive
-        {osiris_offset, _Name, 0} ->
+        {osiris_offset, _Name, O} when O > -1 ->
+            ct:pal("got offset ~w", [O]),
             {[{0, <<"mah-data">>}], Seg} = osiris_segment:read_chunk_parsed(Seg0),
             slave:stop(hd(Replicas)),
             ok = osiris:write(Leader, 43, <<"mah-data2">>),
@@ -170,28 +170,32 @@ read_validate_single_node(Config) ->
 read_validate(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = atom_to_list(?FUNCTION_NAME),
-    Num = 1000000,
+    Num = 500000,
     OConf = #{dir => ?config(data_dir, Config)},
     [_LNode | Replicas] = Nodes =  [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
     {ok, Leader, _} = rpc:call(node(), osiris, start_cluster,
                                [Name, Replicas, OConf]),
     timer:sleep(500),
     {Time, _} = timer:tc(fun () ->
-                                 % Self = self(),
-                                 % spawn(fun () ->
-                                 %               write_n(Leader, Num div 2, #{}),
-                                 %               Self ! done
-                                 %       end),
-                                 write_n(Leader, Num, #{})
-                                 % receive
-                                 %     done -> ok
-                                 % after 1000 * 60 ->
-                                 %           exit(blah)
-                                 % end
+                                 Self = self(),
+                                 spawn(fun () ->
+                                               write_n(Leader, Num div 2, #{}),
+                                               Self ! done
+                                       end),
+                                 write_n(Leader, Num div 2, #{}),
+                                 receive
+                                     done -> ok
+                                 after 1000 * 60 ->
+                                           exit(blah)
+                                 end
                          end),
 
     MsgSec = Num / (Time / 1000 / 1000),
     ct:pal("~b writes took ~wms ~w msg/s", [Num, Time div 1000, MsgSec]),
+    ct:pal("counters ~p", [osiris_counters:overview()]),
+    Seg0 = osiris_writer:init_reader(Leader, 0),
+    {_, _} = timer:tc(fun() -> validate_read(Num, Seg0) end),
+
     [slave:stop(N) || N <- Nodes],
     ok.
 
@@ -232,7 +236,7 @@ cluster_restart(Config) ->
               fun () ->
                       Seg0 = osiris_writer:init_reader(Leader1, 0),
                       {[{0, <<"before-restart">>}], Seg1} = osiris_segment:read_chunk_parsed(Seg0),
-                      {[{1, <<"after-restart">>}], Seg2} = osiris_segment:read_chunk_parsed(Seg1),
+                      {[{1, <<"after-restart">>}], _Seg2} = osiris_segment:read_chunk_parsed(Seg1),
                       Self ! read_data_ok
               end),
     receive
@@ -280,9 +284,14 @@ validate_read(N, N, Seg0) ->
     {end_of_stream, _Seg} = osiris_segment:read_chunk_parsed(Seg0),
     ok;
 validate_read(Max, Next, Seg0) ->
-    {[{_Offs, <<N:800/integer>>} | _] = Recs, Seg} = osiris_segment:read_chunk_parsed(Seg0),
-    ?assertEqual(Next, N),
-    validate_read(Max, Next + length(Recs), Seg).
+    {[{Offs, _} | _] = Recs, Seg} = osiris_segment:read_chunk_parsed(Seg0),
+    case Offs == Next of
+        false ->
+            ct:fail("validate_read failed Offs ~b not eqial to ~b",
+                    [Offs, Next]);
+        true ->
+            validate_read(Max, Next + length(Recs), Seg)
+    end.
 
 start_slave(N, PrivDir) ->
     Dir0 = filename:join(PrivDir, N),

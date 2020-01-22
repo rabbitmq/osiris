@@ -15,6 +15,7 @@
          ]).
 
 -define(DEFAULT_MAX_SEGMENT_SIZE, 500 * 1000 * 1000).
+-define(INDEX_RECORD_SIZE, 16).
 
 %% Data format
 %% Write in "chunks" which are batches of blobs
@@ -75,9 +76,17 @@ init(Dir, Config) ->
               end,
     filelib:ensure_dir(Dir),
     file:make_dir(Dir),
-    NextOffset = find_last_offset(Dir) + 1,
-    Filename = make_file_name(NextOffset, "segment"),
-    IdxFilename = make_file_name(NextOffset, "index"),
+    {NextOffset, File} = find_next_offset(Dir),
+    error_logger:info_msg("osiris_segment:init/2: next offset ~b",
+                          [NextOffset]),
+    {Filename, IdxFilename} =
+        case File of
+            undefined ->
+                {make_file_name(NextOffset, "segment"),
+                 make_file_name(NextOffset, "index")};
+            F ->
+                {F ++".segment", F ++ ".index"}
+        end,
     {ok, Fd} = file:open(filename:join(Dir, Filename),
                          [raw, binary, append]),
     {ok, IdxFd} = file:open(filename:join(Dir, IdxFilename),
@@ -106,12 +115,17 @@ write(Blobs, #?MODULE{cfg = #cfg{},
 -spec accept_chunk(iodata(), state()) -> state().
 accept_chunk([<<"CHNK", Next:64/unsigned,
                 Num:32/unsigned, _/binary>> | _] = Chunk,
-             State) ->
+             #?MODULE{next_offset = Next} = State) ->
     NextOffset = Next + Num,
     write_chunk(Chunk, NextOffset, State);
 accept_chunk(Binary, State)
   when is_binary(Binary) ->
-    accept_chunk([Binary], State).
+    accept_chunk([Binary], State);
+accept_chunk([<<"CHNK", Next:64/unsigned,
+                _Num:32/unsigned, _/binary>> | _] = _Chunk,
+             #?MODULE{next_offset = ExpectedNext}) ->
+    exit({accept_chunk_out_of_order, Next, ExpectedNext}).
+
 
 -spec next_offset(state()) -> offset().
 next_offset(#?MODULE{next_offset = Next}) ->
@@ -121,7 +135,8 @@ next_offset(#?MODULE{next_offset = Next}) ->
 init_reader(StartOffset0, #{dir := Dir} = Config) ->
     StartOffset = case StartOffset0 of
                       undefined ->
-                          maps:get(committed_offset, Config, 0);
+                          {NextOffs, _} = find_next_offset(Dir),
+                          maps:get(committed_offset, Config, NextOffs);
                       _ ->
                           StartOffset0
                   end,
@@ -146,7 +161,9 @@ init_reader(StartOffset0, #{dir := Dir} = Config) ->
 
             %% scan the index to find nearest chunk offset to position
             %% the file cursor at
-            {ok, FilePos} = file:position(Fd, FilePos),
+            {ok, Pos} = file:position(Fd, FilePos),
+            error_logger:info_msg("init_reader: at ~b file pos ~b/~w",
+                                  [StartOffset, Pos, FilePos]),
             #?MODULE{cfg = #cfg{directory = Dir,
                                 mode = write},
                      offset_ref = Ref,
@@ -222,7 +239,8 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
             %% read header
             ToSend = DataSize + 24,
             ok = sendfile(Fd, Sock, Pos, ToSend),
-            {ok, _} = file:position(Fd, Pos + ToSend),
+            FilePos = Pos + ToSend,
+            {ok, FilePos} = file:position(Fd, FilePos),
             {ok, State#?MODULE{next_offset = Offs + NumRecords}};
         eof ->
             %% open next segment file and start there if it exists
@@ -230,6 +248,7 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
             case file:open(filename:join(Dir, SegFile),
                            [raw, binary, read]) of
                 {ok, Fd2} ->
+                    error_logger:info_msg("sendfile eof ~w", [Next]),
                     ok = file:close(Fd),
                     send_file(Sock, State#?MODULE{fd = Fd2});
                 {error, enoent} ->
@@ -245,9 +264,20 @@ close(_State) ->
 
 scan_index(<<>>, _Offset) ->
     0;
-scan_index(<<_:64/unsigned, Pos:32/unsigned>>, _Offset) ->
-    Pos;
-scan_index(<<O:64/unsigned, Pos:32/unsigned, Rem/binary>>, Offset)  ->
+scan_index(<<O:64/unsigned,
+             Num:32/unsigned,
+             Pos:32/unsigned>>, Offset) ->
+    %% TODO: the requested offset may not be found in the last batch as it
+    %% may not have been written yet
+    case Offset >= O andalso  Offset < (O + Num) of
+        true ->
+            Pos;
+        false ->
+            eof
+    end;
+scan_index(<<O:64/unsigned,
+             _:32/unsigned,
+             Pos:32/unsigned, Rem/binary>>, Offset)  ->
     <<ONext:64/unsigned, _/binary>> = Rem,
      case Offset >= O andalso Offset < ONext of
          true ->
@@ -262,24 +292,37 @@ parse_records(Offs, <<Len:32/unsigned, _:64/unsigned,
                       Data:Len/binary, Rem/binary>>, Acc) ->
     parse_records(Offs+1, Rem, [{Offs, Data} | Acc]).
 
-find_last_offset(Dir) ->
-    SegFiles = lists:reverse(lists:sort(
+find_next_offset(Dir) ->
+    IdxFiles = lists:reverse(lists:sort(
                                filelib:wildcard(
                                  filename:join(Dir, "*.index")))),
-    case SegFiles of
-        [LastIdxFile | _ ] ->
-            {ok, Data} = file:read_file(LastIdxFile),
-            case Data of
-                <<>> ->
-                    -1;
-                _ ->
-                    Pos = byte_size(Data) - 12,
-                    <<_:64/unsigned, FilePos:32/unsigned>> = binary:part(Data, Pos, 12),
-                    FilePos
-            end;
-        _ ->
-            -1
+    find_next_offset0(0, IdxFiles).
+
+find_next_offset0(NextOffs, []) ->
+    {NextOffs, undefined};
+find_next_offset0(NextOffs, [IdxFile | Rem]) ->
+    {ok, Data} = file:read_file(IdxFile),
+    case Data of
+        <<>> ->
+            %% read prevous if exists
+            find_next_offset0(NextOffs, Rem);
+        Data ->
+            %% get last batch offset
+            Pos = byte_size(Data) - ?INDEX_RECORD_SIZE,
+            <<Offset:64/unsigned,
+              Num:32/unsigned,
+              FilePos:32/unsigned>> = binary:part(Data, Pos,
+                                                  ?INDEX_RECORD_SIZE),
+            Basename = filename:basename(IdxFile, ".index"),
+            BaseDir = filename:dirname(IdxFile),
+            SegFile0 = filename:join([BaseDir, Basename]),
+            SegFile = SegFile0 ++ ".segment",
+            {ok, Fd} = file:open(SegFile, [read, binary, raw]),
+            {ok, FilePos} = file:position(Fd, FilePos),
+            %% reader batch header
+            {Offset + Num, filename:join(BaseDir, Basename)}
     end.
+
 
 chunk(Blobs, Next) ->
     {_, IoList} = lists:foldr(
@@ -308,9 +351,12 @@ write_chunk(Chunk, NextOffset,
                      segment_size = SegSize,
                      next_offset = Next} = State) ->
     Size = erlang:iolist_size(Chunk),
+    Num = NextOffset - Next,
     {ok, Cur} = file:position(Fd, cur),
     ok = file:write(Fd, Chunk),
-    ok = file:write(IdxFd, <<Next:64/unsigned, Cur:32/unsigned>>),
+    ok = file:write(IdxFd, <<Next:64/unsigned,
+                             Num:32/unsigned,
+                             Cur:32/unsigned>>),
     case file:position(Fd, cur) of
         {ok, After} when After >= MaxSize ->
             %% need a new segment file
@@ -326,7 +372,7 @@ write_chunk(Chunk, NextOffset,
                           index_fd = IdxFd2,
                           next_offset = NextOffset,
                           segment_size = SegSize + Size};
-        _ ->
+        {ok, _} ->
             State#?MODULE{next_offset = NextOffset,
                           segment_size = SegSize + Size}
     end.

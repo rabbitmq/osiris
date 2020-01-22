@@ -110,6 +110,8 @@ init(#{name := Name,
     end,
     Segment = osiris_segment:init(Dir, #{}),
     NextOffset = osiris_segment:next_offset(Segment),
+    error_logger:info_msg("osiris_replica:init/1: next offset ~b",
+                          [NextOffset]),
     %% spawn reader process on leader node
     {ok, HostName} = inet:gethostname(),
     {ok, Ip} = inet:getaddr(HostName, inet),
@@ -264,13 +266,13 @@ code_change(_OldVsn, State, _Extra) ->
 
 parse_chunk(<<>>, ParseState, Acc) ->
     {ParseState, lists:reverse(Acc)};
-parse_chunk(<< "CHNK",
-               FirstOffset:64/unsigned,
-               _NumRecords:32/unsigned,
-               _Crc:32/integer,
-               Size:32/unsigned,
-               _Record:Size/binary,
-               Rem/binary>> = All, undefined, Acc) ->
+parse_chunk(<<"CHNK",
+              FirstOffset:64/unsigned,
+              _NumRecords:32/unsigned,
+              _Crc:32/integer,
+              Size:32/unsigned,
+              _Record:Size/binary,
+              Rem/binary>> = All, undefined, Acc) ->
     % true = byte_size(Chunk) == (Size + 24),
     TotalSize = Size + 24,
     <<Chunk:TotalSize/binary, _/binary>> = All,
@@ -284,12 +286,11 @@ parse_chunk(<<"CHNK",
               _Crc:32/integer,
               Size:32/unsigned,
               Partial/binary>> = All, undefined, Acc) ->
-    {{FirstOffset, [All], Size - byte_size(Partial)},
-     Acc};
+    {{FirstOffset, [All], Size - byte_size(Partial)}, lists:reverse(Acc)};
 parse_chunk(Bin, PartialHeaderBin, Acc)
-  when is_binary( PartialHeaderBin) ->
+  when is_binary(PartialHeaderBin) ->
     %% TODO: slight inneficiency but partial headers should be relatively
-    %% rare
+    %% rare - also ensures the header is always intact
     parse_chunk(<<PartialHeaderBin/binary, Bin/binary>>, undefined, Acc);
 parse_chunk(Bin, {FirstOffset, IOData, RemSize}, Acc)
   when byte_size(Bin) >= RemSize ->
@@ -297,7 +298,10 @@ parse_chunk(Bin, {FirstOffset, IOData, RemSize}, Acc)
     parse_chunk(Rem, undefined,
                 [{FirstOffset, lists:reverse([Final | IOData])} | Acc]);
 parse_chunk(Bin, {FirstOffset, IOData, RemSize}, Acc) ->
-    {{FirstOffset, [Bin | IOData], RemSize - byte_size(Bin)}, Acc}.
+    % error_logger:info_msg("parse_chunk ~b", [FirstOffset]),
+    %% there is not enough data to complete the partial chunk
+    {{FirstOffset, [Bin | IOData], RemSize - byte_size(Bin)},
+     lists:reverse(Acc)}.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

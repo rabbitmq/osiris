@@ -56,12 +56,14 @@ stop(Pid) ->
 %%--------------------------------------------------------------------
 init([Host, Port, LeaderPid, StartOffset] = Args) ->
     Segment = osiris_writer:init_reader(LeaderPid, StartOffset),
-    error_logger:info_msg("starting replica reader with ~w~n", [Args]),
+    error_logger:info_msg("starting replica reader with ~w NextOffs ~b~n",
+                          [Args, osiris_segment:next_offset(Segment)]),
     SndBuf = 146988 * 10,
     {ok, Sock} = gen_tcp:connect(Host, Port, [binary, {packet, 0},
                                               {nodelay, true},
                                               {sndbuf, SndBuf}]),
-    error_logger:info_msg("gen tcp opts snd buf~p", [inet:getopts(Sock, [sndbuf])]),
+    error_logger:info_msg("gen tcp opts snd buf~p",
+                          [inet:getopts(Sock, [sndbuf])]),
     %% register data listener with osiris_proc
     ok = osiris_writer:register_data_listener(LeaderPid, StartOffset -1),
     {ok, #state{segment = Segment,
@@ -102,6 +104,7 @@ handle_cast({more_data, _LastOffset},
                    socket = Sock} = State) ->
     {ok, Seg} = do_sendfile(Sock, Seg0),
     LastOffset = osiris_segment:next_offset(Seg) - 1,
+    % error_logger:info_msg("replicate reader listen for ~b", [LastOffset]),
     ok = osiris_writer:register_data_listener(LeaderPid, LastOffset),
     {noreply, State#state{segment = Seg}};
 handle_cast(stop, State) ->
@@ -110,6 +113,8 @@ handle_cast(stop, State) ->
 do_sendfile(Sock, Seg0) ->
     case osiris_segment:send_file(Sock, Seg0) of
         {ok, Seg} ->
+            % error_logger:info_msg("~w replicate reader next offs ~b",
+            %                       [self(), osiris_segment:next_offset(Seg)]),
             do_sendfile(Sock, Seg);
         {end_of_stream, Seg} ->
             {ok, Seg}
