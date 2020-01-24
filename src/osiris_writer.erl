@@ -102,17 +102,24 @@ init(#{name := Name,
     end,
     ORef = atomics:new(1, []),
     Segment = osiris_segment:init(Dir, Config),
+    ExtRef = maps:get(reference, Config, Name),
+    CntRef = osiris_counters:new({?MODULE, ExtRef}, ?COUNTER_FIELDS),
+    LastOffs = osiris_segment:next_offset(Segment) -1,
+    %% TODO REcover batch counter and last batch
+    % counters:add(Cnt, 1, 1),
+    % counters:add(CntRef, 2, 1),
+    counters:put(CntRef, 2, LastOffs),
+    % counters:put(Cnt, 3, LastOffs),
     {ok, #?MODULE{cfg = #cfg{name = Name,
                              %% reference used for notification
                              %% if not provided use the name
-                             ext_reference = maps:get(reference, Config, Name),
+                             ext_reference = ExtRef,
 
                              offset_ref = ORef,
                              replicas = Replicas,
                              directory  = Dir,
                              %% TODO: there is no GC of counter registrations
-                             counter = osiris_counters:new({?MODULE, self()},
-                                                           ?COUNTER_FIELDS)},
+                             counter = CntRef},
 
                   %% TODO: work out committed offset
                   % committed_offset = LastBatchOffset,
