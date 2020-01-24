@@ -7,7 +7,7 @@
 %% replicates and confirms latest offset back to primary
 
 %% API functions
--export([start/3, start_link/1, stop/2]).
+-export([start/3, start_link/1, stop/2, delete/2]).
 %% Test
 -export([get_port/1]).
 
@@ -64,6 +64,11 @@ stop(Node, Name) ->
     ok = supervisor:terminate_child({osiris_replica_sup, Node}, Name),
     ok = supervisor:delete_child({osiris_replica_sup, Node}, Name).
 
+delete(Name, Server) ->
+    Node = node(Server),
+    gen_server:call(Server, delete),
+    ok = supervisor:delete_child({osiris_replica_sup, Node}, Name).
+     
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server
@@ -181,6 +186,12 @@ accept(LSock, Process) ->
 %%--------------------------------------------------------------------
 handle_call(get_port, _From, #?MODULE{cfg = #cfg{port = Port}} = State) ->
     {reply, Port, State};
+handle_call(delete, From, #?MODULE{cfg = #cfg{directory = Dir}} = State) ->
+    {ok, Files} = file:list_dir(Dir),
+    [ok = file:delete(filename:join(Dir, F)) || F <- Files],
+    ok = file:del_dir(Dir),
+    gen_server:reply(From, ok),
+    {stop, normal, State};
 handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.

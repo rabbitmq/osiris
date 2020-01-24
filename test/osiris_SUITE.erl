@@ -26,7 +26,8 @@ all_tests() ->
      read_validate,
      single_node_offset_listener,
      cluster_offset_listener,
-     cluster_restart
+     cluster_restart,
+     cluster_delete
     ].
 
 groups() ->
@@ -244,6 +245,26 @@ cluster_restart(Config) ->
     after 2000 ->
               exit(read_data_ok_timeout)
     end,
+    [slave:stop(N) || N <- Nodes],
+    ok.
+
+cluster_delete(Config) ->
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
+    OConf = #{dir => ?config(data_dir, Config)},
+    {ok, Leader, ReplicaPids} = rpc:call(LeaderNode, osiris, start_cluster,
+                                          [atom_to_list(Name), Replicas, OConf ]),
+    ok = osiris:write(Leader, 42, <<"before-restart">>),
+    receive
+        {osiris_written, _, [42]} ->
+            ok
+    after 2000 ->
+              flush(),
+              exit(osiris_written_timeout)
+    end,
+
+    ok = rpc:call(LeaderNode, osiris, delete_cluster, [Leader, ReplicaPids]),
     [slave:stop(N) || N <- Nodes],
     ok.
 

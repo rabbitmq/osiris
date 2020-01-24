@@ -13,7 +13,8 @@
          handle_batch/2,
          terminate/2,
          format_status/1,
-         stop/1
+         stop/1,
+         delete/2
         ]).
 
 %% primary osiris process
@@ -53,6 +54,10 @@ start(Name, Config0) ->
 
 stop(Name) ->
     ok = supervisor:terminate_child(osiris_writer_sup, Name),
+    ok = supervisor:delete_child(osiris_writer_sup, Name).
+
+delete(Name, Server) ->
+    gen_batch_server:call(Server, delete),
     ok = supervisor:delete_child(osiris_writer_sup, Name).
 
 -spec start_link(Config :: map()) ->
@@ -129,26 +134,29 @@ handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt},
                                 segment = Seg0} = State0) ->
 
     %% filter write commands
-    {Records, Replies, Corrs, State1} = handle_commands(Commands, State0,
-                                                        {[], [], #{}}),
-    %% incr batch counter
-    counters:add(Cnt, 1, 1),
-    %% TODO handle empty replicas
-    State2 = case Records of
+    case handle_commands(Commands, State0, {[], [], #{}}) of
+        {Records, Replies, Corrs, State1} ->
+            %% incr batch counter
+            counters:add(Cnt, 1, 1),
+            %% TODO handle empty replicas
+            State2 = case Records of
                  [] ->
-                     State1;
-                 _ ->
-                     ThisBatchOffs = osiris_segment:next_offset(Seg0),
-                     Seg = osiris_segment:write(Records, Seg0),
-                     LastOffs = osiris_segment:next_offset(Seg) - 1,
-                     %% update written
-                     counters:put(Cnt, 2, LastOffs),
-                     update_pending(ThisBatchOffs, Corrs,
-                                    State1#?MODULE{segment = Seg})
-             end,
-    %% write to log and index files
-    State = notify_data_listeners(State2),
-    {ok, Replies, State}.
+                             State1;
+                         _ ->
+                             ThisBatchOffs = osiris_segment:next_offset(Seg0),
+                             Seg = osiris_segment:write(Records, Seg0),
+                             LastOffs = osiris_segment:next_offset(Seg) - 1,
+                             %% update written
+                             counters:put(Cnt, 2, LastOffs),
+                             update_pending(ThisBatchOffs, Corrs,
+                                            State1#?MODULE{segment = Seg})
+                     end,
+            %% write to log and index files
+            State = notify_data_listeners(State2),
+            {ok, Replies, State};
+        {stop, normal} ->
+            {stop, normal}
+    end.
 
 terminate(_, #?MODULE{data_listeners = Listeners}) ->
     [osiris_replica_reader:stop(Pid) || {Pid, _} <- Listeners],
@@ -242,6 +250,12 @@ handle_commands([{call, From, get_reader_context} | Rem],
                             committed_offset => max(0, COffs),
                             offset_ref => ORef}},
     handle_commands(Rem, State, {Records, [Reply | Replies], Corrs});
+handle_commands([{call, From, delete} | _], #?MODULE{cfg = #cfg{directory = Dir}}, _) ->
+    {ok, Files} = file:list_dir(Dir),
+    [ok = file:delete(filename:join(Dir, F)) || F <- Files],
+    ok = file:del_dir(Dir),
+    gen_server:reply(From, ok),
+    {stop, normal};
 handle_commands([_Unk | Rem], State, Acc) ->
     error_logger:info_msg("osiris_writer unknown command ~w", [_Unk]),
     handle_commands(Rem, State, Acc).

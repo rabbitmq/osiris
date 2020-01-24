@@ -9,7 +9,8 @@
          restart_server/2,
          restart_server/3,
          restart_replica/3,
-         restart_replica/4
+         restart_replica/4,
+         delete_cluster/3
          ]).
 
 -define(BASE64_URI_CHARS,
@@ -42,9 +43,10 @@ start_cluster(Name0, Replicas, Config)
     true = validate_base64uri(to_string(Name0)),
     Name = list_to_atom(Name0),
     {ok, Pid} = osiris_writer:start(Name, Config#{replica_nodes => Replicas}),
-    ReplicaPids = [element(2, osiris_replica:start(N, Name,
-                                                   Config#{leader_pid => Pid}))
-                   || N <- Replicas],
+    ReplicaPids = [begin
+                       {ok, P} = osiris_replica:start(N, Name, Config#{leader_pid => Pid}),
+                       P
+                   end || N <- Replicas],
     {ok, Pid, ReplicaPids}.
 
 stop_cluster(Name0, Replicas)
@@ -55,6 +57,12 @@ stop_cluster(Name0, Replicas)
     Name = list_to_atom(Name0),
     ok = osiris_writer:stop(Name),
     [ok = osiris_replica:stop(N, Name) || N <- Replicas],
+    ok.
+
+-spec delete_cluster(any(), pid(), [pid()]) -> ok.
+delete_cluster(Name, Leader, Replicas) ->
+    [ok = osiris_replica:delete(Name, R) || R <- Replicas],
+    ok = osiris_writer:delete(Name, Leader),
     ok.
 
 restart_cluster(Name0, Replicas) ->
@@ -74,28 +82,20 @@ restart_cluster(Name0, Replicas, Config)
                    || N <- Replicas],
     {ok, Pid, ReplicaPids}.
 
-restart_server(Name0, Replicas) ->
-    restart_server(Name0, Replicas, #{}).
+restart_server(Name, Replicas) ->
+    restart_server(Name, Replicas, #{}).
 
-restart_server(Name0, Replicas, Config)
-  when is_list(Name0) orelse
-       is_atom(Name0) orelse
-       is_binary(Name0) ->
+restart_server(Name, Replicas, Config)
+  when is_atom(Name) ->
     %% Why does the name have to be a list? We need an atom as process name
     %% for the gen_batch_server
-    true = validate_base64uri(to_string(Name0)),
-    Name = list_to_atom(Name0),
     osiris_writer:start(Name, Config#{replica_nodes => Replicas}).
 
-restart_replica(Name0, Leader, Replica) ->
-    restart_replica(Name0, Leader, Replica, #{}).
+restart_replica(Name, Leader, Replica) ->
+    restart_replica(Name, Leader, Replica, #{}).
 
-restart_replica(Name0, Leader, Replica, Config)
-  when is_list(Name0) orelse
-       is_atom(Name0) orelse
-       is_binary(Name0) ->
-    true = validate_base64uri(to_string(Name0)),
-    Name = list_to_atom(Name0),
+restart_replica(Name, Leader, Replica, Config)
+  when is_atom(Name) ->
     osiris_replica:start(Replica, Name, Config#{leader_pid => Leader}).
 
 write(Pid, Corr, Data) ->
