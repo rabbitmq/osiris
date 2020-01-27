@@ -218,9 +218,9 @@ cluster_restart(Config) ->
 
     ok = rpc:call(LeaderNode, osiris, stop_cluster, [atom_to_list(Name), Replicas]),
     
-    {ok, Leader1} = rpc:call(LeaderNode, osiris, restart_server, [atom_to_list(Name), Replicas, OConf]),
+    {ok, Leader1} = rpc:call(LeaderNode, osiris, restart_server, [Name, Replicas, OConf]),
     [{ok, _Replica} = rpc:call(LeaderNode, osiris, restart_replica,
-                               [atom_to_list(Name), Leader1, Replica, OConf])
+                               [Name, Leader1, Replica, OConf])
      || Replica <- Replicas],
 
     ok = osiris:write(Leader1, 43, <<"after-restart">>),
@@ -264,7 +264,7 @@ cluster_delete(Config) ->
               exit(osiris_written_timeout)
     end,
 
-    ok = rpc:call(LeaderNode, osiris, delete_cluster, [Leader, ReplicaPids]),
+    ok = rpc:call(LeaderNode, osiris, delete_cluster, [Name, Leader, ReplicaPids]),
     [slave:stop(N) || N <- Nodes],
     ok.
 
