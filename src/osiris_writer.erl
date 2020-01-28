@@ -58,13 +58,12 @@ stop(Name) ->
 
 delete(Name, Server) ->
     gen_batch_server:call(Server, delete),
-    ok = supervisor:delete_child(osiris_writer_sup, Name).
+    rpc:call(node(Server), ?MODULE, stop, [Name]).
 
 -spec start_link(Config :: map()) ->
     {ok, pid()} | {error, {already_started, pid()}}.
 start_link(Config) ->
     gen_batch_server:start_link(?MODULE, Config).
-
 
 init_reader(Pid, StartOffset) when node(Pid) == node() ->
     Ctx = gen_batch_server:call(Pid, get_reader_context),

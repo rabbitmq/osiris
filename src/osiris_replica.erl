@@ -67,7 +67,7 @@ stop(Node, Name) ->
 delete(Name, Server) ->
     Node = node(Server),
     gen_server:call(Server, delete),
-    ok = supervisor:delete_child({osiris_replica_sup, Node}, Name).
+    stop(Node, Name).
      
 %%--------------------------------------------------------------------
 %% @doc
