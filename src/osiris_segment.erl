@@ -6,6 +6,7 @@
          accept_chunk/2,
          next_offset/1,
          send_file/2,
+         send_file/3,
 
          init_reader/2,
          read_chunk_parsed/1,
@@ -21,7 +22,7 @@
 %% Write in "chunks" which are batches of blobs
 %%
 %% <<
-%%   <<"CHK1">>/binary, %% MAGIC
+%%   <<"CHNK">>/binary, %% MAGIC
 %%   ChunkFirstOffset:64/unsigned,
 %%   NumRecords:32/unsigned,
 %%   ChunkCrc:32/integer, %% CRC for the records portion of the data
@@ -223,25 +224,39 @@ read_chunk_parsed(#?MODULE{cfg = #cfg{directory = Dir},
             {error, {invalid_chunk_header, Invalid}}
     end.
 
-
 -spec send_file(gen_tcp:socket(), state()) ->
+    {ok, state()} | {end_of_stream, state()}.
+send_file(Sock, State) ->
+    send_file(Sock, State, undefined).
+
+-spec send_file(gen_tcp:socket(), state(),
+                non_neg_integer() | undefined) ->
     {ok, state()} | {end_of_stream, state()}.
 send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                          fd = Fd,
-                         next_offset = Next} = State) ->
+                         next_offset = Next} = State,
+         MaxOffset) ->
     {ok, Pos} = file:position(Fd, cur),
     case file:read(Fd, 24) of
         {ok, <<"CHNK",
                Offs:64/unsigned,
                NumRecords:32/unsigned,
                _Crc:32/integer,
-               DataSize:32/unsigned>>} ->
+               DataSize:32/unsigned>>}
+        %% MaxOffset can be undefined, when that is the case this guard
+        %% will return true which is what we expect
+          when Offs =< MaxOffset ->
             %% read header
             ToSend = DataSize + 24,
             ok = sendfile(Fd, Sock, Pos, ToSend),
             FilePos = Pos + ToSend,
             {ok, FilePos} = file:position(Fd, FilePos),
             {ok, State#?MODULE{next_offset = Offs + NumRecords}};
+        {ok, _} ->
+            %% there is data but the committed offset isn't high enough
+            %% reset file pos
+            {ok, Pos} = file:position(Fd, Pos),
+            {end_of_stream, State};
         eof ->
             %% open next segment file and start there if it exists
             SegFile = make_file_name(Next, "segment"),
@@ -250,7 +265,7 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                 {ok, Fd2} ->
                     error_logger:info_msg("sendfile eof ~w", [Next]),
                     ok = file:close(Fd),
-                    send_file(Sock, State#?MODULE{fd = Fd2});
+                    send_file(Sock, State#?MODULE{fd = Fd2}, MaxOffset);
                 {error, enoent} ->
                     {end_of_stream, State}
             end
