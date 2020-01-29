@@ -138,7 +138,7 @@ handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt},
             counters:add(Cnt, 1, 1),
             %% TODO handle empty replicas
             State2 = case Entries of
-                 [] ->
+                         [] ->
                              State1;
                          _ ->
                              ThisBatchOffs = osiris_segment:next_offset(Seg0),

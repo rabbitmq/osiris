@@ -410,13 +410,13 @@ chunk(Blobs, Next) ->
     Bin = IoList,
     Size = erlang:iolist_size(Bin),
     {[<<?MAGIC:4/unsigned,
-       ?VERSION:4/unsigned,
-       (length(Blobs)):16/unsigned,
-       NumRecords:32/unsigned,
-       Next:64/unsigned,
-       0:32/integer,
-       Size:32/unsigned>>,
-     Bin], NumRecords} .
+        ?VERSION:4/unsigned,
+        (length(Blobs)):16/unsigned,
+        NumRecords:32/unsigned,
+        Next:64/unsigned,
+        0:32/integer,
+        Size:32/unsigned>>,
+      Bin], NumRecords}.
 
 write_chunk(Chunk, NextOffset,
             #?MODULE{cfg = #cfg{directory = Dir,

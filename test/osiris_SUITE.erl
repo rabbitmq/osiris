@@ -22,6 +22,7 @@ all_tests() ->
     [
      single_node_write,
      cluster_write,
+     cluster_batch_write,
      read_validate_single_node,
      read_validate,
      single_node_offset_listener,
@@ -88,6 +89,38 @@ cluster_write(Config) ->
     {ok, Leader, _Replicas} = rpc:call(LeaderNode, osiris, start_cluster,
                                        [atom_to_list(Name), Replicas, OConf ]),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
+    receive
+        {osiris_written, _, [42]} ->
+            ok
+    after 2000 ->
+              flush(),
+              exit(osiris_written_timeout)
+    end,
+    Self = self(),
+    _ = spawn(LeaderNode,
+              fun () ->
+                      Seg0 = osiris_writer:init_reader(Leader, 0),
+                      {[{0, <<"mah-data">>}], _Seg} = osiris_segment:read_chunk_parsed(Seg0),
+                      Self ! read_data_ok
+              end),
+    receive
+        read_data_ok -> ok
+    after 2000 ->
+              exit(read_data_ok_timeout)
+    end,
+    [slave:stop(N) || N <- Nodes],
+    ok.
+
+cluster_batch_write(Config) ->
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir)
+                                       || N <- [s1, s2, s3]],
+    OConf = #{dir => ?config(data_dir, Config)},
+    {ok, Leader, _Replicas} = rpc:call(LeaderNode, osiris, start_cluster,
+                                       [atom_to_list(Name), Replicas, OConf]),
+    Batch = {batch, 1, 0, <<0:1, 8:31/unsigned, "mah-data">>},
+    ok = osiris:write(Leader, 42, Batch),
     receive
         {osiris_written, _, [42]} ->
             ok
