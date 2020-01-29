@@ -17,19 +17,36 @@
 
 -define(DEFAULT_MAX_SEGMENT_SIZE, 500 * 1000 * 1000).
 -define(INDEX_RECORD_SIZE, 16).
+-define(MAGIC, 5).
+%% format version
+-define(VERSION, 0).
+-define(HEADER_SIZE, 23).
 
 %% Data format
 %% Write in "chunks" which are batches of blobs
 %%
 %% <<
-%%   <<"CHNK">>/binary, %% MAGIC
+%%   Magic=5:4/unsigned,
+%%   ProtoVersion:4/unsigned,
+%%   NumEntries:16/unsigned, %% need some kind of limit on chunk sizes 64k is a good start
+%%   NumRecords:32/unsigned, %% total including all sub batch entries
 %%   ChunkFirstOffset:64/unsigned,
-%%   NumRecords:32/unsigned,
 %%   ChunkCrc:32/integer, %% CRC for the records portion of the data
 %%   DataLength:32/unsigned, %% length until end of chunk
-%%   RecordLength:32/unsigned,
-%%   RecordData:RecordLength/binary
+%%   [Entry]
 %%   ...>>
+%%
+%%   Entry Format
+%%   <<0=SimpleEntryType:1,
+%%     Size:31/unsigned,
+%%     Data:Size/binary>> |
+%%
+%%   <<1=SubBatchEntryType:1,
+%%     CompressionType:3,
+%%     Reserved:4,
+%%     NumRecords:16/unsigned,
+%%     Size:32/unsigned,
+%%     Data:Size/binary>>
 %%
 %%   Chunks is the unit of replication and read
 %%
@@ -114,16 +131,29 @@ write(Blobs, #?MODULE{cfg = #cfg{},
     write_chunk(Chunk, NextOffset, State).
 
 -spec accept_chunk(iodata(), state()) -> state().
-accept_chunk([<<"CHNK", Next:64/unsigned,
-                Num:32/unsigned, _/binary>> | _] = Chunk,
+accept_chunk([<<?MAGIC:4/unsigned,
+                ?VERSION:4/unsigned,
+                _NumEntries:16/unsigned,
+                NumRecords:32/unsigned,
+                Next:64/unsigned,
+                _Crc:32/integer,
+                _DataSize:32/unsigned,
+                _/binary>> | _] = Chunk,
              #?MODULE{next_offset = Next} = State) ->
-    NextOffset = Next + Num,
+    NextOffset = Next + NumRecords,
     write_chunk(Chunk, NextOffset, State);
 accept_chunk(Binary, State)
   when is_binary(Binary) ->
     accept_chunk([Binary], State);
-accept_chunk([<<"CHNK", Next:64/unsigned,
-                _Num:32/unsigned, _/binary>> | _] = _Chunk,
+accept_chunk([<<?MAGIC:4/unsigned,
+                ?VERSION:4/unsigned,
+                _NumEntries:16/unsigned,
+                _NumRecords:32/unsigned,
+                Next:64/unsigned,
+                _Crc:32/integer,
+                _DataSize:32/unsigned,
+                _/binary>>
+              | _] = _Chunk,
              #?MODULE{next_offset = ExpectedNext}) ->
     exit({accept_chunk_out_of_order, Next, ExpectedNext}).
 
@@ -191,21 +221,23 @@ read_chunk_parsed(#?MODULE{cfg = #cfg{directory = Dir},
                 _ ->
                     atomics:get(Ref, 1)
             end,
-    case file:read(Fd, 4 + 8 + 4 + 4 + 4) of
-        {ok, <<"CHNK",
+    case file:read(Fd, ?HEADER_SIZE) of
+        {ok, <<?MAGIC:4/unsigned,
+               ?VERSION:4/unsigned,
+               _NumEntries:16/unsigned,
+               NumRecords:32/unsigned,
                Offs:64/unsigned,
-               NumBlobs:32/unsigned,
                _Crc:32/integer,
                DataSize:32/unsigned>>}
           when Ref == undefined orelse COffs >= Offs ->
             {ok, BlobData} = file:read(Fd, DataSize),
             %% parse blob data into records
             Records = parse_records(Offs, BlobData, []),
-            {Records, State#?MODULE{next_offset = Offs + NumBlobs}};
+            {Records, State#?MODULE{next_offset = Offs + NumRecords}};
         {ok, _} ->
             %% set the position back for the next read
             % error_logger:info_msg("osiris_segment end coff~w", [COffs]),
-            {ok, _} = file:position(Fd, {cur, -24}),
+            {ok, _} = file:position(Fd, {cur, -?HEADER_SIZE}),
             {end_of_stream, State};
         eof ->
             %% open next segment file and start there if it exists
@@ -237,24 +269,33 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                          next_offset = Next} = State,
          MaxOffset) ->
     {ok, Pos} = file:position(Fd, cur),
-    case file:read(Fd, 24) of
-        {ok, <<"CHNK",
-               Offs:64/unsigned,
+    case file:read(Fd, ?HEADER_SIZE) of
+        {ok, <<?MAGIC:4/unsigned,
+               ?VERSION:4/unsigned,
+               _NumEntries:16/unsigned,
                NumRecords:32/unsigned,
+               Offs:64/unsigned,
                _Crc:32/integer,
                DataSize:32/unsigned>>}
         %% MaxOffset can be undefined, when that is the case this guard
         %% will return true which is what we expect
           when Offs =< MaxOffset ->
             %% read header
-            ToSend = DataSize + 24,
+            ToSend = DataSize + ?HEADER_SIZE,
             ok = sendfile(Fd, Sock, Pos, ToSend),
             FilePos = Pos + ToSend,
             {ok, FilePos} = file:position(Fd, FilePos),
             {ok, State#?MODULE{next_offset = Offs + NumRecords}};
-        {ok, _} ->
+        {ok, <<?MAGIC:4/unsigned,
+               ?VERSION:4/unsigned,
+               _NumEntries:16/unsigned,
+               _NumRecords:32/unsigned,
+               Offs:64/unsigned,
+               _Crc:32/integer,
+               _DataSize:32/unsigned>>} ->
             %% there is data but the committed offset isn't high enough
             %% reset file pos
+            ct:pal("we should not get here!!!!!!!!!!!!! ~w ~w", [MaxOffset, Offs]),
             {ok, Pos} = file:position(Fd, Pos),
             {end_of_stream, State};
         eof ->
@@ -302,9 +343,11 @@ scan_index(<<O:64/unsigned,
      end.
 
 parse_records(_Offs, <<>>, Acc) ->
+    %% TODO: this could probably be changed to body recursive
     lists:reverse(Acc);
-parse_records(Offs, <<Len:32/unsigned, _:64/unsigned,
-                      Data:Len/binary, Rem/binary>>, Acc) ->
+parse_records(Offs, <<Len:32/unsigned,
+                      Data:Len/binary,
+                      Rem/binary>>, Acc) ->
     parse_records(Offs+1, Rem, [{Offs, Data} | Acc]).
 
 find_next_offset(Dir) ->
@@ -342,18 +385,19 @@ find_next_offset0(NextOffs, [IdxFile | Rem]) ->
 chunk(Blobs, Next) ->
     {_, IoList} = lists:foldr(
                     fun (B, {NextOff, Acc}) ->
-                            Data = [
-                                    <<(iolist_size(B)):32/unsigned>>,
-                                    <<NextOff:64/unsigned>>,
-                                    B],
+                            Data = [<<0:1, %% simple record type
+                                      (iolist_size(B)):31/unsigned>>, B],
                             {NextOff+1, [Data | Acc]}
                     end, {Next, []}, Blobs),
     % Bin = term_to_binary(IoList, [{compressed, 9}]),
     Bin = IoList,
     Size = erlang:iolist_size(Bin),
-    [<<"CHNK">>,
-     <<Next:64/unsigned,
-       (length(Blobs)):32/unsigned,
+    NumRecords = length(Blobs),
+    [<<?MAGIC:4/unsigned,
+       ?VERSION:4/unsigned,
+       (length(Blobs)):16/unsigned,
+       NumRecords:32/unsigned,
+       Next:64/unsigned,
        0:32/integer,
        Size:32/unsigned>>,
      Bin].

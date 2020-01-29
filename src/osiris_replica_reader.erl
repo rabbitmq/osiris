@@ -104,7 +104,6 @@ handle_cast({more_data, _LastOffset},
                    socket = Sock} = State) ->
     {ok, Seg} = do_sendfile(Sock, Seg0),
     LastOffset = osiris_segment:next_offset(Seg) - 1,
-    % error_logger:info_msg("replicate reader listen for ~b", [LastOffset]),
     ok = osiris_writer:register_data_listener(LeaderPid, LastOffset),
     {noreply, State#state{segment = Seg}};
 handle_cast(stop, State) ->
