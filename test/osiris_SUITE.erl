@@ -171,25 +171,24 @@ read_validate_single_node(Config) ->
 read_validate(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = atom_to_list(?FUNCTION_NAME),
-    % Num = 500000,
-    Num = 1000,
+    Num = 500000,
     OConf = #{dir => ?config(data_dir, Config)},
     [_LNode | Replicas] = Nodes =  [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
     {ok, Leader, _} = rpc:call(node(), osiris, start_cluster,
                                [Name, Replicas, OConf]),
     timer:sleep(500),
     {Time, _} = timer:tc(fun () ->
-                                 % _Self = self(),
-                                 % spawn(fun () ->
-                                 %               write_n(Leader, Num div 2, #{}),
-                                 %               Self ! done
-                                 %       end),
-                                 write_n(Leader, Num, #{})
-                                 % receive
-                                 %     done -> ok
-                                 % after 1000 * 60 ->
-                                 %           exit(blah)
-                                 % end
+                                 Self = self(),
+                                 spawn(fun () ->
+                                               write_n(Leader, Num div 2, #{}),
+                                               Self ! done
+                                       end),
+                                 write_n(Leader, Num div 2, #{}),
+                                 receive
+                                     done -> ok
+                                 after 1000 * 60 ->
+                                           exit(blah)
+                                 end
                          end),
 
     MsgSec = Num / (Time / 1000 / 1000),
@@ -286,7 +285,7 @@ wait_for_written(Written0) ->
     receive
         {osiris_written, _Name, Corrs} ->
             Written = maps:without(Corrs, Written0),
-            ct:pal("written ~w", [length(Corrs)]),
+            % ct:pal("written ~w", [length(Corrs)]),
             case maps:size(Written) of
                 0 ->
                     ok;
