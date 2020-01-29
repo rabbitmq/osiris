@@ -151,7 +151,7 @@ single_node_offset_listener(Config) ->
     osiris_writer:register_offset_listener(Leader),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
     receive
-        {osiris_offset, _Name, _} ->
+        {osiris_offset, _Name, 0} ->
             {[{0, <<"mah-data">>}], Seg} = osiris_segment:read_chunk_parsed(Seg0),
             {end_of_stream, _} = osiris_segment:read_chunk_parsed(Seg),
             ok
@@ -159,6 +159,7 @@ single_node_offset_listener(Config) ->
               flush(),
               exit(osiris_offset_timeout)
     end,
+    flush(),
     ok.
 
 cluster_offset_listener(Config) ->
