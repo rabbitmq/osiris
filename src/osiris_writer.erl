@@ -134,16 +134,16 @@ handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt},
 
     %% filter write commands
     case handle_commands(Commands, State0, {[], [], #{}}) of
-        {Records, Replies, Corrs, State1} ->
+        {Entries, Replies, Corrs, State1} ->
             %% incr batch counter
             counters:add(Cnt, 1, 1),
             %% TODO handle empty replicas
-            State2 = case Records of
+            State2 = case Entries of
                  [] ->
                              State1;
                          _ ->
                              ThisBatchOffs = osiris_segment:next_offset(Seg0),
-                             Seg = osiris_segment:write(Records, Seg0),
+                             Seg = osiris_segment:write(Entries, Seg0),
                              LastOffs = osiris_segment:next_offset(Seg) - 1,
                              %% update written
                              counters:put(Cnt, 2, LastOffs),

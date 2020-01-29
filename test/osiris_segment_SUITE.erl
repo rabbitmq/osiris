@@ -23,6 +23,7 @@ all_tests() ->
      init_empty,
      init_recover,
      write_batch,
+     subbatch,
      read_chunk_parsed,
      read_chunk_parsed_multiple_chunks,
      write_multi_segment
@@ -77,6 +78,24 @@ write_batch(Config) ->
     S1 = osiris_segment:write([<<"hi">>], S0),
     % ?assertEqual([{0, <<"hi">>}], S2S1 = osiris_segment:write([<<"hi">>]. S0),
     ?assertEqual(1, osiris_segment:next_offset(S1)),
+    ok.
+
+subbatch(Config) ->
+    S0 = osiris_segment:init(?config(dir, Config), #{}),
+    IOData = [
+              <<0:1, 2:31/unsigned, "hi">>,
+              <<0:1, 2:31/unsigned, "h0">>
+              ],
+    CompType = 0, %% no compression
+    Batch = {batch, 2, CompType, IOData},
+    S1 = osiris_segment:write([Batch, <<"simple">>], S0),
+    % ?assertEqual([{0, <<"hi">>}], S2S1 = osiris_segment:write([<<"hi">>]. S0),
+    ?assertEqual(3, osiris_segment:next_offset(S1)),
+    R0 = osiris_segment:init_reader(0, #{dir => ?config(dir, Config)}),
+    ?assertMatch({[{0, <<"hi">>},
+                   {1, <<"h0">>},
+                   {2, <<"simple">>}], _},
+                 osiris_segment:read_chunk_parsed(R0)),
     ok.
 
 read_chunk_parsed(Config) ->

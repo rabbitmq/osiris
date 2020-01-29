@@ -116,18 +116,19 @@ init(Dir, Config) ->
              next_offset = NextOffset,
              index_fd = IdxFd}.
 
--spec write([iodata()], state()) -> state().
+-spec write([iodata() | {batch, non_neg_integer(), 0, iodata()}], state()) ->
+    state().
 write([], #?MODULE{cfg = #cfg{}} = State) ->
     State;
-write(Blobs, #?MODULE{cfg = #cfg{},
-                      next_offset = Next} = State) ->
+write(Entries, #?MODULE{cfg = #cfg{},
+                        next_offset = Next} = State) ->
     %% assigns indexes to all blobs
     %% checks segment size
     %% rolls over to new segment file if needed
     %% Records range in ETS segment lookup table
     %% Writes every n blob index/offsets to index file
-    Chunk = chunk(Blobs, Next),
-    NextOffset = Next + length(Blobs),
+    {Chunk, NumRecords} = chunk(Entries, Next),
+    NextOffset = Next + NumRecords,
     write_chunk(Chunk, NextOffset, State).
 
 -spec accept_chunk(iodata(), state()) -> state().
@@ -345,10 +346,20 @@ scan_index(<<O:64/unsigned,
 parse_records(_Offs, <<>>, Acc) ->
     %% TODO: this could probably be changed to body recursive
     lists:reverse(Acc);
-parse_records(Offs, <<Len:32/unsigned,
+parse_records(Offs, <<0:1, %% simple
+                      Len:31/unsigned,
                       Data:Len/binary,
                       Rem/binary>>, Acc) ->
-    parse_records(Offs+1, Rem, [{Offs, Data} | Acc]).
+    parse_records(Offs+1, Rem, [{Offs, Data} | Acc]);
+parse_records(Offs, <<1:1, %% simple
+                      0:3/unsigned, %% compression type
+                      _:4/unsigned, %% reserved
+                      NumRecs:16/unsigned,
+                      Len:32/unsigned,
+                      Data:Len/binary,
+                      Rem/binary>>, Acc) ->
+    Recs = parse_records(Offs, Data, []),
+    parse_records(Offs+NumRecs, Rem, lists:reverse(Recs) ++ Acc).
 
 find_next_offset(Dir) ->
     IdxFiles = lists:reverse(lists:sort(
@@ -383,24 +394,29 @@ find_next_offset0(NextOffs, [IdxFile | Rem]) ->
 
 
 chunk(Blobs, Next) ->
-    {_, IoList} = lists:foldr(
-                    fun (B, {NextOff, Acc}) ->
-                            Data = [<<0:1, %% simple record type
-                                      (iolist_size(B)):31/unsigned>>, B],
-                            {NextOff+1, [Data | Acc]}
-                    end, {Next, []}, Blobs),
-    % Bin = term_to_binary(IoList, [{compressed, 9}]),
+    {NumRecords, IoList} =
+    lists:foldr(fun ({batch, NumRecords, CompType, B}, {Count, Acc}) ->
+                        Data = [<<1:1, %% batch record type
+                                  CompType:3/unsigned,
+                                  0:4/unsigned,
+                                  NumRecords:16/unsigned,
+                                  (iolist_size(B)):32/unsigned>>, B],
+                        {Count+NumRecords, [Data | Acc]};
+                    (B, {Count, Acc}) ->
+                        Data = [<<0:1, %% simple record type
+                                  (iolist_size(B)):31/unsigned>>, B],
+                        {Count+1, [Data | Acc]}
+                end, {0, []}, Blobs),
     Bin = IoList,
     Size = erlang:iolist_size(Bin),
-    NumRecords = length(Blobs),
-    [<<?MAGIC:4/unsigned,
+    {[<<?MAGIC:4/unsigned,
        ?VERSION:4/unsigned,
        (length(Blobs)):16/unsigned,
        NumRecords:32/unsigned,
        Next:64/unsigned,
        0:32/integer,
        Size:32/unsigned>>,
-     Bin].
+     Bin], NumRecords} .
 
 write_chunk(Chunk, NextOffset,
             #?MODULE{cfg = #cfg{directory = Dir,

@@ -192,7 +192,8 @@ read_validate(Config) ->
                          end),
 
     MsgSec = Num / (Time / 1000 / 1000),
-    ct:pal("~b writes took ~wms ~w msg/s", [Num, Time div 1000, MsgSec]),
+    ct:pal("~b writes took ~wms ~w msg/s",
+           [Num, trunc(Time div 1000), trunc(MsgSec)]),
     ct:pal("counters ~p", [osiris_counters:overview()]),
     Seg0 = osiris_writer:init_reader(Leader, 0),
     {_, _} = timer:tc(fun() -> validate_read(Num, Seg0) end),
