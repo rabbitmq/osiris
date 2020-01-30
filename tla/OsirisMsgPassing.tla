@@ -572,7 +572,10 @@ NoDivergence ==
     \/ /\ coord_leader # 0
        /\ \A r \in R :
             IF rep_state[r] = "follower" /\ rep_epoch[r] = rep_epoch[coord_leader] THEN
-                \A record \in rep_log[r] : record \in rep_log[coord_leader]
+                /\ \A record \in rep_log[r] : record \in rep_log[coord_leader]
+                /\ \A record \in rep_log[coord_leader] :
+                    \/ record.offset > rep_leo[r]
+                    \/ record \in rep_log[r] 
             ELSE
                 TRUE
 
@@ -611,5 +614,6 @@ TestInv ==
 
 =============================================================================
 \* Modification History
+\* Last modified Thu Jan 30 02:05:37 PST 2020 by jack
 \* Last modified Wed Jan 29 16:04:31 CET 2020 by GUNMETAL
 \* Created Mon Jan 27 18:48:47 CET 2020 by GUNMETAL

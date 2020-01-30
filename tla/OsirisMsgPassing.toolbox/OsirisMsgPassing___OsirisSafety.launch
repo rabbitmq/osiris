@@ -7,12 +7,12 @@
     <intAttribute key="dfidDepth" value="100"/>
     <booleanAttribute key="dfidMode" value="false"/>
     <intAttribute key="distributedFPSetCount" value="0"/>
-    <stringAttribute key="distributedNetworkInterface" value="192.168.233.1"/>
+    <stringAttribute key="distributedNetworkInterface" value="172.17.0.1"/>
     <intAttribute key="distributedNodesCount" value="1"/>
     <stringAttribute key="distributedTLC" value="off"/>
     <stringAttribute key="distributedTLCVMArgs" value="-XX:+UseParallelGC"/>
     <intAttribute key="fpBits" value="1"/>
-    <intAttribute key="fpIndex" value="95"/>
+    <intAttribute key="fpIndex" value="0"/>
     <booleanAttribute key="fpIndexRandom" value="true"/>
     <intAttribute key="maxHeapSize" value="80"/>
     <intAttribute key="maxSetSize" value="1000000"/>
@@ -44,14 +44,14 @@
     <listAttribute key="modelParameterDefinitions"/>
     <stringAttribute key="modelParameterModelValues" value="{}"/>
     <stringAttribute key="modelParameterNewDefinitions" value=""/>
-    <intAttribute key="numberOfWorkers" value="24"/>
+    <intAttribute key="numberOfWorkers" value="6"/>
     <booleanAttribute key="recover" value="false"/>
     <stringAttribute key="result.mail.address" value=""/>
     <intAttribute key="simuAril" value="-1"/>
     <intAttribute key="simuDepth" value="100"/>
     <intAttribute key="simuSeed" value="-1"/>
     <stringAttribute key="specName" value="OsirisMsgPassing"/>
-    <stringAttribute key="tlcResourcesProfile" value="local custom"/>
+    <stringAttribute key="tlcResourcesProfile" value="local most"/>
     <stringAttribute key="view" value=""/>
     <booleanAttribute key="visualizeStateGraph" value="false"/>
 </launchConfiguration>
