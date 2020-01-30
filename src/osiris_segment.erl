@@ -318,7 +318,7 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
             %% reset file pos
             {ok, Pos} = file:position(Fd, Pos),
             {end_of_stream, State};
-        eof ->
+        _ ->
             %% open next segment file and start there if it exists
             SegFile = make_file_name(Next, "segment"),
             case file:open(filename:join(Dir, SegFile),
