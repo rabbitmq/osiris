@@ -112,8 +112,8 @@ init(#{name := Name,
     % counters:add(Cnt, 1, 1),
     % counters:add(CntRef, 2, 1),
     atomics:put(ORef, 1, LastOffs),
-    counters:put(CntRef, 2, LastOffs),
-    counters:put(CntRef, 3, LastOffs),
+    counters:add(CntRef, 2, LastOffs),
+    counters:add(CntRef, 3, LastOffs),
     {ok, #?MODULE{cfg = #cfg{name = Name,
                              %% reference used for notification
                              %% if not provided use the name
