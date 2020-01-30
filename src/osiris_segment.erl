@@ -10,9 +10,8 @@
 
          init_reader/2,
          read_chunk_parsed/1,
-         close/1,
+         close/1
 
-         chunk/2
          ]).
 
 -define(DEFAULT_MAX_SEGMENT_SIZE, 500 * 1000 * 1000).
@@ -20,7 +19,7 @@
 -define(MAGIC, 5).
 %% format version
 -define(VERSION, 0).
--define(HEADER_SIZE, 23).
+-define(HEADER_SIZE, 31).
 
 %% Data format
 %% Write in "chunks" which are batches of blobs
@@ -30,6 +29,7 @@
 %%   ProtoVersion:4/unsigned,
 %%   NumEntries:16/unsigned, %% need some kind of limit on chunk sizes 64k is a good start
 %%   NumRecords:32/unsigned, %% total including all sub batch entries
+%%   Epoch:64/unsigned,
 %%   ChunkFirstOffset:64/unsigned,
 %%   ChunkCrc:32/integer, %% CRC for the records portion of the data
 %%   DataLength:32/unsigned, %% length until end of chunk
@@ -71,6 +71,7 @@
                   index_fd :: undefined | file:io_device(),
                   offset_ref :: undefined | file:io_device(),
                   segment_size = 0 :: non_neg_integer(),
+                  current_epoch = 0 :: non_neg_integer(),
                   next_offset = 0 :: offset()}).
 
 -opaque state() :: #?MODULE{}.
@@ -121,13 +122,14 @@ init(Dir, Config) ->
 write([], #?MODULE{cfg = #cfg{}} = State) ->
     State;
 write(Entries, #?MODULE{cfg = #cfg{},
+                        current_epoch = Epoch,
                         next_offset = Next} = State) ->
     %% assigns indexes to all blobs
     %% checks segment size
     %% rolls over to new segment file if needed
     %% Records range in ETS segment lookup table
     %% Writes every n blob index/offsets to index file
-    {Chunk, NumRecords} = chunk(Entries, Next),
+    {Chunk, NumRecords} = chunk(Entries, Epoch, Next),
     NextOffset = Next + NumRecords,
     write_chunk(Chunk, NextOffset, State).
 
@@ -136,6 +138,7 @@ accept_chunk([<<?MAGIC:4/unsigned,
                 ?VERSION:4/unsigned,
                 _NumEntries:16/unsigned,
                 NumRecords:32/unsigned,
+                _Epoch:64/unsigned,
                 Next:64/unsigned,
                 _Crc:32/integer,
                 _DataSize:32/unsigned,
@@ -150,6 +153,7 @@ accept_chunk([<<?MAGIC:4/unsigned,
                 ?VERSION:4/unsigned,
                 _NumEntries:16/unsigned,
                 _NumRecords:32/unsigned,
+                _Epoch:64/unsigned,
                 Next:64/unsigned,
                 _Crc:32/integer,
                 _DataSize:32/unsigned,
@@ -227,6 +231,7 @@ read_chunk_parsed(#?MODULE{cfg = #cfg{directory = Dir},
                ?VERSION:4/unsigned,
                _NumEntries:16/unsigned,
                NumRecords:32/unsigned,
+                _Epoch:64/unsigned,
                Offs:64/unsigned,
                _Crc:32/integer,
                DataSize:32/unsigned>>}
@@ -275,6 +280,7 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                ?VERSION:4/unsigned,
                _NumEntries:16/unsigned,
                NumRecords:32/unsigned,
+                _Epoch:64/unsigned,
                Offs:64/unsigned,
                _Crc:32/integer,
                DataSize:32/unsigned>>}
@@ -291,6 +297,7 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                ?VERSION:4/unsigned,
                _NumEntries:16/unsigned,
                _NumRecords:32/unsigned,
+                _Epoch:64/unsigned,
                Offs:64/unsigned,
                _Crc:32/integer,
                _DataSize:32/unsigned>>} ->
@@ -393,7 +400,7 @@ find_next_offset0(NextOffs, [IdxFile | Rem]) ->
     end.
 
 
-chunk(Blobs, Next) ->
+chunk(Blobs, Epoch, Next) ->
     {NumRecords, IoList} =
     lists:foldr(fun ({batch, NumRecords, CompType, B}, {Count, Acc}) ->
                         Data = [<<1:1, %% batch record type
@@ -413,6 +420,7 @@ chunk(Blobs, Next) ->
         ?VERSION:4/unsigned,
         (length(Blobs)):16/unsigned,
         NumRecords:32/unsigned,
+        Epoch:64/unsigned,
         Next:64/unsigned,
         0:32/integer,
         Size:32/unsigned>>,

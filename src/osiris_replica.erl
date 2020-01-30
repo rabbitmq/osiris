@@ -5,7 +5,7 @@
 -define(MAGIC, 5).
 %% format version
 -define(VERSION, 0).
--define(HEADER_SIZE, 23).
+-define(HEADER_SIZE, 31).
 
 %% osiris replica, spaws remote reader, TCP listener
 %% replicates and confirms latest offset back to primary
@@ -285,6 +285,7 @@ parse_chunk(<<?MAGIC:4/unsigned,
               ?VERSION:4/unsigned,
               _NumEntries:16/unsigned,
               _NumRecords:32/unsigned,
+                _Epoch:64/unsigned,
               FirstOffset:64/unsigned,
               _Crc:32/integer,
               Size:32/unsigned,
@@ -300,6 +301,7 @@ parse_chunk(<<?MAGIC:4/unsigned,
               ?VERSION:4/unsigned,
               _NumEntries:16/unsigned,
               _NumRecords:32/unsigned,
+                _Epoch:64/unsigned,
               FirstOffset:64/unsigned,
               _Crc:32/integer,
               Size:32/unsigned,
