@@ -75,8 +75,8 @@ register_data_listener(Pid, Offset) ->
 register_offset_listener(Pid) ->
     ok = gen_batch_server:cast(Pid, {register_offset_listener, self()}).
 
-ack(LeaderPid, Offset) ->
-    gen_batch_server:cast(LeaderPid, {ack, node(), Offset}).
+ack(LeaderPid, Offsets) ->
+    gen_batch_server:cast(LeaderPid, {ack, node(), Offsets}).
 
 write(Pid, Sender, Corr, Data) ->
     gen_batch_server:cast(Pid, {write, Sender, Corr, Data}).
@@ -187,12 +187,6 @@ update_pending(BatchOffs, Corrs,
                           Pending0#{BatchOffs => {Replicas, Corrs}}}
     end.
 
-notify_writers(Name, Corrs) ->
-    maps:map(
-      fun (P, V) ->
-              P ! {osiris_written, Name, lists:reverse(V)}
-      end, Corrs).
-
 handle_commands([], State, {Records, Replies, Corrs}) ->
     {lists:reverse(Records), Replies, Corrs, State};
 handle_commands([{cast, {write, Pid, Corr, R}} | Rem], State,
@@ -210,24 +204,30 @@ handle_commands([{cast, {register_offset_listener, Pid}} | Rem],
     %% TODO: only notify the newly registered offset listener
     notify_offset_listeners(State),
     handle_commands(Rem, State, Acc);
-handle_commands([{cast, {ack, ReplicaNode, Offset}} | Rem],
+handle_commands([{cast, {ack, ReplicaNode, Offsets}} | Rem],
                 #?MODULE{cfg = #cfg{ext_reference = Ref,
                                     counter = Cnt,
                                     offset_ref = ORef},
                          committed_offset = COffs0,
                          pending_writes = Pending0} = State0, Acc) ->
-    {COffs, Pending} = case maps:get(Offset, Pending0) of
-                           {[ReplicaNode], Corrs} ->
-                               _ = notify_writers(Ref, Corrs),
-                               atomics:put(ORef, 1, Offset),
-                               counters:put(Cnt, 3, Offset),
-                               {Offset, maps:remove(Offset, Pending0)};
-                           {Reps, Corrs} ->
-                               Reps1 = lists:delete(ReplicaNode, Reps),
-                               {COffs0, maps:update(Offset,
-                                                    {Reps1, Corrs},
-                                                    Pending0)}
-                       end,
+    % ct:pal("acks ~w", [Offsets]),
+
+    {COffs, Pending} = lists:foldl(
+                         fun (Offset, {C0, P0}) ->
+                                 case maps:get(Offset, P0) of
+                                     {[ReplicaNode], Corrs} ->
+                                         _ = notify_writers(Ref, Corrs),
+                                         atomics:put(ORef, 1, Offset),
+                                         counters:put(Cnt, 3, Offset),
+                                         {Offset, maps:remove(Offset, P0)};
+                                     {Reps, Corrs} ->
+                                         Reps1 = lists:delete(ReplicaNode, Reps),
+                                         {C0, maps:update(Offset,
+                                                          {Reps1, Corrs},
+                                                          P0)}
+                                 end
+                         end, {COffs0, Pending0}, Offsets),
+    % ct:pal("acks after ~w ~W", [COffs, Pending, 5]),
     State = State0#?MODULE{pending_writes = Pending,
                            committed_offset = COffs},
     %% if committed offset has incresed - update 
@@ -278,3 +278,10 @@ notify_offset_listeners(#?MODULE{cfg = #cfg{ext_reference = Ref},
          P ! {osiris_offset, Ref, COffs}
      end || P <- L0],
     ok.
+
+notify_writers(Name, Corrs) ->
+    maps:map(
+      fun (P, V) ->
+              P ! {osiris_written, Name, lists:reverse(V)}
+      end, Corrs).
+

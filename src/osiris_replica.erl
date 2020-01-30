@@ -153,7 +153,7 @@ open_tcp_port(Min, Max) ->
     RcvBuf = 408300 * 5,
     case gen_tcp:listen(Min, [binary,
                               {packet, raw},
-                              {active, true},
+                              {active, false},
                               {buffer, RcvBuf * 2},
                               {recbuf, RcvBuf}
                              ]) of
@@ -224,6 +224,7 @@ handle_cast(_Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info({socket, Socket}, #?MODULE{cfg = Cfg} = State) ->
+    ok = inet:setopts(Socket, [{active, 5}]),
 
     {noreply, State#?MODULE{cfg = Cfg#cfg{socket = Socket}}};
 handle_info({tcp, Socket, Bin},
@@ -231,16 +232,23 @@ handle_info({tcp, Socket, Bin},
                                 leader_pid = LeaderPid},
                      parse_state = ParseState0,
                      segment = Segment0} = State) ->
+    ok = inet:setopts(Socket, [{active, 1}]),
     %% validate chunk
     {ParseState, OffsetChunks} = parse_chunk(Bin, ParseState0, []),
-    Segment = lists:foldl(
-                fun({FirstOffset, B}, Acc0) ->
-                        Acc = osiris_segment:accept_chunk(B, Acc0),
-                        ok = osiris_writer:ack(LeaderPid, FirstOffset),
-                        Acc
-                end, Segment0, OffsetChunks),
+    {Acks, Segment} = lists:foldl(
+                        fun({FirstOffset, B}, {Aks, Acc0}) ->
+                                Acc = osiris_segment:accept_chunk(B, Acc0),
+                                %% TODO: batched acks
+                                {[FirstOffset | Aks], Acc}
+                        end, {[], Segment0}, OffsetChunks),
+    ok = osiris_writer:ack(LeaderPid, lists:reverse(Acks)),
     {noreply, State#?MODULE{segment = Segment,
                             parse_state = ParseState}};
+handle_info({tcp_passive, Socket},
+            #?MODULE{cfg = #cfg{socket = Socket}} = State) ->
+    %% we always top up before processing each packet so no need to do anything
+    %% here
+    {noreply, State};
 handle_info({tcp_closed, Socket},
             #?MODULE{cfg = #cfg{socket = Socket}} = State) ->
     error_logger:info_msg("Socket closed ~n", []),
