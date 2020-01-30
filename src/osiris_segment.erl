@@ -7,6 +7,7 @@
          next_offset/1,
          send_file/2,
          send_file/3,
+         send_file/4,
 
          init_reader/2,
          read_chunk_parsed/1,
@@ -262,18 +263,29 @@ read_chunk_parsed(#?MODULE{cfg = #cfg{directory = Dir},
             {error, {invalid_chunk_header, Invalid}}
     end.
 
+
+
 -spec send_file(gen_tcp:socket(), state()) ->
     {ok, state()} | {end_of_stream, state()}.
 send_file(Sock, State) ->
     send_file(Sock, State, undefined).
 
 -spec send_file(gen_tcp:socket(), state(),
-                non_neg_integer() | undefined) ->
+    non_neg_integer() | undefined) ->
+  {ok, state()} | {end_of_stream, state()}.
+send_file(Sock, State, MaxOffset) ->
+  send_file(Sock, State, MaxOffset, fun empty_function/1).
+
+empty_function(_) ->
+  ok.
+
+-spec send_file(gen_tcp:socket(), state(),
+                non_neg_integer() | undefined, fun((non_neg_integer()) -> none())) ->
     {ok, state()} | {end_of_stream, state()}.
 send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                          fd = Fd,
                          next_offset = Next} = State,
-         MaxOffset) ->
+         MaxOffset, Callback) ->
     {ok, Pos} = file:position(Fd, cur),
     case file:read(Fd, ?HEADER_SIZE) of
         {ok, <<?MAGIC:4/unsigned,
@@ -289,6 +301,7 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
           when Offs =< MaxOffset ->
             %% read header
             ToSend = DataSize + ?HEADER_SIZE,
+            Callback(ToSend),
             ok = sendfile(Fd, Sock, Pos, ToSend),
             FilePos = Pos + ToSend,
             {ok, FilePos} = file:position(Fd, FilePos),
@@ -303,7 +316,6 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                _DataSize:32/unsigned>>} ->
             %% there is data but the committed offset isn't high enough
             %% reset file pos
-            ct:pal("we should not get here!!!!!!!!!!!!! ~w ~w", [MaxOffset, Offs]),
             {ok, Pos} = file:position(Fd, Pos),
             {end_of_stream, State};
         eof ->
@@ -314,7 +326,7 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                 {ok, Fd2} ->
                     error_logger:info_msg("sendfile eof ~w", [Next]),
                     ok = file:close(Fd),
-                    send_file(Sock, State#?MODULE{fd = Fd2}, MaxOffset);
+                    send_file(Sock, State#?MODULE{fd = Fd2}, MaxOffset, Callback);
                 {error, enoent} ->
                     {end_of_stream, State}
             end
