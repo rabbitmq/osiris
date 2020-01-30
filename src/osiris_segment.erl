@@ -311,7 +311,7 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                _NumEntries:16/unsigned,
                _NumRecords:32/unsigned,
                 _Epoch:64/unsigned,
-               Offs:64/unsigned,
+               _Offs:64/unsigned,
                _Crc:32/integer,
                _DataSize:32/unsigned>>} ->
             %% there is data but the committed offset isn't high enough
