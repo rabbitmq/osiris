@@ -318,6 +318,11 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
             %% reset file pos
             {ok, Pos} = file:position(Fd, Pos),
             {end_of_stream, State};
+        {ok, _} ->
+            %% partial data available
+            %% reset and wait for update
+            {ok, Pos} = file:position(Fd, Pos),
+            {end_of_stream, State};
         _ ->
             %% open next segment file and start there if it exists
             SegFile = make_file_name(Next, "segment"),
