@@ -31,6 +31,8 @@ all_tests() ->
      cluster_delete
     ].
 
+-define(BIN_SIZE, 800).
+
 groups() ->
     [
      {tests, [], all_tests()}
@@ -210,6 +212,10 @@ read_validate(Config) ->
     [_LNode | Replicas] = Nodes =  [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
     {ok, Leader, _} = rpc:call(node(), osiris, start_cluster,
                                [Name, Replicas, OConf]),
+
+    {_, GarbBefore} = erlang:process_info(Leader, garbage_collection),
+    {_, MemBefore} = erlang:process_info(Leader, memory),
+    {_, BinBefore} = erlang:process_info(Leader, binary),
     timer:sleep(500),
     {Time, _} = timer:tc(fun () ->
                                  Self = self(),
@@ -224,7 +230,14 @@ read_validate(Config) ->
                                            exit(blah)
                                  end
                          end),
+    {_, BinAfter} = erlang:process_info(Leader, binary),
+    {_, GarbAfter} = erlang:process_info(Leader, garbage_collection),
+    {_, MemAfter} = erlang:process_info(Leader, memory),
+    {reductions, _RedsAfter} = erlang:process_info(Leader, reductions),
 
+    ct:pal("Binary:~n~w~n~w~n", [length(BinBefore), length(BinAfter)]),
+    ct:pal("Garbage:~n~w~n~w~n", [GarbBefore, GarbAfter]),
+    ct:pal("Memory:~n~w~n~w~n", [MemBefore, MemAfter]),
     MsgSec = Num / (Time / 1000 / 1000),
     ct:pal("~b writes took ~wms ~w msg/s",
            [Num, trunc(Time div 1000), trunc(MsgSec)]),
@@ -313,7 +326,7 @@ write_n(_Pid, N, N, Written) ->
     wait_for_written(Written),
     ok;
 write_n(Pid, N, Next, Written) ->
-    ok = osiris:write(Pid, Next, <<Next:800/integer>>),
+    ok = osiris:write(Pid, Next, <<Next:?BIN_SIZE/integer>>),
     write_n(Pid, N, Next + 1, Written#{Next => ok}).
 
 wait_for_written(Written0) ->

@@ -151,7 +151,7 @@ handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt},
                      end,
             %% write to log and index files
             State = notify_data_listeners(State2),
-            {ok, Replies, State};
+            {ok, [garbage_collect | Replies], State};
         {stop, normal} ->
             {stop, normal}
     end.
@@ -248,7 +248,8 @@ handle_commands([{call, From, get_reader_context} | Rem],
                             committed_offset => max(0, COffs),
                             offset_ref => ORef}},
     handle_commands(Rem, State, {Records, [Reply | Replies], Corrs});
-handle_commands([{call, From, delete} | _], #?MODULE{cfg = #cfg{directory = Dir}}, _) ->
+handle_commands([{call, From, delete} | _],
+                #?MODULE{cfg = #cfg{directory = Dir}}, _) ->
     {ok, Files} = file:list_dir(Dir),
     [ok = file:delete(filename:join(Dir, F)) || F <- Files],
     ok = file:del_dir(Dir),
