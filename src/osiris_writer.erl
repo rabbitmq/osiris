@@ -156,7 +156,9 @@ handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt},
             {stop, normal}
     end.
 
-terminate(_, #?MODULE{data_listeners = Listeners}) ->
+terminate(_, #?MODULE{data_listeners = Listeners,
+                      cfg = #cfg{ext_reference = ExtRef}}) ->
+    ok = osiris_counters:delete({?MODULE, ExtRef}),
     [osiris_replica_reader:stop(Pid) || {Pid, _} <- Listeners],
     ok.
 

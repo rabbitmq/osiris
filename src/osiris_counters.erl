@@ -4,7 +4,8 @@
          init/0,
          new/2,
          fetch/1,
-         overview/0
+         overview/0,
+         delete/1
          ]).
 
 %% holds static or rarely changing fields
@@ -40,6 +41,11 @@ fetch(Name) ->
         _ ->
             undefined
     end.
+
+-spec delete(atom()) -> ok.
+delete(Name) ->
+    true = ets:delete(?MODULE, Name),
+    ok.
 
 -spec overview() ->
     #{atom() => #{atom() => non_neg_integer()}}.
