@@ -242,6 +242,7 @@ handle_info({tcp, Socket, Bin},
                                 {[FirstOffset | Aks], Acc}
                         end, {[], Segment0}, OffsetChunks),
     ok = osiris_writer:ack(LeaderPid, lists:reverse(Acks)),
+    erlang:garbage_collect(),
     {noreply, State#?MODULE{segment = Segment,
                             parse_state = ParseState}};
 handle_info({tcp_passive, Socket},
