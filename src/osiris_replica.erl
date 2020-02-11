@@ -28,7 +28,8 @@
               directory :: file:filename(),
               port :: non_neg_integer(),
               listening_socket :: gen_tcp:socket(),
-              socket :: undefined | gen_tcp:socket()
+              socket :: undefined | gen_tcp:socket(),
+              gc_interval :: non_neg_integer()
              }).
 
 -type parse_state() :: undefined | binary() | {iolist(), non_neg_integer()}.
@@ -102,7 +103,7 @@ get_port(Server) ->
 %% @end
 %%--------------------------------------------------------------------
 init(#{name := Name,
-       leader_pid := LeaderPid}) ->
+       leader_pid := LeaderPid} = Config) ->
     {ok, {Min, Max}} = application:get_env(port_range),
     %% TODO: use locally configured port range
     {Port, LSock} = open_tcp_port(Min, Max),
@@ -139,11 +140,14 @@ init(#{name := Name,
         {ok, _, _} ->
             ok
     end,
+    Interval = maps:get(replica_gc_interval, Config, 5000),
+    erlang:send_after(Interval, self(), force_gc),
     %% TODO: monitor leader pid
     {ok, #?MODULE{cfg = #cfg{leader_pid = LeaderPid,
                              directory = Dir,
                              port = Port,
-                             listening_socket = LSock},
+                             listening_socket = LSock,
+                             gc_interval = Interval},
                   segment = Segment}}.
 
 
@@ -223,6 +227,10 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_info(force_gc, #?MODULE{cfg = #cfg{gc_interval = Interval}} = State) ->
+    garbage_collect(),
+    erlang:send_after(Interval, self(), force_gc),
+    {noreply, State};
 handle_info({socket, Socket}, #?MODULE{cfg = Cfg} = State) ->
     ok = inet:setopts(Socket, [{active, 5}]),
 
@@ -242,7 +250,6 @@ handle_info({tcp, Socket, Bin},
                                 {[FirstOffset | Aks], Acc}
                         end, {[], Segment0}, OffsetChunks),
     ok = osiris_writer:ack(LeaderPid, lists:reverse(Acks)),
-    erlang:garbage_collect(),
     {noreply, State#?MODULE{segment = Segment,
                             parse_state = ParseState}};
 handle_info({tcp_passive, Socket},
