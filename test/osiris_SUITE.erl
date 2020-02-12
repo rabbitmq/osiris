@@ -301,8 +301,8 @@ cluster_delete(Config) ->
     Name = ?config(cluster_name, Config),
     [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
     OConf = #{dir => ?config(data_dir, Config)},
-    {ok, Leader, ReplicaPids} = rpc:call(LeaderNode, osiris, start_cluster,
-                                          [atom_to_list(Name), Replicas, OConf ]),
+    {ok, Leader, _} = rpc:call(LeaderNode, osiris, start_cluster,
+                               [atom_to_list(Name), Replicas, OConf ]),
     ok = osiris:write(Leader, 42, <<"before-restart">>),
     receive
         {osiris_written, _, [42]} ->
@@ -312,7 +312,7 @@ cluster_delete(Config) ->
               exit(osiris_written_timeout)
     end,
 
-    ok = rpc:call(LeaderNode, osiris, delete_cluster, [Name, Leader, ReplicaPids]),
+    ok = rpc:call(LeaderNode, osiris, delete_cluster, [Name, Leader, Replicas]),
     [slave:stop(N) || N <- Nodes],
     ok.
 

@@ -69,9 +69,14 @@ stop(Node, Name) ->
     ok = supervisor:terminate_child({osiris_replica_sup, Node}, Name),
     ok = supervisor:delete_child({osiris_replica_sup, Node}, Name).
 
-delete(Name, Server) ->
-    Node = node(Server),
-    gen_server:call(Server, delete),
+delete(Name, Node) ->
+    Children = supervisor:which_children(osiris_replica_sup),
+    case lists:keyfind(Name, 1, Children) of
+        {_, Server, _, _} ->
+            gen_server:call(Server, delete);
+        false ->
+            ok
+    end,
     stop(Node, Name).
      
 %%--------------------------------------------------------------------
