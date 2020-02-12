@@ -11,7 +11,7 @@
 %% replicates and confirms latest offset back to primary
 
 %% API functions
--export([start/3, start_link/1, stop/2, delete/2]).
+-export([start/3, start_link/1, stop/2, delete/3]).
 %% Test
 -export([get_port/1]).
 
@@ -66,18 +66,13 @@ start(Node, Name, Config) ->
                              modules => [?MODULE]}) .
 
 stop(Node, Name) ->
-    ok = supervisor:terminate_child({osiris_replica_sup, Node}, Name),
-    ok = supervisor:delete_child({osiris_replica_sup, Node}, Name).
+    _ = supervisor:terminate_child({osiris_replica_sup, Node}, Name),
+    _ = supervisor:delete_child({osiris_replica_sup, Node}, Name),
+    ok.
 
-delete(Name, Node) ->
-    Children = supervisor:which_children(osiris_replica_sup),
-    case lists:keyfind(Name, 1, Children) of
-        {_, Server, _, _} ->
-            gen_server:call(Server, delete);
-        false ->
-            ok
-    end,
-    stop(Node, Name).
+delete(Name, Node, Config) ->
+    stop(Node, Name),
+    rpc:call(Node, osiris_segment, delete_directory, [Config]).
      
 %%--------------------------------------------------------------------
 %% @doc
@@ -107,16 +102,14 @@ get_port(Server) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init(#{name := Name,
-       leader_pid := LeaderPid} = Config) ->
+init(#{leader_pid := LeaderPid} = Config) ->
     {ok, {Min, Max}} = application:get_env(port_range),
     %% TODO: use locally configured port range
     {Port, LSock} = open_tcp_port(Min, Max),
     Self = self(),
     spawn_link(fun() -> accept(LSock, Self) end),
 
-    {ok, DataDir} = application:get_env(data_dir),
-    Dir = filename:join(DataDir, Name),
+    Dir = osiris_segment:directory(Config),
     filelib:ensure_dir(Dir),
     case file:make_dir(Dir) of
         ok -> ok;
@@ -199,12 +192,6 @@ accept(LSock, Process) ->
 %%--------------------------------------------------------------------
 handle_call(get_port, _From, #?MODULE{cfg = #cfg{port = Port}} = State) ->
     {reply, Port, State};
-handle_call(delete, From, #?MODULE{cfg = #cfg{directory = Dir}} = State) ->
-    {ok, Files} = file:list_dir(Dir),
-    [ok = file:delete(filename:join(Dir, F)) || F <- Files],
-    ok = file:del_dir(Dir),
-    gen_server:reply(From, ok),
-    {stop, normal, State};
 handle_call(_Request, _From, State) ->
     Reply = ok,
     {reply, Reply, State}.

@@ -14,8 +14,10 @@
          terminate/2,
          format_status/1,
          stop/1,
-         delete/2
+         delete/3
         ]).
+
+-export([delete/2]).
 
 %% primary osiris process
 %% batch writes incoming data
@@ -53,12 +55,16 @@ start(Name, Config0) ->
                              type => worker}).
 
 stop(Name) ->
-    ok = supervisor:terminate_child(osiris_writer_sup, Name),
-    ok = supervisor:delete_child(osiris_writer_sup, Name).
+    _ = supervisor:terminate_child(osiris_writer_sup, Name),
+    _ = supervisor:delete_child(osiris_writer_sup, Name),
+    ok.
 
-delete(Name, Server) ->
-    gen_batch_server:call(Server, delete),
-    rpc:call(node(Server), ?MODULE, stop, [Name]).
+delete(Name, Node, Config) ->
+    rpc:call(Node, ?MODULE, delete, [Name, Config]).
+
+delete(Name, Config) ->
+    stop(Name),
+    osiris_segment:delete_directory(Config).
 
 -spec start_link(Config :: map()) ->
     {ok, pid()} | {error, {already_started, pid()}}.
@@ -89,13 +95,7 @@ write(Pid, Sender, Corr, Data) ->
 -spec init(map()) -> {ok, state()}.
 init(#{name := Name,
        replica_nodes := Replicas} = Config) ->
-    Dir0 = case Config of
-              #{dir := D} -> D;
-              _ ->
-                  {ok, D} = application:get_env(data_dir),
-                  D
-          end,
-    Dir = filename:join(Dir0, Name),
+    Dir = osiris_segment:directory(Config),
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
     filelib:ensure_dir(Dir),
@@ -250,13 +250,6 @@ handle_commands([{call, From, get_reader_context} | Rem],
                             committed_offset => max(0, COffs),
                             offset_ref => ORef}},
     handle_commands(Rem, State, {Records, [Reply | Replies], Corrs});
-handle_commands([{call, From, delete} | _],
-                #?MODULE{cfg = #cfg{directory = Dir}}, _) ->
-    {ok, Files} = file:list_dir(Dir),
-    [ok = file:delete(filename:join(Dir, F)) || F <- Files],
-    ok = file:del_dir(Dir),
-    gen_server:reply(From, ok),
-    {stop, normal};
 handle_commands([_Unk | Rem], State, Acc) ->
     error_logger:info_msg("osiris_writer unknown command ~w", [_Unk]),
     handle_commands(Rem, State, Acc).

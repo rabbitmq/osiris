@@ -10,7 +10,7 @@
          restart_server/3,
          restart_replica/3,
          restart_replica/4,
-         delete_cluster/3
+         delete_cluster/4
          ]).
 
 -define(BASE64_URI_CHARS,
@@ -59,11 +59,10 @@ stop_cluster(Name0, Replicas)
     [ok = osiris_replica:stop(N, Name) || N <- Replicas],
     ok.
 
--spec delete_cluster(any(), pid(), [node()]) -> ok.
-delete_cluster(Name, Leader, Replicas) ->
-    [ok = osiris_replica:delete(Name, R) || R <- Replicas],
-    ok = osiris_writer:delete(Name, Leader),
-    ok.
+-spec delete_cluster(any(), pid(), [node()], #{}) -> ok.
+delete_cluster(Name, Leader, Replicas, Config) ->
+    [ok = osiris_replica:delete(Name, R, Config) || R <- Replicas],
+    ok = osiris_writer:delete(Name, Leader, Config).
 
 restart_cluster(Name0, Replicas) ->
     restart_cluster(Name0, Replicas, #{}).

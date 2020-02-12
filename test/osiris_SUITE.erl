@@ -87,9 +87,8 @@ cluster_write(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
     [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
-    OConf = #{dir => ?config(data_dir, Config)},
     {ok, Leader, _Replicas} = rpc:call(LeaderNode, osiris, start_cluster,
-                                       [atom_to_list(Name), Replicas, OConf ]),
+                                       [atom_to_list(Name), Replicas]),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
     receive
         {osiris_written, _, [42]} ->
@@ -118,9 +117,8 @@ cluster_batch_write(Config) ->
     Name = ?config(cluster_name, Config),
     [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir)
                                        || N <- [s1, s2, s3]],
-    OConf = #{dir => ?config(data_dir, Config)},
     {ok, Leader, _Replicas} = rpc:call(LeaderNode, osiris, start_cluster,
-                                       [atom_to_list(Name), Replicas, OConf]),
+                                       [atom_to_list(Name), Replicas]),
     Batch = {batch, 1, 0, <<0:1, 8:31/unsigned, "mah-data">>},
     ok = osiris:write(Leader, 42, Batch),
     receive
@@ -147,8 +145,7 @@ cluster_batch_write(Config) ->
 
 single_node_offset_listener(Config) ->
     Name = atom_to_list(?FUNCTION_NAME),
-    OConf = #{dir => ?config(data_dir, Config)},
-    {ok, Leader, _Replicas} = osiris:start_cluster(Name, [], OConf),
+    {ok, Leader, _Replicas} = osiris:start_cluster(Name, []),
     Seg0 = osiris_writer:init_reader(Leader, 0),
     osiris_writer:register_offset_listener(Leader),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
@@ -192,8 +189,7 @@ read_validate_single_node(Config) ->
     _PrivDir = ?config(data_dir, Config),
     Name = atom_to_list(?FUNCTION_NAME),
     Num = 1000000,
-    OConf = #{dir => ?config(data_dir, Config)},
-    {ok, Leader, []} = osiris:start_cluster(Name, [], OConf),
+    {ok, Leader, []} = osiris:start_cluster(Name, [], #{}),
     timer:sleep(500),
     write_n(Leader, Num, #{}),
     Seg0 = osiris_writer:init_reader(Leader, 0),
@@ -208,10 +204,9 @@ read_validate(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = atom_to_list(?FUNCTION_NAME),
     Num = 1000000,
-    OConf = #{dir => ?config(data_dir, Config)},
     [_LNode | Replicas] = Nodes =  [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
     {ok, Leader, _} = rpc:call(node(), osiris, start_cluster,
-                               [Name, Replicas, OConf]),
+                               [Name, Replicas, #{}]),
 
     {_, GarbBefore} = erlang:process_info(Leader, garbage_collection),
     {_, MemBefore} = erlang:process_info(Leader, memory),
@@ -252,9 +247,8 @@ cluster_restart(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
     [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
-    OConf = #{dir => ?config(data_dir, Config)},
     {ok, Leader, _Replicas} = rpc:call(LeaderNode, osiris, start_cluster,
-                                       [atom_to_list(Name), Replicas, OConf ]),
+                                       [atom_to_list(Name), Replicas, #{} ]),
     ok = osiris:write(Leader, 42, <<"before-restart">>),
     receive
         {osiris_written, _, [42]} ->
@@ -266,9 +260,9 @@ cluster_restart(Config) ->
 
     ok = rpc:call(LeaderNode, osiris, stop_cluster, [atom_to_list(Name), Replicas]),
     
-    {ok, Leader1} = rpc:call(LeaderNode, osiris, restart_server, [Name, Replicas, OConf]),
+    {ok, Leader1} = rpc:call(LeaderNode, osiris, restart_server, [Name, Replicas, #{}]),
     [{ok, _Replica} = rpc:call(LeaderNode, osiris, restart_replica,
-                               [Name, Leader1, Replica, OConf])
+                               [Name, Leader1, Replica, #{}])
      || Replica <- Replicas],
 
     ok = osiris:write(Leader1, 43, <<"after-restart">>),
@@ -300,7 +294,7 @@ cluster_delete(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
     [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
-    OConf = #{dir => ?config(data_dir, Config)},
+    OConf = #{name => Name},
     {ok, Leader, _} = rpc:call(LeaderNode, osiris, start_cluster,
                                [atom_to_list(Name), Replicas, OConf ]),
     ok = osiris:write(Leader, 42, <<"before-restart">>),
@@ -312,7 +306,7 @@ cluster_delete(Config) ->
               exit(osiris_written_timeout)
     end,
 
-    ok = rpc:call(LeaderNode, osiris, delete_cluster, [Name, Leader, Replicas]),
+    ok = rpc:call(LeaderNode, osiris, delete_cluster, [Name, LeaderNode, Replicas, OConf]),
     [slave:stop(N) || N <- Nodes],
     ok.
 

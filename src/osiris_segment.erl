@@ -11,7 +11,10 @@
 
          init_reader/2,
          read_chunk_parsed/1,
-         close/1
+         close/1,
+
+         directory/1,
+         delete_directory/1
 
          ]).
 
@@ -83,6 +86,16 @@
               record/0,
               config/0
               ]).
+
+-spec directory(config()) -> file:filename().
+directory(#{name := Name} = Config) ->
+    Dir = case Config of
+              #{dir := D} -> D;
+              _ ->
+                  {ok, D} = application:get_env(osiris, data_dir),
+                  D
+          end,
+    filename:join(Dir, Name).
 
 -spec init(file:filename(), config()) -> state().
 init(Dir, Config) ->
@@ -340,6 +353,12 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
 close(_State) ->
     %% close fd
     ok.
+
+delete_directory(Config) ->
+    Dir = directory(Config),
+    {ok, Files} = file:list_dir(Dir),
+    [ok = file:delete(filename:join(Dir, F)) || F <- Files],
+    ok = file:del_dir(Dir).
 
 %% Internal
 
