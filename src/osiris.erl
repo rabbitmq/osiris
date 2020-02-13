@@ -59,7 +59,7 @@ stop_cluster(Name0, Replicas)
     [ok = osiris_replica:stop(N, Name) || N <- Replicas],
     ok.
 
--spec delete_cluster(any(), pid(), [node()], #{}) -> ok.
+-spec delete_cluster(any(), node(), [node()], #{}) -> ok.
 delete_cluster(Name, Leader, Replicas, Config) ->
     [ok = osiris_replica:delete(Name, R, Config) || R <- Replicas],
     ok = osiris_writer:delete(Name, Leader, Config).
