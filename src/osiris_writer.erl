@@ -7,6 +7,7 @@
          init_reader/2,
          register_data_listener/2,
          register_offset_listener/1,
+         unregister_offset_listener/1,
          ack/2,
          write/4,
          init/1,
@@ -80,6 +81,9 @@ register_data_listener(Pid, Offset) ->
 
 register_offset_listener(Pid) ->
     ok = gen_batch_server:cast(Pid, {register_offset_listener, self()}).
+
+unregister_offset_listener(Pid) ->
+  ok = gen_batch_server:cast(Pid, {unregister_offset_listener, self()}).
 
 ack(LeaderPid, Offsets) ->
     gen_batch_server:cast(LeaderPid, {ack, node(), Offsets}).
@@ -206,6 +210,10 @@ handle_commands([{cast, {register_offset_listener, Pid}} | Rem],
     %% TODO: only notify the newly registered offset listener
     notify_offset_listeners(State),
     handle_commands(Rem, State, Acc);
+handle_commands([{cast, {unregister_offset_listener, Pid}} | Rem],
+    #?MODULE{offset_listeners = Listeners} = State0, Acc) ->
+  State = State0#?MODULE{offset_listeners = lists:delete(Pid, Listeners)},
+  handle_commands(Rem, State, Acc);
 handle_commands([{cast, {ack, ReplicaNode, Offsets}} | Rem],
                 #?MODULE{cfg = #cfg{ext_reference = Ref,
                                     counter = Cnt,
@@ -269,7 +277,7 @@ notify_offset_listeners(#?MODULE{cfg = #cfg{ext_reference = Ref},
                                  offset_listeners = L0}) ->
     [begin
          % Next = osiris_segment:next_offset(Seg),
-         % error_logger:info_msg("osiris_writer offset listner ~w CO: ~w Next ~w LO: ~w",
+         % error_logger:info_msg("osiris_writer offset listener ~w CO: ~w Next ~w LO: ~w",
          %                       [P, COffs, Next, O]),
          P ! {osiris_offset, Ref, COffs}
      end || P <- L0],
