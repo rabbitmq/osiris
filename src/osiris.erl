@@ -42,12 +42,16 @@ start_cluster(Name0, Replicas, Config)
     %% for the gen_batch_server
     true = validate_base64uri(to_string(Name0)),
     Name = list_to_atom(Name0),
-    {ok, Pid} = osiris_writer:start(Name, Config#{replica_nodes => Replicas}),
-    ReplicaPids = [begin
-                       {ok, P} = osiris_replica:start(N, Name, Config#{leader_pid => Pid}),
-                       P
-                   end || N <- Replicas],
-    {ok, Pid, ReplicaPids}.
+    case osiris_writer:start(Name, Config#{replica_nodes => Replicas}) of
+        {ok, Pid} ->
+            ReplicaPids = [begin
+                               {ok, P} = osiris_replica:start(N, Name, Config#{leader_pid => Pid}),
+                               P
+                           end || N <- Replicas],
+            {ok, Pid, ReplicaPids};
+        Error ->
+            Error
+    end.
 
 stop_cluster(Name0, Replicas)
   when is_list(Name0) orelse
