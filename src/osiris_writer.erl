@@ -3,7 +3,7 @@
 -behaviour(gen_batch_server).
 
 -export([start_link/1,
-         start/2,
+         start/1,
          init_reader/2,
          register_data_listener/2,
          register_offset_listener/1,
@@ -15,10 +15,7 @@
          terminate/2,
          format_status/1,
          stop/1,
-         delete/3
-        ]).
-
--export([delete/2]).
+         delete/1]).
 
 %% primary osiris process
 %% batch writes incoming data
@@ -46,26 +43,24 @@
 
 -export_type([state/0]).
 
-start(Name, Config0) ->
-    Config = Config0#{name => Name},
-    supervisor:start_child(osiris_writer_sup,
+start(Config = #{name := Name,
+                 leader_node := Leader}) ->
+    supervisor:start_child({osiris_writer_sup, Leader},
                            #{id => Name,
                              start => {?MODULE, start_link, [Config]},
                              restart => transient,
                              shutdown => 5000,
                              type => worker}).
 
-stop(Name) ->
-    _ = supervisor:terminate_child(osiris_writer_sup, Name),
-    _ = supervisor:delete_child(osiris_writer_sup, Name),
+stop(#{name := Name,
+       leader_node := Leader}) ->
+    _ = supervisor:terminate_child({osiris_writer_sup, Leader}, Name),
+    _ = supervisor:delete_child({osiris_writer_sup, Leader}, Name),
     ok.
 
-delete(Name, Node, Config) ->
-    rpc:call(Node, ?MODULE, delete, [Name, Config]).
-
-delete(Name, Config) ->
-    stop(Name),
-    osiris_segment:delete_directory(Config).
+delete(#{leader_node := Leader} = Config) ->
+    stop(Config),
+    rpc:call(Leader, osiris_segment, delete_directory, [Config]).
 
 -spec start_link(Config :: map()) ->
     {ok, pid()} | {error, {already_started, pid()}}.

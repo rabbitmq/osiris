@@ -11,7 +11,7 @@
 %% replicates and confirms latest offset back to primary
 
 %% API functions
--export([start/3, start_link/1, stop/2, delete/3]).
+-export([start/2, start_link/1, stop/2, delete/2]).
 %% Test
 -export([get_port/1]).
 
@@ -48,7 +48,7 @@
 %%% API functions
 %%%===================================================================
 
-start(Node, Name, Config) ->
+start(Node, Config = #{name := Name}) ->
     %% READERS pumps data on replicas!!! replicas are the gen_tcp listeners - whch is
     %% different from this
     %% master unaware of replicas
@@ -59,19 +59,19 @@ start(Node, Name, Config) ->
     %%` TODO another replica for the index?
     supervisor:start_child({osiris_replica_sup, Node},
                            #{id => Name,
-                             start => {?MODULE, start_link, [Config#{name => Name}]},
+                             start => {?MODULE, start_link, [Config]},
                              restart => transient,
                              shutdown => 5000,
                              type => worker,
                              modules => [?MODULE]}) .
 
-stop(Node, Name) ->
+stop(Node, #{name := Name}) ->
     _ = supervisor:terminate_child({osiris_replica_sup, Node}, Name),
     _ = supervisor:delete_child({osiris_replica_sup, Node}, Name),
     ok.
 
-delete(Name, Node, Config) ->
-    stop(Node, Name),
+delete(Node, Config) ->
+    stop(Node, Config),
     rpc:call(Node, osiris_segment, delete_directory, [Config]).
      
 %%--------------------------------------------------------------------
