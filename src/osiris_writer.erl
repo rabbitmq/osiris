@@ -95,7 +95,8 @@ write(Pid, Sender, Corr, Data) ->
 
 -spec init(osiris:config()) -> {ok, state()}.
 init(#{name := Name,
-       replica_nodes := Replicas} = Config) ->
+       replica_nodes := Replicas} = Config)
+  when is_list(Name) ->
     Dir = osiris_segment:directory(Config),
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),

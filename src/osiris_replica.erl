@@ -52,7 +52,7 @@
 %%% API functions
 %%%===================================================================
 
-start(Node, Config = #{name := Name}) ->
+start(Node, Config = #{name := Name}) when is_list(Name) ->
     %% READERS pumps data on replicas!!! replicas are the gen_tcp listeners - whch is
     %% different from this
     %% master unaware of replicas

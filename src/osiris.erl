@@ -58,7 +58,9 @@ restart_cluster(Config0 = #{name := Name}) ->
     true = validate_base64uri(Name),
     {ok, Pid} = osiris_writer:start(Config0),
     Config = Config0#{leader_pid => Pid},
-    ReplicaPids = [element(2, osiris_replica:start(N, Config))
+    ReplicaPids = [begin
+                       element(2, osiris_replica:start(N, Config))
+                   end
                    || N <- maps:get(replica_nodes, Config)],
     {ok, Config#{replica_pids => ReplicaPids}}.
 
