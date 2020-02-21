@@ -24,7 +24,7 @@ init() ->
     _ = ets:new(?MODULE, [set, named_table, public]),
     ok.
 
--spec new(atom(),  [atom()]) -> counters:counter_ref().
+-spec new(term(),  [atom()]) -> counters:counters_ref().
 new(Name, Fields)
   when is_list(Fields) ->
     Size = length(Fields),
@@ -33,7 +33,7 @@ new(Name, Fields)
     CRef.
 
 -spec fetch(atom()) ->
-    undefined | counters:counter_ref().
+    undefined | counters:counters_ref().
 fetch(Name) ->
     case ets:lookup(?MODULE, Name) of
         [{Name, Ref, _}] ->
@@ -42,7 +42,7 @@ fetch(Name) ->
             undefined
     end.
 
--spec delete(atom()) -> ok.
+-spec delete(term()) -> ok.
 delete(Name) ->
     true = ets:delete(?MODULE, Name),
     ok.

@@ -56,9 +56,9 @@ init_per_testcase(TestCase, Config) ->
     application:load(osiris),
     application:set_env(osiris, data_dir, Dir),
     {ok, Apps} = application:ensure_all_started(osiris),
-    file:make_dir(Dir),
+    % file:make_dir(Dir),
     [{data_dir, Dir},
-     {cluster_name, TestCase},
+     {cluster_name, atom_to_list(TestCase)},
      {started_apps, Apps} | Config].
 
 end_per_testcase(_TestCase, Config) ->
@@ -74,7 +74,7 @@ single_node_write(Config) ->
     Conf0 = #{name => Name,
               leader_node => node(),
               replica_nodes => [],
-              dir => ?config(data_dir, Config)},
+              dir => ?config(priv_dir, Config)},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
     receive

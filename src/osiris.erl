@@ -20,17 +20,18 @@
 
 -record(?MODULE, {cfg :: #cfg{}}).
 
--type config() :: #{}.
+-type config() :: #{name := string(),
+                    atom() => term()}.
 -opaque state() :: #?MODULE{}.
 
 -export_type([
-              state/0
+              state/0,
+              config/0
               ]).
 
--spec start_cluster(config()) -> {ok, config()}.
-start_cluster(Config0 = #{name := Name})
-  when is_atom(Name) ->
-    true = validate_base64uri(atom_to_list(Name)),
+-spec start_cluster(config()) -> {ok, config()} | {error, term()}.
+start_cluster(Config0 = #{name := Name}) ->
+    true = validate_base64uri(Name),
     case osiris_writer:start(Config0) of
         {ok, Pid} ->
             Config = Config0#{leader_pid => Pid},
@@ -48,14 +49,13 @@ stop_cluster(Config) ->
     [ok = osiris_replica:stop(N, Config) || N <- maps:get(replica_nodes, Config)],
     ok.
 
--spec delete_cluster(#{}) -> ok.
+-spec delete_cluster(config()) -> ok.
 delete_cluster(Config) ->
     [ok = osiris_replica:delete(R, Config) || R <- maps:get(replica_nodes, Config)],
     ok = osiris_writer:delete(Config).
 
-restart_cluster(Config0 = #{name := Name})
-  when is_atom(Name) ->
-    true = validate_base64uri(atom_to_list(Name)),
+restart_cluster(Config0 = #{name := Name}) ->
+    true = validate_base64uri(Name),
     {ok, Pid} = osiris_writer:start(Config0),
     Config = Config0#{leader_pid => Pid},
     ReplicaPids = [element(2, osiris_replica:start(N, Config))

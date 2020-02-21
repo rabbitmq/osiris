@@ -60,7 +60,9 @@
 
 -type offset() :: non_neg_integer().
 
--type config() :: #{}.
+-type config() :: osiris:config() |
+                  #{dir := file:filename(),
+                    max_segment_size => non_neg_integer()}.
 
 -type record() :: {offset(), iodata()}.
 
@@ -73,7 +75,7 @@
 -record(?MODULE, {cfg :: #cfg{},
                   fd :: file:io_device(),
                   index_fd :: undefined | file:io_device(),
-                  offset_ref :: undefined | file:io_device(),
+                  offset_ref :: undefined | atomics:atomics_ref(),
                   segment_size = 0 :: non_neg_integer(),
                   current_epoch = 0 :: non_neg_integer(),
                   next_offset = 0 :: offset()}).
@@ -87,7 +89,7 @@
               config/0
               ]).
 
--spec directory(config()) -> file:filename().
+-spec directory(osiris:config()) -> file:filename().
 directory(#{name := Name} = Config) ->
     Dir = case Config of
               #{dir := D} -> D;
@@ -107,8 +109,12 @@ init(Dir, Config) ->
                   _ ->
                       ?DEFAULT_MAX_SEGMENT_SIZE
               end,
-    filelib:ensure_dir(Dir),
-    file:make_dir(Dir),
+    ok = filelib:ensure_dir(Dir),
+    case file:make_dir(Dir) of
+        ok -> ok;
+        {error, eexist} -> ok;
+        E -> throw(E)
+    end,
     {NextOffset, File} = find_next_offset(Dir),
     error_logger:info_msg("osiris_segment:init/2: next offset ~b",
                           [NextOffset]),
@@ -225,7 +231,7 @@ init_reader(StartOffset0, #{dir := Dir} = Config) ->
 
 
 -spec read_chunk_parsed(state()) ->
-    {ok, [record()], state()} |
+    {[record()], state()} |
     {end_of_stream, state()} |
     {error, {invalid_chunk_header, term()}}.
 read_chunk_parsed(#?MODULE{cfg = #cfg{directory = Dir},
@@ -404,7 +410,7 @@ parse_records(Offs, <<1:1, %% simple
     Recs = parse_records(Offs, Data, []),
     parse_records(Offs+NumRecs, Rem, lists:reverse(Recs) ++ Acc).
 
-find_next_offset(Dir) ->
+find_next_offset(Dir) when is_list(Dir) ->
     IdxFiles = lists:reverse(lists:sort(
                                filelib:wildcard(
                                  filename:join(Dir, "*.index")))),

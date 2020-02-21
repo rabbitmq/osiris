@@ -32,7 +32,9 @@
               gc_interval :: non_neg_integer()
              }).
 
--type parse_state() :: undefined | binary() | {iolist(), non_neg_integer()}.
+-type parse_state() :: undefined |
+                       binary() |
+                       {non_neg_integer(), iolist(), non_neg_integer()}.
 
 -record(?MODULE, {cfg :: #cfg{},
                   parse_state :: parse_state(),
@@ -73,7 +75,7 @@ stop(Node, #{name := Name}) ->
 delete(Node, Config) ->
     stop(Node, Config),
     rpc:call(Node, osiris_segment, delete_directory, [Config]).
-     
+
 %%--------------------------------------------------------------------
 %% @doc
 %% Starts the server
@@ -110,13 +112,7 @@ init(#{leader_pid := LeaderPid} = Config) ->
     spawn_link(fun() -> accept(LSock, Self) end),
 
     Dir = osiris_segment:directory(Config),
-    filelib:ensure_dir(Dir),
-    case file:make_dir(Dir) of
-        ok -> ok;
-        {error, eexist} -> ok;
-        E -> throw(E)
-    end,
-    Segment = osiris_segment:init(Dir, #{}),
+    Segment = osiris_segment:init(Dir, Config),
     NextOffset = osiris_segment:next_offset(Segment),
     error_logger:info_msg("osiris_replica:init/1: next offset ~b",
                           [NextOffset]),

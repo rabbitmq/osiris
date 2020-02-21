@@ -91,18 +91,12 @@ write(Pid, Sender, Corr, Data) ->
          offset,
          committed_offset]).
 
--spec init(map()) -> {ok, state()}.
+-spec init(osiris:config()) -> {ok, state()}.
 init(#{name := Name,
        replica_nodes := Replicas} = Config) ->
     Dir = osiris_segment:directory(Config),
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
-    filelib:ensure_dir(Dir),
-    case file:make_dir(Dir) of
-        ok -> ok;
-        {error, eexist} -> ok;
-        E -> throw(E)
-    end,
     ORef = atomics:new(1, []),
     Segment = osiris_segment:init(Dir, Config),
     ExtRef = maps:get(reference, Config, Name),
@@ -120,7 +114,7 @@ init(#{name := Name,
 
                              offset_ref = ORef,
                              replicas = Replicas,
-                             directory  = Dir,
+                             directory = Dir,
                              %% TODO: there is no GC of counter registrations
                              counter = CntRef},
 
@@ -253,6 +247,8 @@ handle_commands([{call, From, get_reader_context} | Rem],
                             committed_offset => max(0, COffs),
                             offset_ref => ORef}},
     handle_commands(Rem, State, {Records, [Reply | Replies], Corrs});
+handle_commands([osiris_stop | _Rem], _State, _Acc) ->
+    {stop, normal};
 handle_commands([_Unk | Rem], State, Acc) ->
     error_logger:info_msg("osiris_writer unknown command ~w", [_Unk]),
     handle_commands(Rem, State, Acc).
