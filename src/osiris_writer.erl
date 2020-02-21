@@ -17,6 +17,8 @@
          stop/1,
          delete/1]).
 
+-define(SUP, osiris_server_sup).
+
 %% primary osiris process
 %% batch writes incoming data
 %% notifies replicator and reader processes of the new max index
@@ -45,7 +47,7 @@
 
 start(Config = #{name := Name,
                  leader_node := Leader}) ->
-    supervisor:start_child({osiris_writer_sup, Leader},
+    supervisor:start_child({?SUP, Leader},
                            #{id => Name,
                              start => {?MODULE, start_link, [Config]},
                              restart => transient,
@@ -54,8 +56,8 @@ start(Config = #{name := Name,
 
 stop(#{name := Name,
        leader_node := Leader}) ->
-    _ = supervisor:terminate_child({osiris_writer_sup, Leader}, Name),
-    _ = supervisor:delete_child({osiris_writer_sup, Leader}, Name),
+    _ = supervisor:terminate_child({?SUP, Leader}, Name),
+    _ = supervisor:delete_child({?SUP, Leader}, Name),
     ok.
 
 delete(#{leader_node := Leader} = Config) ->

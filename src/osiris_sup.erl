@@ -10,13 +10,10 @@ start_link() ->
 init([]) ->
     osiris_counters:init(),
     SupFlags = #{strategy => one_for_all, intensity => 5, period => 5},
-    Replica = #{id => osiris_replica_sup,
+    ServerSup = #{id => osiris_server_sup,
                 type => supervisor,
-                start => {osiris_replica_sup, start_link, []}},
+                start => {osiris_server_sup, start_link, []}},
     ReplicaReader = #{id => osiris_replica_reader_sup,
                       type => supervisor,
                       start => {osiris_replica_reader_sup, start_link, []}},
-    Writer = #{id => osiris_writer_sup,
-               type => supervisor,
-               start => {osiris_writer_sup, start_link, []}},
-    {ok, {SupFlags, [Writer, Replica, ReplicaReader]}}.
+    {ok, {SupFlags, [ServerSup, ReplicaReader]}}.

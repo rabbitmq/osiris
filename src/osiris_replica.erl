@@ -7,6 +7,8 @@
 -define(VERSION, 0).
 -define(HEADER_SIZE, 31).
 
+-define(SUP, osiris_server_sup).
+
 %% osiris replica, spaws remote reader, TCP listener
 %% replicates and confirms latest offset back to primary
 
@@ -59,7 +61,7 @@ start(Node, Config = #{name := Name}) ->
     %% TODO What's the Id? How many replicas do we have?
     %% TODO How do we know the name of the segment to write to disk?
     %%` TODO another replica for the index?
-    supervisor:start_child({osiris_replica_sup, Node},
+    supervisor:start_child({?SUP, Node},
                            #{id => Name,
                              start => {?MODULE, start_link, [Config]},
                              restart => transient,
@@ -68,8 +70,8 @@ start(Node, Config = #{name := Name}) ->
                              modules => [?MODULE]}) .
 
 stop(Node, #{name := Name}) ->
-    _ = supervisor:terminate_child({osiris_replica_sup, Node}, Name),
-    _ = supervisor:delete_child({osiris_replica_sup, Node}, Name),
+    _ = supervisor:terminate_child({?SUP, Node}, Name),
+    _ = supervisor:delete_child({?SUP, Node}, Name),
     ok.
 
 delete(Node, Config) ->
