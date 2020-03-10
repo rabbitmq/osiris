@@ -11,6 +11,7 @@
 
          init_reader/2,
          read_chunk_parsed/1,
+         get_offset_ref/1,
          close/1,
 
          directory/1,
@@ -229,6 +230,9 @@ init_reader(StartOffset0, #{dir := Dir} = Config) ->
             exit({no_segment, Dir})
     end.
 
+-spec get_offset_ref(state()) -> atomics:atomics_ref().
+get_offset_ref(#?MODULE{offset_ref = Ref}) when is_integer(Ref) ->
+    Ref.
 
 -spec read_chunk_parsed(state()) ->
     {[record()], state()} |
