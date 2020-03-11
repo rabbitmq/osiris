@@ -53,10 +53,12 @@
 -define(COUNTER_FIELDS,
         [chunks_written,
          offset,
-         forced_gcs]).
+         forced_gcs,
+         packets]).
 -define(C_CHUNKS_WRITTEN, 1).
 -define(C_OFFSET, 2).
 -define(C_FORCED_GCS, 3).
+-define(C_PACKETS, 4).
 
 %%%===================================================================
 %%% API functions
@@ -262,7 +264,12 @@ handle_info({tcp, Socket, Bin},
                         end, {[], Segment0}, OffsetChunks),
     LastOffs = osiris_segment:next_offset(Segment) - 1,
     counters:put(Cnt, ?C_OFFSET, LastOffs),
-    ok = osiris_writer:ack(LeaderPid, lists:reverse(Acks)),
+    counters:add(Cnt, ?C_PACKETS, 1),
+    case Acks of
+        [] -> ok;
+        _ ->
+            ok = osiris_writer:ack(LeaderPid, lists:reverse(Acks))
+    end,
     {noreply, State#?MODULE{segment = Segment,
                             parse_state = ParseState}};
 handle_info({tcp_passive, Socket},
