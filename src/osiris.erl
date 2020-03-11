@@ -10,11 +10,6 @@
          delete_cluster/1
          ]).
 
--define(BASE64_URI_CHARS,
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        "abcdefghijklmnopqrstuvwxyz"
-        "0123456789_-=").
-
 %% holds static or rarely changing fields
 -record(cfg, {}).
 
@@ -31,7 +26,7 @@
 
 -spec start_cluster(config()) -> {ok, config()} | {error, term()}.
 start_cluster(Config0 = #{name := Name}) ->
-    true = validate_base64uri(Name),
+    true = osiris_util:validate_base64uri(Name),
     case osiris_writer:start(Config0) of
         {ok, Pid} ->
             Config = Config0#{leader_pid => Pid},
@@ -55,7 +50,7 @@ delete_cluster(Config) ->
     ok = osiris_writer:delete(Config).
 
 restart_cluster(Config0 = #{name := Name}) ->
-    true = validate_base64uri(Name),
+    true = osiris_utils:validate_base64uri(Name),
     {ok, Pid} = osiris_writer:start(Config0),
     Config = Config0#{leader_pid => Pid},
     ReplicaPids = [begin
@@ -72,20 +67,6 @@ restart_replica(Replica, Config) ->
 
 write(Pid, Corr, Data) ->
     osiris_writer:write(Pid, self(), Corr, Data).
-
-
--spec validate_base64uri(string()) -> boolean().
-validate_base64uri(Str) when is_list(Str) ->
-    catch
-    begin
-        [begin
-             case lists:member(C, ?BASE64_URI_CHARS) of
-                 true -> ok;
-                 false -> throw(false)
-             end
-         end || C <- string:to_graphemes(Str)],
-        string:is_empty(Str) == false
-    end.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
