@@ -58,6 +58,7 @@ init_per_testcase(TestCase, Config) ->
     {ok, Apps} = application:ensure_all_started(osiris),
     % file:make_dir(Dir),
     [{data_dir, Dir},
+     {test_case, TestCase},
      {cluster_name, atom_to_list(TestCase)},
      {started_apps, Apps} | Config].
 
@@ -200,7 +201,7 @@ cluster_offset_listener(Config) ->
 
 read_validate_single_node(Config) ->
     _PrivDir = ?config(data_dir, Config),
-    Num = 1000000,
+    Num = 100000,
     Name = ?config(cluster_name, Config),
     Conf0 = #{name => Name,
               leader_node => node(),
@@ -208,7 +209,10 @@ read_validate_single_node(Config) ->
     {ok, #{leader_pid := Leader,
            replica_pids := []}} = osiris:start_cluster(Conf0),
     timer:sleep(500),
+    % start_profile(Config, [osiris_writer, gen_batch_server,
+    %                        osiris_segment, lists, file]),
     write_n(Leader, Num, #{}),
+    % stop_profile(Config),
     Seg0 = osiris_writer:init_reader(Leader, 0),
 
     {Time, _} = timer:tc(fun() -> validate_read(Num, Seg0) end),
@@ -254,7 +258,10 @@ read_validate(Config) ->
     MsgSec = Num / (Time / 1000 / 1000),
     ct:pal("~b writes took ~wms ~w msg/s",
            [Num, trunc(Time div 1000), trunc(MsgSec)]),
-    ct:pal("counters ~p", [osiris_counters:overview()]),
+    ct:pal("~w counters ~p", [node(), osiris_counters:overview()]),
+    [begin
+         ct:pal("~w counters ~p", [N, rpc:call(N, osiris_counters, overview, [])])
+     end || N <- Nodes],
     Seg0 = osiris_writer:init_reader(Leader, 0),
     {_, _} = timer:tc(fun() -> validate_read(Num, Seg0) end),
 
@@ -265,7 +272,9 @@ cluster_restart(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
     [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
-    Conf0 = #{name => Name, replica_nodes => Replicas, leader_node => LeaderNode},
+    Conf0 = #{name => Name,
+              replica_nodes => Replicas,
+              leader_node => LeaderNode},
     {ok, #{leader_pid := Leader} = Conf} = osiris:start_cluster(Conf0),
     ok = osiris:write(Leader, 42, <<"before-restart">>),
     receive
@@ -277,7 +286,7 @@ cluster_restart(Config) ->
     end,
 
     osiris:stop_cluster(Conf),
-    
+
     {ok, Leader1} = rpc:call(LeaderNode, osiris, restart_server, [Conf]),
     [{ok, _Replica} = rpc:call(LeaderNode, osiris, restart_replica,
                               [Replica, Conf#{leader_pid => Leader1}])
@@ -408,4 +417,22 @@ search_paths() ->
     Ld = code:lib_dir(),
     lists:filter(fun (P) -> string:prefix(P, Ld) =:= nomatch end,
                  code:get_path()).
+
+start_profile(Config, Modules) ->
+    Dir = ?config(priv_dir, Config),
+    Case = ?config(test_case, Config),
+    GzFile = filename:join([Dir, "lg_" ++ atom_to_list(Case) ++ ".gz"]),
+    ct:pal("Profiling to ~p~n", [GzFile]),
+
+    lg:trace(Modules, lg_file_tracer,
+             GzFile, #{running => false, mode => profile}).
+
+stop_profile(Config) ->
+    Case = ?config(test_case, Config),
+    ct:pal("Stopping profiling for ~p~n", [Case]),
+    lg:stop(),
+    Dir = ?config(priv_dir, Config),
+    Name = filename:join([Dir, "lg_" ++ atom_to_list(Case)]),
+    lg_callgrind:profile_many(Name ++ ".gz.*", Name ++ ".out",#{}),
+    ok.
 

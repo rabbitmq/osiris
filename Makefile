@@ -13,8 +13,9 @@ LOCAL_DEPS = sasl crypto
 dep_gen_batch_server = hex 0.8.2
 DEPS = gen_batch_server
 
-TEST_DEPS=eunit_formatters
+TEST_DEPS=eunit_formatters looking_glass
 
+dep_looking_glass = git https://github.com/rabbitmq/looking-glass.git master
 # PLT_APPS += eunit syntax_tools erts kernel stdlib common_test inets ssh ssl meck looking_glass gen_batch_server inet_tcp_proxy
 
 DIALYZER_OPTS += --src -r test

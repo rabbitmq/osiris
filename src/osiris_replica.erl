@@ -31,7 +31,8 @@
               port :: non_neg_integer(),
               listening_socket :: gen_tcp:socket(),
               socket :: undefined | gen_tcp:socket(),
-              gc_interval :: non_neg_integer()
+              gc_interval :: non_neg_integer(),
+              external_ref :: term()
              }).
 
 -type parse_state() :: undefined |
@@ -40,13 +41,22 @@
 
 -record(?MODULE, {cfg :: #cfg{},
                   parse_state :: parse_state(),
-                  segment :: osiris_segment:state()}).
+                  segment :: osiris_segment:state(),
+                  counter :: counters:counters_ref()}).
 
 -opaque state() :: #?MODULE{}.
 
 -export_type([
               state/0
               ]).
+
+-define(COUNTER_FIELDS,
+        [chunks_written,
+         offset,
+         forced_gcs]).
+-define(C_CHUNKS_WRITTEN, 1).
+-define(C_OFFSET, 2).
+-define(C_FORCED_GCS, 3).
 
 %%%===================================================================
 %%% API functions
@@ -106,13 +116,14 @@ get_port(Server) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init(#{leader_pid := LeaderPid} = Config) ->
+init(#{leader_pid := LeaderPid,
+       external_ref := ExtRef} = Config) ->
     {ok, {Min, Max}} = application:get_env(port_range),
     %% TODO: use locally configured port range
     {Port, LSock} = open_tcp_port(Min, Max),
     Self = self(),
     spawn_link(fun() -> accept(LSock, Self) end),
-
+    CntRef = osiris_counters:new({?MODULE, ExtRef}, ?COUNTER_FIELDS),
     Dir = osiris_segment:directory(Config),
     Segment = osiris_segment:init(Dir, Config),
     NextOffset = osiris_segment:next_offset(Segment),
@@ -122,11 +133,16 @@ init(#{leader_pid := LeaderPid} = Config) ->
     {ok, HostName} = inet:gethostname(),
     {ok, Ip} = inet:getaddr(HostName, inet),
     Node = node(LeaderPid),
+    ReplicaReaderConf = #{host => Ip,
+                          port => Port,
+                          leader_pid => LeaderPid,
+                          start_offset => NextOffset,
+                          external_ref => ExtRef},
     case supervisor:start_child({osiris_replica_reader_sup, Node},
                                 #{
                                   id => make_ref(),
                                   start => {osiris_replica_reader, start_link,
-                                            [Ip, Port, LeaderPid, NextOffset]},
+                                            [ReplicaReaderConf]},
                                   restart => transient,
                                   shutdown => 5000,
                                   type => worker,
@@ -143,8 +159,10 @@ init(#{leader_pid := LeaderPid} = Config) ->
                              directory = Dir,
                              port = Port,
                              listening_socket = LSock,
-                             gc_interval = Interval},
-                  segment = Segment}}.
+                             gc_interval = Interval,
+                             external_ref = ExtRef},
+                  segment = Segment,
+                  counter = CntRef}}.
 
 
 open_tcp_port(M, M) ->
@@ -217,8 +235,10 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info(force_gc, #?MODULE{cfg = #cfg{gc_interval = Interval}} = State) ->
+handle_info(force_gc, #?MODULE{cfg = #cfg{gc_interval = Interval},
+                               counter = Cnt} = State) ->
     garbage_collect(),
+    counter:add(Cnt, ?C_FORCED_GCS, 1),
     erlang:send_after(Interval, self(), force_gc),
     {noreply, State};
 handle_info({socket, Socket}, #?MODULE{cfg = Cfg} = State) ->
@@ -229,16 +249,19 @@ handle_info({tcp, Socket, Bin},
             #?MODULE{cfg = #cfg{socket = Socket,
                                 leader_pid = LeaderPid},
                      parse_state = ParseState0,
-                     segment = Segment0} = State) ->
+                     segment = Segment0,
+                     counter = Cnt} = State) ->
     ok = inet:setopts(Socket, [{active, 1}]),
     %% validate chunk
     {ParseState, OffsetChunks} = parse_chunk(Bin, ParseState0, []),
     {Acks, Segment} = lists:foldl(
                         fun({FirstOffset, B}, {Aks, Acc0}) ->
                                 Acc = osiris_segment:accept_chunk(B, Acc0),
-                                %% TODO: batched acks
+                                counters:add(Cnt, ?C_CHUNKS_WRITTEN, 1),
                                 {[FirstOffset | Aks], Acc}
                         end, {[], Segment0}, OffsetChunks),
+    LastOffs = osiris_segment:next_offset(Segment) - 1,
+    counters:put(Cnt, ?C_OFFSET, LastOffs),
     ok = osiris_writer:ack(LeaderPid, lists:reverse(Acks)),
     {noreply, State#?MODULE{segment = Segment,
                             parse_state = ParseState}};
@@ -267,7 +290,8 @@ handle_info({tcp_error, Socket, Error},
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
-terminate(_Reason, _State) ->
+terminate(_Reason, #?MODULE{cfg = #cfg{external_ref = ExtRef}}) ->
+    ok = osiris_counters:delete({?MODULE, ExtRef}),
     ok.
 
 %%--------------------------------------------------------------------

@@ -89,12 +89,16 @@ write(Pid, Sender, Corr, Data) ->
     gen_batch_server:cast(Pid, {write, Sender, Corr, Data}).
 
 -define(COUNTER_FIELDS,
-        [batches,
+        [chunks_written,
          offset,
          committed_offset]).
+-define(C_CHUNKS_WRITTEN, 1).
+-define(C_OFFSET, 2).
+-define(C_COMMITTED_OFFSET, 3).
 
 -spec init(osiris:config()) -> {ok, state()}.
 init(#{name := Name,
+       external_ref := ExtRef,
        replica_nodes := Replicas} = Config)
   when is_list(Name) ->
     Dir = osiris_segment:directory(Config),
@@ -102,14 +106,11 @@ init(#{name := Name,
     process_flag(message_queue_data, off_heap),
     ORef = atomics:new(1, []),
     Segment = osiris_segment:init(Dir, Config),
-    ExtRef = maps:get(reference, Config, Name),
     CntRef = osiris_counters:new({?MODULE, ExtRef}, ?COUNTER_FIELDS),
     LastOffs = osiris_segment:next_offset(Segment) -1,
-    % counters:add(Cnt, 1, 1),
-    % counters:add(CntRef, 2, 1),
     atomics:put(ORef, 1, LastOffs),
-    counters:add(CntRef, 2, LastOffs),
-    counters:add(CntRef, 3, LastOffs),
+    counters:put(CntRef, ?C_OFFSET, LastOffs),
+    counters:put(CntRef, ?C_COMMITTED_OFFSET, LastOffs),
     {ok, #?MODULE{cfg = #cfg{name = Name,
                              %% reference used for notification
                              %% if not provided use the name
@@ -130,8 +131,7 @@ handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt},
     %% filter write commands
     case handle_commands(Commands, State0, {[], [], #{}}) of
         {Entries, Replies, Corrs, State1} ->
-            %% incr batch counter
-            counters:add(Cnt, 1, 1),
+            %% incr chunk counter
             %% TODO handle empty replicas
             State2 = case Entries of
                          [] ->
@@ -141,7 +141,8 @@ handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt},
                              Seg = osiris_segment:write(Entries, Seg0),
                              LastOffs = osiris_segment:next_offset(Seg) - 1,
                              %% update written
-                             counters:put(Cnt, 2, LastOffs),
+                             counters:add(Cnt, ?C_CHUNKS_WRITTEN, 1),
+                             counters:put(Cnt, ?C_OFFSET, LastOffs),
                              update_pending(ThisBatchOffs, Corrs,
                                             State1#?MODULE{segment = Seg})
                      end,
@@ -170,7 +171,7 @@ update_pending(BatchOffs, Corrs,
                                    replicas = []}} = State0) ->
     _ = notify_writers(Ref, Corrs),
     atomics:put(OffsRef, 1, BatchOffs),
-    counters:put(Cnt, 3, BatchOffs),
+    counters:put(Cnt, ?C_COMMITTED_OFFSET, BatchOffs),
     State = State0#?MODULE{committed_offset = BatchOffs},
     ok = notify_offset_listeners(State),
     State;
@@ -214,22 +215,22 @@ handle_commands([{cast, {ack, ReplicaNode, Offsets}} | Rem],
                          pending_writes = Pending0} = State0, Acc) ->
     % ct:pal("acks ~w", [Offsets]),
 
-    {COffs, Pending} = lists:foldl(
-                         fun (Offset, {C0, P0}) ->
-                                 case maps:get(Offset, P0) of
-                                     {[ReplicaNode], Corrs} ->
-                                         _ = notify_writers(Ref, Corrs),
-                                         atomics:put(ORef, 1, Offset),
-                                         counters:put(Cnt, 3, Offset),
-                                         {Offset, maps:remove(Offset, P0)};
-                                     {Reps, Corrs} ->
-                                         Reps1 = lists:delete(ReplicaNode, Reps),
-                                         {C0, maps:update(Offset,
-                                                          {Reps1, Corrs},
-                                                          P0)}
-                                 end
-                         end, {COffs0, Pending0}, Offsets),
+    {COffs, Pending} =
+    lists:foldl(fun (Offset, {C0, P0}) ->
+                        case maps:get(Offset, P0) of
+                            {[ReplicaNode], Corrs} ->
+                                _ = notify_writers(Ref, Corrs),
+                                atomics:put(ORef, 1, Offset),
+                                {Offset, maps:remove(Offset, P0)};
+                            {Reps, Corrs} ->
+                                Reps1 = lists:delete(ReplicaNode, Reps),
+                                {C0, maps:update(Offset,
+                                                 {Reps1, Corrs},
+                                                 P0)}
+                        end
+                end, {COffs0, Pending0}, Offsets),
     % ct:pal("acks after ~w ~W", [COffs, Pending, 5]),
+    counters:put(Cnt, ?C_COMMITTED_OFFSET, COffs),
     State = State0#?MODULE{pending_writes = Pending,
                            committed_offset = COffs},
     %% if committed offset has incresed - update 

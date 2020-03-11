@@ -16,6 +16,7 @@
 -record(?MODULE, {cfg :: #cfg{}}).
 
 -type config() :: #{name := string(),
+                    reference => term(),
                     atom() => term()}.
 -opaque state() :: #?MODULE{}.
 
@@ -25,8 +26,9 @@
               ]).
 
 -spec start_cluster(config()) -> {ok, config()} | {error, term()}.
-start_cluster(Config0 = #{name := Name}) ->
+start_cluster(Config00 = #{name := Name}) ->
     true = osiris_util:validate_base64uri(Name),
+    Config0 = Config00#{external_ref => maps:get(reference, Config00, Name)},
     case osiris_writer:start(Config0) of
         {ok, Pid} ->
             Config = Config0#{leader_pid => Pid},

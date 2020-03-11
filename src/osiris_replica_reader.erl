@@ -2,13 +2,12 @@
 
 -behaviour(gen_server).
 
-
 %% replica reader, spawned remoted by replica process, connects back to
 %% configured host/port, reads entries from master and uses file:sendfile to
 %% replicate read records
 
 %% API functions
--export([start_link/4, stop/1]).
+-export([start_link/1, stop/1]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -20,7 +19,18 @@
 
 -record(state, {segment :: osiris_segment:state(),
                 socket :: gen_tcp:socket(),
-                leader_pid :: pid()}).
+                leader_pid :: pid(),
+                counter :: counters:counters_ref(),
+                counter_id :: term()}).
+
+-define(COUNTER_FIELDS,
+        [chunks_sent,
+         offset,
+         offset_listeners
+        ]).
+-define(C_CHUNKS_SENT, 1).
+-define(C_OFFSET, 2).
+-define(C_OFFSET_LISTENERS, 3).
 
 %%%===================================================================
 %%% API functions
@@ -33,8 +43,8 @@
 %% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
 %% @end
 %%--------------------------------------------------------------------
-start_link(Host, Port, LeaderPid, StartOffset) ->
-    gen_server:start_link(?MODULE, [Host, Port, LeaderPid, StartOffset], []).
+start_link(Conf) ->
+    gen_server:start_link(?MODULE, Conf, []).
 
 stop(Pid) ->
     gen_server:cast(Pid, stop).
@@ -54,7 +64,13 @@ stop(Pid) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([Host, Port, LeaderPid, StartOffset] = Args) ->
+init(#{host := Host,
+       port := Port,
+       leader_pid := LeaderPid,
+       start_offset := StartOffset,
+       external_ref := ExtRef} = Args) ->
+    CntId = {?MODULE, ExtRef, Host, Port},
+    CntRef = osiris_counters:new(CntId, ?COUNTER_FIELDS),
     Segment = osiris_writer:init_reader(LeaderPid, StartOffset),
     error_logger:info_msg("starting replica reader with ~w NextOffs ~b~n",
                           [Args, osiris_segment:next_offset(Segment)]),
@@ -68,7 +84,9 @@ init([Host, Port, LeaderPid, StartOffset] = Args) ->
     ok = osiris_writer:register_data_listener(LeaderPid, StartOffset -1),
     {ok, #state{segment = Segment,
                 socket = Sock,
-                leader_pid = LeaderPid}}.
+                leader_pid = LeaderPid,
+                counter = CntRef,
+                counter_id = CntId}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -101,20 +119,25 @@ handle_call(_Request, _From, State) ->
 handle_cast({more_data, _LastOffset},
             #state{segment = Seg0,
                    leader_pid = LeaderPid,
-                   socket = Sock} = State) ->
-    {ok, Seg} = do_sendfile(Sock, Seg0),
+                   socket = Sock,
+                   counter = Cnt} = State) ->
+    {ok, Seg} = do_sendfile(Sock, Cnt, Seg0),
     LastOffset = osiris_segment:next_offset(Seg) - 1,
     ok = osiris_writer:register_data_listener(LeaderPid, LastOffset),
+    ok = counters:add(Cnt, ?C_OFFSET_LISTENERS, 1),
     {noreply, State#state{segment = Seg}};
 handle_cast(stop, State) ->
     {stop, normal, State}.
 
-do_sendfile(Sock, Seg0) ->
+do_sendfile(Sock, Cnt, Seg0) ->
     case osiris_segment:send_file(Sock, Seg0) of
         {ok, Seg} ->
+            Offset = osiris_segment:next_offset(Seg) - 1,
+            ok = counters:add(Cnt, ?C_CHUNKS_SENT, 1),
+            ok = counters:put(Cnt, ?C_OFFSET, Offset),
             % error_logger:info_msg("~w replicate reader next offs ~b",
             %                       [self(), osiris_segment:next_offset(Seg)]),
-            do_sendfile(Sock, Seg);
+            do_sendfile(Sock, Cnt, Seg);
         {end_of_stream, Seg} ->
             {ok, Seg}
     end.
@@ -144,7 +167,8 @@ handle_info(_Info, State) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
-terminate(_Reason, _State) ->
+terminate(_Reason, #state{counter_id = CntId}) ->
+    ok = osiris_counters:delete(CntId),
     ok.
 
 %%--------------------------------------------------------------------
