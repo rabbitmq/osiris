@@ -28,7 +28,8 @@ all_tests() ->
      single_node_offset_listener,
      cluster_offset_listener,
      cluster_restart,
-     cluster_delete
+     cluster_delete,
+     start_cluster_invalid_replicas
     ].
 
 -define(BIN_SIZE, 800).
@@ -337,6 +338,15 @@ cluster_delete(Config) ->
     osiris:delete_cluster(Conf),
     [slave:stop(N) || N <- Nodes],
     ok.
+
+start_cluster_invalid_replicas(Config) ->
+    Name = ?config(cluster_name, Config),
+    Conf0 = #{name => Name,
+              leader_node => node(),
+              replica_nodes => ['zen@rabbit'],
+              dir => ?config(priv_dir, Config)},
+    {error, _, #{leader_pid := Leader,
+                 replica_pids := []}} = osiris:start_cluster(Conf0).
 
 %% Utility
 

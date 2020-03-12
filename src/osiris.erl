@@ -25,18 +25,20 @@
               config/0
               ]).
 
--spec start_cluster(config()) -> {ok, config()} | {error, term()}.
+-spec start_cluster(config()) -> {ok, config()} | {error, term()} | {error, term(), config()}.
 start_cluster(Config00 = #{name := Name}) ->
     true = osiris_util:validate_base64uri(Name),
     Config0 = Config00#{external_ref => maps:get(reference, Config00, Name)},
     case osiris_writer:start(Config0) of
         {ok, Pid} ->
             Config = Config0#{leader_pid => Pid},
-            ReplicaPids = [begin
-                               {ok, P} = osiris_replica:start(N, Config),
-                               P
-                           end || N <- maps:get(replica_nodes, Config)],
-            {ok, Config#{replica_pids => ReplicaPids}};
+            case start_replicas(Config) of
+                {ok, ReplicaPids} ->
+                    {ok, Config#{replica_pids => ReplicaPids}};
+                {error, Reason, ReplicaPids} ->
+                    %% Let the user decide what to do if cluster is only partially started
+                    {error, Reason, Config#{replica_pids => ReplicaPids}}
+            end;
         Error ->
             Error
     end.
@@ -69,6 +71,27 @@ restart_replica(Replica, Config) ->
 
 write(Pid, Corr, Data) ->
     osiris_writer:write(Pid, self(), Corr, Data).
+
+
+start_replicas(Config) ->
+    start_replicas(Config, maps:get(replica_nodes, Config), []).
+
+start_replicas(_Config, [], ReplicaPids) ->
+    {ok, ReplicaPids};
+start_replicas(Config, [Node | Nodes], ReplicaPids) ->
+    try
+        case osiris_replica:start(Node, Config) of
+            {ok, Pid} ->
+                start_replicas(Config, Nodes, [Pid | ReplicaPids]);
+            {ok, Pid, _} ->
+                start_replicas(Config, Nodes, [Pid | ReplicaPids]);
+            {error, Reason} ->
+                {error, Reason, ReplicaPids}
+        end
+    catch
+        exit:R ->
+            {error, R, ReplicaPids}
+    end.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
