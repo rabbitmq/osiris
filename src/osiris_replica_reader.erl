@@ -17,7 +17,7 @@
          terminate/2,
          code_change/3]).
 
--record(state, {segment :: osiris_segment:state(),
+-record(state, {log :: osiris_log:state(),
                 socket :: gen_tcp:socket(),
                 leader_pid :: pid(),
                 counter :: counters:counters_ref(),
@@ -67,13 +67,14 @@ stop(Pid) ->
 init(#{host := Host,
        port := Port,
        leader_pid := LeaderPid,
-       start_offset := StartOffset,
+       start_offset := {StartOffset, _} = TailInfo,
        external_ref := ExtRef} = Args) ->
     CntId = {?MODULE, ExtRef, Host, Port},
     CntRef = osiris_counters:new(CntId, ?COUNTER_FIELDS),
-    Segment = osiris_writer:init_reader(LeaderPid, StartOffset),
+    %% TODO: handle errors
+    {ok, Log} = osiris_writer:init_data_reader(LeaderPid, TailInfo),
     error_logger:info_msg("starting replica reader with ~w NextOffs ~b~n",
-                          [Args, osiris_segment:next_offset(Segment)]),
+                          [Args, osiris_log:next_offset(Log)]),
     SndBuf = 146988 * 10,
     {ok, Sock} = gen_tcp:connect(Host, Port, [binary, {packet, 0},
                                               {nodelay, true},
@@ -82,7 +83,7 @@ init(#{host := Host,
                           [inet:getopts(Sock, [sndbuf])]),
     %% register data listener with osiris_proc
     ok = osiris_writer:register_data_listener(LeaderPid, StartOffset -1),
-    {ok, #state{segment = Segment,
+    {ok, #state{log = Log,
                 socket = Sock,
                 leader_pid = LeaderPid,
                 counter = CntRef,
@@ -117,26 +118,26 @@ handle_call(_Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast({more_data, _LastOffset},
-            #state{segment = Seg0,
+            #state{log = Seg0,
                    leader_pid = LeaderPid,
                    socket = Sock,
                    counter = Cnt} = State) ->
     {ok, Seg} = do_sendfile(Sock, Cnt, Seg0),
-    LastOffset = osiris_segment:next_offset(Seg) - 1,
+    LastOffset = osiris_log:next_offset(Seg) - 1,
     ok = osiris_writer:register_data_listener(LeaderPid, LastOffset),
     ok = counters:add(Cnt, ?C_OFFSET_LISTENERS, 1),
-    {noreply, State#state{segment = Seg}};
+    {noreply, State#state{log = Seg}};
 handle_cast(stop, State) ->
     {stop, normal, State}.
 
 do_sendfile(Sock, Cnt, Seg0) ->
-    case osiris_segment:send_file(Sock, Seg0) of
+    case osiris_log:send_file(Sock, Seg0) of
         {ok, Seg} ->
-            Offset = osiris_segment:next_offset(Seg) - 1,
+            Offset = osiris_log:next_offset(Seg) - 1,
             ok = counters:add(Cnt, ?C_CHUNKS_SENT, 1),
             ok = counters:put(Cnt, ?C_OFFSET, Offset),
             % error_logger:info_msg("~w replicate reader next offs ~b",
-            %                       [self(), osiris_segment:next_offset(Seg)]),
+            %                       [self(), osiris_log:next_offset(Seg)]),
             do_sendfile(Sock, Cnt, Seg);
         {end_of_stream, Seg} ->
             {ok, Seg}

@@ -41,7 +41,7 @@
 
 -record(?MODULE, {cfg :: #cfg{},
                   parse_state :: parse_state(),
-                  segment :: osiris_segment:state(),
+                  log :: osiris_log:state(),
                   counter :: counters:counters_ref()}).
 
 -opaque state() :: #?MODULE{}.
@@ -71,7 +71,7 @@ start(Node, Config = #{name := Name}) when is_list(Name) ->
     %% TODO if we select from a range, how do we know in the other side
     %% which one have we selected???
     %% TODO What's the Id? How many replicas do we have?
-    %% TODO How do we know the name of the segment to write to disk?
+    %% TODO How do we know the name of the log to write to disk?
     %%` TODO another replica for the index?
     supervisor:start_child({?SUP, Node},
                            #{id => Name,
@@ -88,7 +88,7 @@ stop(Node, #{name := Name}) ->
 
 delete(Node, Config) ->
     stop(Node, Config),
-    rpc:call(Node, osiris_segment, delete_directory, [Config]).
+    rpc:call(Node, osiris_log, delete_directory, [Config]).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -126,9 +126,9 @@ init(#{leader_pid := LeaderPid,
     Self = self(),
     spawn_link(fun() -> accept(LSock, Self) end),
     CntRef = osiris_counters:new({?MODULE, ExtRef}, ?COUNTER_FIELDS),
-    Dir = osiris_segment:directory(Config),
-    Segment = osiris_segment:init(Dir, Config),
-    NextOffset = osiris_segment:next_offset(Segment),
+    Dir = osiris_log:directory(Config),
+    Log = osiris_log:init(Dir, Config),
+    NextOffset = osiris_log:next_offset(Log),
     error_logger:info_msg("osiris_replica:init/1: next offset ~b",
                           [NextOffset]),
     %% spawn reader process on leader node
@@ -138,7 +138,7 @@ init(#{leader_pid := LeaderPid,
     ReplicaReaderConf = #{host => Ip,
                           port => Port,
                           leader_pid => LeaderPid,
-                          start_offset => NextOffset,
+                          start_offset => osiris_log:tail_info(Log),
                           external_ref => ExtRef},
     case supervisor:start_child({osiris_replica_reader_sup, Node},
                                 #{
@@ -163,7 +163,7 @@ init(#{leader_pid := LeaderPid,
                              listening_socket = LSock,
                              gc_interval = Interval,
                              external_ref = ExtRef},
-                  segment = Segment,
+                  log = Log,
                   counter = CntRef}}.
 
 
@@ -240,7 +240,7 @@ handle_cast(_Msg, State) ->
 handle_info(force_gc, #?MODULE{cfg = #cfg{gc_interval = Interval},
                                counter = Cnt} = State) ->
     garbage_collect(),
-    counter:add(Cnt, ?C_FORCED_GCS, 1),
+    counters:add(Cnt, ?C_FORCED_GCS, 1),
     erlang:send_after(Interval, self(), force_gc),
     {noreply, State};
 handle_info({socket, Socket}, #?MODULE{cfg = Cfg} = State) ->
@@ -251,18 +251,18 @@ handle_info({tcp, Socket, Bin},
             #?MODULE{cfg = #cfg{socket = Socket,
                                 leader_pid = LeaderPid},
                      parse_state = ParseState0,
-                     segment = Segment0,
+                     log = Log0,
                      counter = Cnt} = State) ->
     ok = inet:setopts(Socket, [{active, 1}]),
     %% validate chunk
     {ParseState, OffsetChunks} = parse_chunk(Bin, ParseState0, []),
-    {Acks, Segment} = lists:foldl(
+    {Acks, Log} = lists:foldl(
                         fun({FirstOffset, B}, {Aks, Acc0}) ->
-                                Acc = osiris_segment:accept_chunk(B, Acc0),
+                                Acc = osiris_log:accept_chunk(B, Acc0),
                                 counters:add(Cnt, ?C_CHUNKS_WRITTEN, 1),
                                 {[FirstOffset | Aks], Acc}
-                        end, {[], Segment0}, OffsetChunks),
-    LastOffs = osiris_segment:next_offset(Segment) - 1,
+                        end, {[], Log0}, OffsetChunks),
+    LastOffs = osiris_log:next_offset(Log) - 1,
     counters:put(Cnt, ?C_OFFSET, LastOffs),
     counters:add(Cnt, ?C_PACKETS, 1),
     case Acks of
@@ -270,7 +270,7 @@ handle_info({tcp, Socket, Bin},
         _ ->
             ok = osiris_writer:ack(LeaderPid, lists:reverse(Acks))
     end,
-    {noreply, State#?MODULE{segment = Segment,
+    {noreply, State#?MODULE{log = Log,
                             parse_state = ParseState}};
 handle_info({tcp_passive, Socket},
             #?MODULE{cfg = #cfg{socket = Socket}} = State) ->

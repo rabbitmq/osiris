@@ -20,9 +20,18 @@
                     atom() => term()}.
 -opaque state() :: #?MODULE{}.
 
+-type offset() :: non_neg_integer().
+-type epoch() :: non_neg_integer().
+-type tail_info() :: {offset(), undefined | {epoch(), offset()}}.
+-type offset_spec() :: first | last | next | {abs, offset()} | offset().
+
 -export_type([
               state/0,
-              config/0
+              config/0,
+              offset/0,
+              epoch/0,
+              tail_info/0,
+              offset_spec/0
               ]).
 
 -spec start_cluster(config()) -> {ok, config()} | {error, term()} | {error, term(), config()}.
@@ -54,7 +63,7 @@ delete_cluster(Config) ->
     ok = osiris_writer:delete(Config).
 
 restart_cluster(Config0 = #{name := Name}) ->
-    true = osiris_utils:validate_base64uri(Name),
+    true = osiris_util:validate_base64uri(Name),
     {ok, Pid} = osiris_writer:start(Config0),
     Config = Config0#{leader_pid => Pid},
     ReplicaPids = [begin
