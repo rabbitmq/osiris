@@ -85,12 +85,14 @@ start_replicas(Config, [Node | Nodes], ReplicaPids) ->
                 start_replicas(Config, Nodes, [Pid | ReplicaPids]);
             {ok, Pid, _} ->
                 start_replicas(Config, Nodes, [Pid | ReplicaPids]);
-            {error, Reason} ->
-                {error, Reason, ReplicaPids}
+            {error, _Reason} ->
+                %% coordinator might try to start this replica in the future
+                start_replicas(Config, Nodes, ReplicaPids)
         end
     catch
-        exit:R ->
-            {error, R, ReplicaPids}
+        _:_ ->
+            %% coordinator might try to start this replica in the future
+            start_replicas(Config, Nodes, ReplicaPids)
     end.
 
 -ifdef(TEST).

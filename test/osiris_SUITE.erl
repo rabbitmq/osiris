@@ -345,8 +345,8 @@ start_cluster_invalid_replicas(Config) ->
               leader_node => node(),
               replica_nodes => ['zen@rabbit'],
               dir => ?config(priv_dir, Config)},
-    {error, _, #{leader_pid := Leader,
-                 replica_pids := []}} = osiris:start_cluster(Conf0).
+    {ok, #{leader_pid := Leader,
+           replica_pids := []}} = osiris:start_cluster(Conf0).
 
 %% Utility
 
