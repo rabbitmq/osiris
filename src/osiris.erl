@@ -1,9 +1,10 @@
 -module(osiris).
 
 -export([
+         write/3,
+         init_reader/2,
          start_cluster/1,
          stop_cluster/1,
-         write/3,
          restart_cluster/1,
          restart_server/1,
          restart_replica/2,
@@ -82,6 +83,26 @@ restart_replica(Replica, Config) ->
 write(Pid, Corr, Data) ->
     osiris_writer:write(Pid, self(), Corr, Data).
 
+%% @doc Initialise a new offset reader
+%% @param LeaderPid the pid of the current osiris cluster leader
+%% @param OffsetSpec specifies where in the log to attach the reader
+%% `first': Attach at first available offset.
+%% `last': Attach at the last available chunk offset or the next available offset
+%% if the log is empty.
+%% `next': Attach to the next chunk offset to be written.
+%% `{abs, offset()}': Attach at the provided offset. If this offset does not exist
+%% in the log it will error with `{error, {offset_out_of_range, Range}}'
+%% `offset()': Like `{abs, offset()}' but instead of erroring it will fall back
+%% to `first' (if lower than first offset in log) or `nextl if higher than
+%% last offset in log.
+%% @returns `{ok, state()} | {error, Error}' when error can be
+%% `{offset_out_of_range, empty | {From :: offset(), To :: offset()}}'
+%% @end
+-spec init_reader(pid(), offset_spec()) ->
+    {ok, osiris_log:state()} |
+    {error, {offset_out_of_range, empty | {offset(), offset()}}}.
+init_reader(LeaderPid, OffsetSpec) when is_pid(LeaderPid) ->
+    osiris_writer:init_offset_reader(LeaderPid, OffsetSpec).
 
 start_replicas(Config) ->
     start_replicas(Config, maps:get(replica_nodes, Config), []).

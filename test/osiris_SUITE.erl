@@ -163,12 +163,12 @@ single_node_offset_listener(Config) ->
               replica_nodes => []},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     {error, {offset_out_of_range, empty}} =
-        osiris_writer:init_offset_reader(Leader, {abs, 0}),
+        osiris:init_reader(Leader, {abs, 0}),
     osiris_writer:register_offset_listener(Leader, 0),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
     receive
         {osiris_offset, _Name, 0} ->
-            {ok, Log0} = osiris_writer:init_offset_reader(Leader, {abs, 0}),
+            {ok, Log0} = osiris:init_reader(Leader, {abs, 0}),
             {[{0, <<"mah-data">>}], Log} = osiris_log:read_chunk_parsed(Log0),
             {end_of_stream, _} = osiris_log:read_chunk_parsed(Log),
             ok
@@ -188,7 +188,7 @@ cluster_offset_listener(Config) ->
               leader_node => node(),
               replica_nodes => Replicas},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-    {ok, Log0} = osiris_writer:init_offset_reader(Leader, 0),
+    {ok, Log0} = osiris:init_reader(Leader, 0),
     osiris_writer:register_offset_listener(Leader, 0),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
     receive
