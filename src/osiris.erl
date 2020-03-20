@@ -3,6 +3,7 @@
 -export([
          write/3,
          init_reader/2,
+         register_offset_listener/2,
          start_cluster/1,
          stop_cluster/1,
          restart_cluster/1,
@@ -103,6 +104,14 @@ write(Pid, Corr, Data) ->
     {error, {offset_out_of_range, empty | {offset(), offset()}}}.
 init_reader(LeaderPid, OffsetSpec) when is_pid(LeaderPid) ->
     osiris_writer:init_offset_reader(LeaderPid, OffsetSpec).
+
+%% @doc
+%% Registers a one-off offset listener that will send an `{osiris_offset, offset()}'
+%% message when the osiris cluster committed offset moves beyond the provided offset
+%% @end
+-spec register_offset_listener(pid(), offset()) -> ok.
+register_offset_listener(Pid, Offset) ->
+    osiris_writer:register_offset_listener(Pid, Offset).
 
 start_replicas(Config) ->
     start_replicas(Config, maps:get(replica_nodes, Config), []).
