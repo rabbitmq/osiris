@@ -8,7 +8,6 @@
          init_offset_reader/2,
          register_data_listener/2,
          register_offset_listener/2,
-         unregister_offset_listener/1,
          ack/2,
          write/4,
          init/1,
@@ -88,9 +87,6 @@ register_data_listener(Pid, Offset) ->
 
 register_offset_listener(Pid, Offset) ->
     ok = gen_batch_server:cast(Pid, {register_offset_listener, self(), Offset}).
-
-unregister_offset_listener(Pid) ->
-  ok = gen_batch_server:cast(Pid, {unregister_offset_listener, self()}).
 
 ack(LeaderPid, Offsets) ->
     gen_batch_server:cast(LeaderPid, {ack, node(), Offsets}).
@@ -214,10 +210,6 @@ handle_commands([{cast, {register_offset_listener, Pid, Offset}} | Rem],
     State1 = State0#?MODULE{offset_listeners = [{Pid, Offset} | Listeners]},
     State = notify_offset_listeners(State1),
     handle_commands(Rem, State, Acc);
-handle_commands([{cast, {unregister_offset_listener, Pid}} | Rem],
-    #?MODULE{offset_listeners = Listeners} = State0, Acc) ->
-  State = State0#?MODULE{offset_listeners = lists:delete(Pid, Listeners)},
-  handle_commands(Rem, State, Acc);
 handle_commands([{cast, {ack, ReplicaNode, Offsets}} | Rem],
                 #?MODULE{cfg = #cfg{ext_reference = Ref,
                                     counter = Cnt,
