@@ -29,7 +29,8 @@
               offset_ref :: atomics:atomics_ref(),
               replicas = [] :: [node()],
               directory :: file:filename(),
-              counter :: counters:counters_ref()
+              counter :: counters:counters_ref(),
+              osiris_event_formatter
              }).
 
 -record(?MODULE, {cfg :: #cfg{},
@@ -99,7 +100,8 @@ write(Pid, Sender, Corr, Data) ->
 -spec init(osiris:config()) -> {ok, state()}.
 init(#{name := Name,
        external_ref := ExtRef,
-       replica_nodes := Replicas} = Config)
+       replica_nodes := Replicas,
+       osiris_event_formatter := Formatter} = Config)
   when is_list(Name) ->
     Dir = osiris_segment:directory(Config),
     process_flag(trap_exit, true),
@@ -120,7 +122,8 @@ init(#{name := Name,
                              replicas = Replicas,
                              directory = Dir,
                              %% TODO: there is no GC of counter registrations
-                             counter = CntRef},
+                             counter = CntRef,
+                             osiris_event_formatter = Formatter},
 
                   committed_offset = LastOffs,
                   segment = Segment}}.
@@ -168,8 +171,9 @@ update_pending(BatchOffs, Corrs,
                #?MODULE{cfg = #cfg{ext_reference = Ref,
                                    counter = Cnt,
                                    offset_ref = OffsRef,
-                                   replicas = []}} = State0) ->
-    _ = notify_writers(Ref, Corrs),
+                                   replicas = [],
+                                   osiris_event_formatter = EventFormatter}} = State0) ->
+    _ = notify_writers(Ref, Corrs, EventFormatter),
     atomics:put(OffsRef, 1, BatchOffs),
     counters:put(Cnt, ?C_COMMITTED_OFFSET, BatchOffs),
     State = State0#?MODULE{committed_offset = BatchOffs},
@@ -210,7 +214,8 @@ handle_commands([{cast, {unregister_offset_listener, Pid}} | Rem],
 handle_commands([{cast, {ack, ReplicaNode, Offsets}} | Rem],
                 #?MODULE{cfg = #cfg{ext_reference = Ref,
                                     counter = Cnt,
-                                    offset_ref = ORef},
+                                    offset_ref = ORef,
+                                    osiris_event_formatter = EventFormatter},
                          committed_offset = COffs0,
                          pending_writes = Pending0} = State0, Acc) ->
     % ct:pal("acks ~w", [Offsets]),
@@ -219,7 +224,7 @@ handle_commands([{cast, {ack, ReplicaNode, Offsets}} | Rem],
     lists:foldl(fun (Offset, {C0, P0}) ->
                         case maps:get(Offset, P0) of
                             {[ReplicaNode], Corrs} ->
-                                _ = notify_writers(Ref, Corrs),
+                                _ = notify_writers(Ref, Corrs, EventFormatter),
                                 atomics:put(ORef, 1, Offset),
                                 {Offset, maps:remove(Offset, P0)};
                             {Reps, Corrs} ->
@@ -278,9 +283,13 @@ notify_offset_listeners(#?MODULE{cfg = #cfg{ext_reference = Ref},
      end || P <- L0],
     ok.
 
-notify_writers(Name, Corrs) ->
+notify_writers(Name, Corrs, EventFormatter) ->
     maps:map(
       fun (P, V) ->
-              P ! {osiris_written, Name, lists:reverse(V)}
+              P ! wrap_osiris_event(EventFormatter, Name, lists:reverse(V))
       end, Corrs).
 
+wrap_osiris_event(undefined, Name, Value) ->
+    {osiris_written, Name, Value};
+wrap_osiris_event({M, F, A}, Name, Value) ->
+    apply(M, F, [Name, Value | A]).
