@@ -17,6 +17,7 @@
 
 -type config() :: #{name := string(),
                     reference => term(),
+                    event_formatter => {module(), atom(), list()},
                     atom() => term()}.
 -opaque state() :: #?MODULE{}.
 
@@ -43,10 +44,10 @@ start_cluster(Config00 = #{name := Name}) ->
             Config = Config0#{leader_pid => Pid},
             case start_replicas(Config) of
                 {ok, ReplicaPids} ->
-                    {ok, Config#{replica_pids => ReplicaPids}};
-                {error, Reason, ReplicaPids} ->
-                    %% Let the user decide what to do if cluster is only partially started
-                    {error, Reason, Config#{replica_pids => ReplicaPids}}
+                    {ok, Config#{replica_pids => ReplicaPids}}
+                % {error, Reason, ReplicaPids} ->
+                %     %% Let the user decide what to do if cluster is only partially started
+                %     {error, Reason, Config#{replica_pids => ReplicaPids}}
             end;
         Error ->
             Error

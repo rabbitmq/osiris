@@ -31,7 +31,7 @@
               replicas = [] :: [node()],
               directory :: file:filename(),
               counter :: counters:counters_ref(),
-              osiris_event_formatter
+              event_formatter :: undefined | {module(), atom(), list()}
              }).
 
 -record(?MODULE, {cfg :: #cfg{},
@@ -109,9 +109,9 @@ write(Pid, Sender, Corr, Data) ->
 -spec init(osiris:config()) -> {ok, state()}.
 init(#{name := Name,
        external_ref := ExtRef,
-       replica_nodes := Replicas,
-       osiris_event_formatter := Formatter} = Config)
+       replica_nodes := Replicas} = Config)
   when is_list(Name) ->
+    Formatter = maps:get(event_formatter, Config, undefined),
     Dir = osiris_log:directory(Config),
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
@@ -132,7 +132,7 @@ init(#{name := Name,
                              directory = Dir,
                              %% TODO: there is no GC of counter registrations
                              counter = CntRef,
-                             osiris_event_formatter = Formatter},
+                             event_formatter = Formatter},
 
                   committed_offset = LastOffs,
                   log = Log}}.
@@ -181,7 +181,7 @@ update_pending(BatchOffs, Corrs,
                                    counter = Cnt,
                                    offset_ref = OffsRef,
                                    replicas = [],
-                                   osiris_event_formatter = EventFormatter}} = State0) ->
+                                   event_formatter = EventFormatter}} = State0) ->
     _ = notify_writers(Ref, Corrs, EventFormatter),
     atomics:put(OffsRef, 1, BatchOffs),
     counters:put(Cnt, ?C_COMMITTED_OFFSET, BatchOffs),
@@ -222,7 +222,7 @@ handle_commands([{cast, {ack, ReplicaNode, Offsets}} | Rem],
                 #?MODULE{cfg = #cfg{ext_reference = Ref,
                                     counter = Cnt,
                                     offset_ref = ORef,
-                                    osiris_event_formatter = EventFormatter},
+                                    event_formatter = EventFormatter},
                          committed_offset = COffs0,
                          pending_writes = Pending0} = State0, Acc) ->
     % ct:pal("acks ~w", [Offsets]),

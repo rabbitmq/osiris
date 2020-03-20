@@ -353,10 +353,11 @@ cluster_delete(Config) ->
 start_cluster_invalid_replicas(Config) ->
     Name = ?config(cluster_name, Config),
     Conf0 = #{name => Name,
+              epoch => 1,
               leader_node => node(),
               replica_nodes => ['zen@rabbit'],
               dir => ?config(priv_dir, Config)},
-    {ok, #{leader_pid := Leader,
+    {ok, #{leader_pid := _Leader,
            replica_pids := []}} = osiris:start_cluster(Conf0).
 
 %% Utility
