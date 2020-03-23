@@ -25,7 +25,7 @@
 
 -type offset() :: non_neg_integer().
 -type epoch() :: non_neg_integer().
--type tail_info() :: {offset(), undefined | {epoch(), offset()}}.
+-type tail_info() :: {offset(), empty | {epoch(), offset()}}.
 -type offset_spec() :: first | last | next | {abs, offset()} | offset().
 
 -export_type([
@@ -101,7 +101,8 @@ write(Pid, Corr, Data) ->
 %% @end
 -spec init_reader(pid(), offset_spec()) ->
     {ok, osiris_log:state()} |
-    {error, {offset_out_of_range, empty | {offset(), offset()}}}.
+    {error, {offset_out_of_range, empty | {offset(), offset()}}} |
+    {error, {invalid_last_offset_epoch, offset(), offset()}}.
 init_reader(LeaderPid, OffsetSpec) when is_pid(LeaderPid) ->
     osiris_writer:init_offset_reader(LeaderPid, OffsetSpec).
 

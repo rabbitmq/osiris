@@ -223,50 +223,109 @@ tail_info(#?MODULE{mode = #write{tail_info = TailInfo}}) ->
 
 -spec init_data_reader(osiris:tail_info(), config()) ->
     {ok, state()} |
-    {error, {offset_out_of_range, empty | {offset(), offset()}}}.
-init_data_reader({StartOffset, _}, #{dir := Dir} = _Config) ->
+    {error, {offset_out_of_range, empty | {offset(), offset()}}} |
+    {error, {invalid_last_offset_epoch, offset(), offset()}}.
+init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = _Config) ->
     SegInfo = build_log_overview(Dir),
     Range = range_from_segment_infos(SegInfo),
     error_logger:info_msg(
-      "osiris_segment:init_data_reader/2 at ~b range: ~w seg infos ~p",
-      [StartOffset, Range, SegInfo]),
+      "osiris_segment:init_data_reader/2 at ~b prev ~w range: ~w seg infos ~p",
+      [StartOffset, PrevEO, Range, SegInfo]),
     %% Invariant:  there is always at least one segment left on disk
-    NextOffs = case Range of
-                   {F, _L} when StartOffset < F ->
-                       %% if a lower than exisiting is request simply forward
-                       %% it to the first offset of the log
-                       F;
-                   _ ->
-                       StartOffset
-               end,
-    %% StartOffset is same as next offset (last + 1)
-    %% the we should attach
-    case find_segment_for_offset(NextOffs, SegInfo) of
-        undefined ->
+    case Range of
+        {F, _L} when StartOffset < F ->
+            %% if a lower than exisiting is request simply forward
+            %% it to the first offset of the log
+            %% in this case we cannot validate PrevEO - instead
+            %% the replica should truncate all of it's exisiting log
+            case find_segment_for_offset(F, SegInfo) of
+                undefined ->
+                    %% this is unexpected and thus an error
+                    exit({segment_not_found, F, SegInfo});
+                StartSegment ->
+                    {ok, init_data_reader_from_segment(Dir, StartSegment, F)}
+            end;
+        empty when StartOffset > 0 ->
             {error, {offset_out_of_range, Range}};
-        StartSegment ->
-            {ok, Fd} = file:open(StartSegment, [raw, binary, read]),
-            IndexFile = filename:rootname(StartSegment) ++ ".index",
-            {ok, Data} = file:read_file(IndexFile),
-            {_, FilePos} = scan_index(Data, StartOffset),
-            {ok, Pos} = file:position(Fd, FilePos),
-            error_logger:info_msg(
-              "osiris_segment:init_data_reader/2 at ~b file pos ~b/~w",
-              [NextOffs, Pos, FilePos]),
-            {ok, #?MODULE{cfg = #cfg{directory = Dir},
-                          mode = #read{type = data,
-                                       next_offset = NextOffs},
-                          fd = Fd}}
+        {_F, L} when StartOffset > L + 1 ->
+            %% if we are trying to attach to anything larger than
+            %% the next offset (i.e last +1) this is in out of range
+            %% error
+            {error, {offset_out_of_range, Range}};
+        _ ->
+            %% this assumes the offset is in range
+            %% first we need to validate PrevEO
+            case PrevEO of
+                empty when StartOffset == 0 ->
+                    case find_segment_for_offset(StartOffset, SegInfo) of
+                        undefined ->
+                            %% this is unexpected and thus an error
+                            exit({segment_not_found, StartOffset, SegInfo});
+                        StartSegment ->
+                            {ok, init_data_reader_from_segment(Dir, StartSegment, StartOffset)}
+                    end;
+                {PrevE, PrevO} ->
+                    case find_segment_for_offset(PrevO, SegInfo) of
+                        undefined ->
+                            %% this is unexpected and thus an error
+                            {error, {invalid_last_offset_epoch, PrevE, unknown}};
+                        PrevSeg ->
+                            %% prev segment exists, does it have the correct
+                            %% epoch?
+                            {ok, Fd} = file:open(PrevSeg, [raw, binary, read]),
+                            PrevIndexFile = filename:rootname(PrevSeg) ++ ".index",
+                            {ok, Data} = file:read_file(PrevIndexFile),
+                            %% TODO: next offset needs to be a chunk offset
+                            {_, FilePos} = scan_index(Data, PrevO),
+                            {ok, FilePos} = file:position(Fd, FilePos),
+                            case file:read(Fd, ?HEADER_SIZE_B) of
+                                {ok, <<?MAGIC:4/unsigned,
+                                       ?VERSION:4/unsigned,
+                                       _NumEntries:16/unsigned,
+                                       _NumRecords:32/unsigned,
+                                       PrevE:64/unsigned,
+                                       PrevO:64/unsigned,
+                                       _Crc:32/integer,
+                                       _DataSize:32/unsigned>>} ->
+                                    ok = file:close(Fd),
+                                    {ok, init_data_reader_from_segment(
+                                           Dir, find_segment_for_offset(StartOffset, SegInfo), StartOffset)};
+                                {ok, <<?MAGIC:4/unsigned,
+                                       ?VERSION:4/unsigned,
+                                       _NumEntries:16/unsigned,
+                                       _NumRecords:32/unsigned,
+                                       OtherE:64/unsigned,
+                                       PrevO:64/unsigned,
+                                       _Crc:32/integer,
+                                       _DataSize:32/unsigned>>} ->
+                                    ok = file:close(Fd),
+                                    {error, {invalid_last_offset_epoch, PrevE, OtherE}}
+                            end
+                    end
+            end
     end.
+    %% TODO we only need to validate if the attach request is in range
+    %% if NextOffs has been forwarded there is no point in validating as the
+    %% entry will not exist
+    %% also when start offset is the at the exact lower bound of the range
+    %% we cannot validate as the prior entry did not exist
+    %% in this case the replica should truncate but how do we signal that?
+    %% perhaps we should fail validation in this scenario
 
-%% checks the tail info epoch, offset exists in the current log
-% validate_offset_epoch(empty, Range) ->
-%     %% the tail is the empty log, this is always fine;
-%     ok;
-% validate_offset_epoch({O, E}, empty) ->
-%     ok;
-% validate_offset_epoch({O, E}, empty) ->
-%     ok.
+init_data_reader_from_segment(Dir, StartSegment, NextOffs) ->
+    {ok, Fd} = file:open(StartSegment, [raw, binary, read]),
+    IndexFile = filename:rootname(StartSegment) ++ ".index",
+    {ok, Data} = file:read_file(IndexFile),
+    %% TODO: next offset needs to be a chunk offset
+    {_, FilePos} = scan_index(Data, NextOffs),
+    {ok, Pos} = file:position(Fd, FilePos),
+    error_logger:info_msg(
+      "osiris_segment:init_data_reader/2 at ~b file pos ~b/~w",
+      [NextOffs, Pos, FilePos]),
+    #?MODULE{cfg = #cfg{directory = Dir},
+             mode = #read{type = data,
+                          next_offset = NextOffs},
+             fd = Fd}.
 
 
 %% @doc Initialise a new offset reader
@@ -540,7 +599,7 @@ recover_tail_info(Dir) when is_list(Dir) ->
     recover_tail_info0(0, IdxFiles).
 
 recover_tail_info0(NextOffs, []) ->
-    {{NextOffs, undefined}, undefined};
+    {{NextOffs, empty}, undefined};
 recover_tail_info0(NextOffs, [IdxFile | Rem]) ->
     {ok, Data} = file:read_file(IdxFile),
     case Data of

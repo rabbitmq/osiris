@@ -146,7 +146,7 @@ subbatch(Config) ->
 read_chunk_parsed(Config) ->
     S0 = osiris_log:init(?config(dir, Config), #{epoch => 1}),
     _S1 = osiris_log:write([<<"hi">>], S0),
-    {ok, R0} = osiris_log:init_data_reader({0, undefined},
+    {ok, R0} = osiris_log:init_data_reader({0, empty},
                                      #{dir => ?config(dir, Config)}),
     ?assertMatch({[{0, <<"hi">>}], _},
                  osiris_log:read_chunk_parsed(R0)),
@@ -156,14 +156,14 @@ read_chunk_parsed_multiple_chunks(Config) ->
     S0 = osiris_log:init(?config(dir, Config), #{epoch => 1}),
     S1 = osiris_log:write([<<"hi">>, <<"hi-there">>], S0),
     _S2 = osiris_log:write([<<"hi-again">>], S1),
-    {ok, R0} = osiris_log:init_data_reader({0, undefined},
+    {ok, R0} = osiris_log:init_data_reader({0, empty},
                                            #{dir => ?config(dir, Config)}),
     {[{0, <<"hi">>}, {1, <<"hi-there">>}], R1} =
         osiris_log:read_chunk_parsed(R0),
     ?assertMatch({[{2, <<"hi-again">>}], _},
                  osiris_log:read_chunk_parsed(R1)),
     %% open another reader at a later index
-    {ok, R2} = osiris_log:init_data_reader({2, undefined},
+    {ok, R2} = osiris_log:init_data_reader({2, {1, 0}},
                                            #{dir => ?config(dir, Config)}),
     ?assertMatch({[{2, <<"hi-again">>}], _},
                  osiris_log:read_chunk_parsed(R2)),
@@ -183,7 +183,7 @@ write_multi_log(Config) ->
     ?assertEqual(2, length(Segments)),
 
     %% ensure all records can be read
-    {ok, R0} = osiris_log:init_data_reader({0, undefined},
+    {ok, R0} = osiris_log:init_data_reader({0, empty},
                                            #{dir => ?config(dir, Config)}),
 
     R1 = lists:foldl(
@@ -201,7 +201,7 @@ write_multi_log(Config) ->
 tail_info_empty(Config) ->
     Log = osiris_log:init(?config(dir, Config), #{epoch => 0}),
     %% {NextOffs, {LastEpoch, LastChunkOffset}}
-    ?assertEqual({0, undefined}, osiris_log:tail_info(Log)),
+    ?assertEqual({0, empty}, osiris_log:tail_info(Log)),
     osiris_log:close(Log),
     ok.
 
@@ -370,18 +370,18 @@ init_data_reader_truncated(Config) ->
 
     %% when requesting a lower offset than the start of the log
     %% it should automatically attach at the first available offset
-    {ok, L1} = osiris_log:init_data_reader({0, undefined}, RConf),
+    {ok, L1} = osiris_log:init_data_reader({0, empty}, RConf),
     ?assert(0 < osiris_log:next_offset(L1)),
     osiris_log:close(L1),
 
     %% attaching inside the log should be ok too
-    {ok, L2} = osiris_log:init_data_reader({750, {700, 1}}, RConf),
+    {ok, L2} = osiris_log:init_data_reader({750, {1, 700}}, RConf),
     ?assertEqual(750, osiris_log:next_offset(L2)),
     osiris_log:close(L2),
 
     % %% however attaching with a different epoch should be disallowed
-    % ?assertEqual({error, {invalid_last_offset_epoch, 1}},
-    %              osiris_log:init_data_reader({750, {700, 2}}, RConf),
+    ?assertEqual({error, {invalid_last_offset_epoch, 2, 1}},
+                 osiris_log:init_data_reader({750, {2, 700}}, RConf)),
     osiris_log:close(L2),
     ok.
 

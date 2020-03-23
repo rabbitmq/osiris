@@ -99,6 +99,7 @@ cluster_write(Config) ->
               replica_nodes => Replicas},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
+    % osiris_writer:register_data_listener(Leader, 0),
     receive
         {osiris_written, _, [42]} ->
             ok
@@ -107,12 +108,13 @@ cluster_write(Config) ->
               exit(osiris_written_timeout)
     end,
     Self = self(),
-    _ = spawn_link(LeaderNode,
-                   fun () ->
-                           {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, undefined}),
-                           {[{0, <<"mah-data">>}], _Log} = osiris_log:read_chunk_parsed(Log0),
-                           Self ! read_data_ok
-                   end),
+    _ = spawn_link(
+          LeaderNode,
+          fun () ->
+                  {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
+                  {[{0, <<"mah-data">>}], _Log} = osiris_log:read_chunk_parsed(Log0),
+                  Self ! read_data_ok
+          end),
     receive
         read_data_ok -> ok
     after 2000 ->
@@ -143,7 +145,7 @@ cluster_batch_write(Config) ->
     Self = self(),
     _ = spawn(LeaderNode,
               fun () ->
-                      {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, undefined}),
+                      {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
                       {[{0, <<"mah-data">>}], _Log} = osiris_log:read_chunk_parsed(Log0),
                       Self ! read_data_ok
               end),
@@ -222,7 +224,7 @@ read_validate_single_node(Config) ->
     %                        osiris_log, lists, file]),
     write_n(Leader, Num, #{}),
     % stop_profile(Config),
-    {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, undefined}),
+    {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
 
     {Time, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
     MsgSec = Num / ((Time / 1000) / 1000),
@@ -272,7 +274,7 @@ read_validate(Config) ->
     [begin
          ct:pal("~w counters ~p", [N, rpc:call(N, osiris_counters, overview, [])])
      end || N <- Nodes],
-    {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, undefined}),
+    {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
     {_, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
 
     [slave:stop(N) || N <- Nodes],
@@ -315,7 +317,7 @@ cluster_restart(Config) ->
     Self = self(),
     _ = spawn(LeaderNode,
               fun () ->
-                      {ok, Log0} = osiris_writer:init_data_reader(Leader1, {0, undefined}),
+                      {ok, Log0} = osiris_writer:init_data_reader(Leader1, {0, empty}),
                       {[{0, <<"before-restart">>}], Log1} = osiris_log:read_chunk_parsed(Log0),
                       {[{1, <<"after-restart">>}], _Log2} = osiris_log:read_chunk_parsed(Log1),
                       Self ! read_data_ok

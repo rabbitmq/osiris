@@ -70,14 +70,10 @@ delete(#{leader_node := Leader} = Config) ->
 start_link(Config) ->
     gen_batch_server:start_link(?MODULE, Config).
 
-% -spec init_data_reader(pid(), osiris:tail_info()) ->
-%     {ok, osiris_log:state()} | {error, .
 init_data_reader(Pid, TailInfo) when node(Pid) == node() ->
     Ctx = gen_batch_server:call(Pid, get_reader_context),
     osiris_log:init_data_reader(TailInfo, Ctx).
 
-% -spec init_offset_reader(pid(), osiris:offset()) ->
-%     osiris_log:state().
 init_offset_reader(Pid, OffsetSpec) when node(Pid) == node() ->
     Ctx = gen_batch_server:call(Pid, get_reader_context),
     osiris_log:init_offset_reader(OffsetSpec, Ctx).
@@ -263,18 +259,16 @@ handle_commands([_Unk | Rem], State, Acc) ->
 
 notify_data_listeners(#?MODULE{log = Seg,
                                data_listeners = L0} = State) ->
-    LastOffset = osiris_log:next_offset(Seg) - 1,
-    {Notify, L} = lists:splitwith(fun ({_Pid, O}) -> O < LastOffset end, L0),
-    [gen_server:cast(P, {more_data, LastOffset})
-     || {P, _} <- Notify],
+    NextOffset = osiris_log:next_offset(Seg),
+    {Notify, L} = lists:splitwith(fun ({_Pid, O}) -> O < NextOffset end, L0),
+    [gen_server:cast(P, {more_data, NextOffset}) || {P, _} <- Notify],
     State#?MODULE{data_listeners = L}.
 
 notify_offset_listeners(#?MODULE{cfg = #cfg{ext_reference = Ref},
                                  committed_offset = COffs,
                                  offset_listeners = L0} = State) ->
     {Notify, L} = lists:splitwith(fun ({_Pid, O}) -> O =< COffs end, L0),
-    [P ! {osiris_offset, Ref, COffs}
-     || {P, _} <- Notify],
+    [P ! {osiris_offset, Ref, COffs} || {P, _} <- Notify],
     State#?MODULE{offset_listeners = L}.
 
 % notify_offset_listeners(#?MODULE{cfg = #cfg{ext_reference = Ref},

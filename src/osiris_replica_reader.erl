@@ -82,7 +82,7 @@ init(#{host := Host,
     error_logger:info_msg("gen tcp opts snd buf~p",
                           [inet:getopts(Sock, [sndbuf])]),
     %% register data listener with osiris_proc
-    ok = osiris_writer:register_data_listener(LeaderPid, StartOffset -1),
+    ok = osiris_writer:register_data_listener(LeaderPid, StartOffset),
     {ok, #state{log = Log,
                 socket = Sock,
                 leader_pid = LeaderPid,
@@ -123,8 +123,8 @@ handle_cast({more_data, _LastOffset},
                    socket = Sock,
                    counter = Cnt} = State) ->
     {ok, Seg} = do_sendfile(Sock, Cnt, Seg0),
-    LastOffset = osiris_log:next_offset(Seg) - 1,
-    ok = osiris_writer:register_data_listener(LeaderPid, LastOffset),
+    ok = osiris_writer:register_data_listener(LeaderPid,
+                                              osiris_log:next_offset(Seg)),
     ok = counters:add(Cnt, ?C_OFFSET_LISTENERS, 1),
     {noreply, State#state{log = Seg}};
 handle_cast(stop, State) ->
