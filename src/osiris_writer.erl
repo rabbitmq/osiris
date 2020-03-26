@@ -264,11 +264,13 @@ notify_data_listeners(#?MODULE{log = Seg,
     [gen_server:cast(P, {more_data, NextOffset}) || {P, _} <- Notify],
     State#?MODULE{data_listeners = L}.
 
-notify_offset_listeners(#?MODULE{cfg = #cfg{ext_reference = Ref},
+notify_offset_listeners(#?MODULE{cfg = #cfg{ext_reference = Ref,
+                                            event_formatter = EventFormatter},
                                  committed_offset = COffs,
                                  offset_listeners = L0} = State) ->
     {Notify, L} = lists:splitwith(fun ({_Pid, O}) -> O =< COffs end, L0),
-    [P ! {osiris_offset, Ref, COffs} || {P, _} <- Notify],
+    [P ! wrap_osiris_event(EventFormatter, {osiris_offset, Ref, COffs})
+     || {P, _} <- Notify],
     State#?MODULE{offset_listeners = L}.
 
 % notify_offset_listeners(#?MODULE{cfg = #cfg{ext_reference = Ref},
@@ -286,10 +288,10 @@ notify_offset_listeners(#?MODULE{cfg = #cfg{ext_reference = Ref},
 notify_writers(Name, Corrs, EventFormatter) ->
     maps:map(
       fun (P, V) ->
-              P ! wrap_osiris_event(EventFormatter, Name, lists:reverse(V))
+              P ! wrap_osiris_event(EventFormatter, {osiris_written, Name, lists:reverse(V)})
       end, Corrs).
 
-wrap_osiris_event(undefined, Name, Value) ->
-    {osiris_written, Name, Value};
-wrap_osiris_event({M, F, A}, Name, Value) ->
-    apply(M, F, [Name, Value | A]).
+wrap_osiris_event(undefined, Evt) ->
+    Evt;
+wrap_osiris_event({M, F, A}, Evt) ->
+    apply(M, F, [Evt | A]).
