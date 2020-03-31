@@ -29,7 +29,8 @@ all_tests() ->
      cluster_offset_listener,
      cluster_restart,
      cluster_delete,
-     start_cluster_invalid_replicas
+     start_cluster_invalid_replicas,
+     diverged_replica
     ].
 
 -define(BIN_SIZE, 800).
@@ -300,8 +301,8 @@ cluster_restart(Config) ->
 
     osiris:stop_cluster(Conf),
 
-    {ok, Leader1} = rpc:call(LeaderNode, osiris, restart_server, [Conf]),
-    [{ok, _Replica} = rpc:call(LeaderNode, osiris, restart_replica,
+    {ok, Leader1} = rpc:call(LeaderNode, osiris, start_writer, [Conf]),
+    [{ok, _Replica} = rpc:call(LeaderNode, osiris, start_replica,
                               [Replica, Conf#{leader_pid => Leader1}])
      || Replica <- Replicas],
 
@@ -362,6 +363,71 @@ start_cluster_invalid_replicas(Config) ->
     {ok, #{leader_pid := _Leader,
            replica_pids := []}} = osiris:start_cluster(Conf0).
 
+diverged_replica(Config) ->
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    Nodes = [s1, s2, s3],
+    [LeaderE1, LeaderE2, LeaderE3] =
+        [start_slave(N, PrivDir) || N <- Nodes],
+    ConfE1 = #{name => Name,
+               external_ref => Name,
+               epoch => 1,
+               leader_node => LeaderE1,
+               replica_nodes => [LeaderE2, LeaderE3]},
+    {ok, #{leader_pid := LeaderE1Pid}} = osiris:start_cluster(ConfE1),
+    %% write some records in e1
+    [osiris:write(LeaderE1Pid, N, [<<N:64/integer>>])
+     || N <- lists:seq(1, 100)],
+    wait_for_written(lists:seq(1, 100)),
+
+    %% shut down cluster and start only LeaderE2 in epoch 2
+    ok = osiris:stop_cluster(ConfE1),
+    ConfE2 = ConfE1#{leader_node => LeaderE2,
+                     epoch => 2,
+                     replica_nodes => [LeaderE1, LeaderE2]},
+    {ok, LeaderE2Pid} = osiris_writer:start(ConfE2),
+    %% write some entries that won't be committedo
+    [osiris:write(LeaderE2Pid, N, [<<N:64/integer>>])
+     || N <- lists:seq(101, 200)],
+    %% we can't wait for osiris_written here
+    timer:sleep(500),
+    %% shut down LeaderE2
+    ok = osiris_writer:stop(ConfE2),
+
+    ConfE3 = ConfE1#{leader_node => LeaderE3,
+                     epoch => 3,
+                     replica_nodes => [LeaderE1, LeaderE2]},
+    %% start the cluster in E3 with E3 as leader
+    {ok, #{leader_pid := LeaderE3Pid}} = osiris:start_cluster(ConfE3),
+    %% write some more in this epoch
+    [osiris:write(LeaderE3Pid, N, [<<N:64/integer>>])
+     || N <- lists:seq(201, 300)],
+    wait_for_written(lists:seq(201, 300)),
+
+    ok = osiris:stop_cluster(ConfE3),
+
+    %% validate replication etc takes place
+    [Idx1, Idx2, Idx3] =
+    [begin
+         {ok, D} = file:read_file(filename:join([PrivDir, N,
+                                                 ?FUNCTION_NAME,
+                                                    "00000000000000000000.index"])),
+         D
+     end || N <- Nodes],
+    ?assertEqual(Idx1, Idx2),
+    ?assertEqual(Idx1, Idx3),
+
+    [Seg1, Seg2, Seg3] =
+    [begin
+         {ok, D} = file:read_file(filename:join([PrivDir, N,
+                                                 ?FUNCTION_NAME,
+                                                    "00000000000000000000.segment"])),
+         D
+     end || N <- Nodes],
+    ?assertEqual(Seg1, Seg2),
+    ?assertEqual(Seg1, Seg3),
+    ok.
+
 %% Utility
 
 write_n(Pid, N, Written) ->
@@ -375,6 +441,10 @@ write_n(Pid, N, Next, Written) ->
     ok = osiris:write(Pid, Next, <<Next:?BIN_SIZE/integer>>),
     write_n(Pid, N, Next + 1, Written#{Next => ok}).
 
+wait_for_written(Written0) when is_list(Written0) ->
+    wait_for_written(lists:foldl(fun(N, Acc) ->
+                                         maps:put(N, ok, Acc)
+                                 end, #{}, Written0));
 wait_for_written(Written0) ->
     receive
         {osiris_written, _Name, Corrs} ->

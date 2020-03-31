@@ -6,9 +6,8 @@
          register_offset_listener/2,
          start_cluster/1,
          stop_cluster/1,
-         restart_cluster/1,
-         restart_server/1,
-         restart_replica/2,
+         start_writer/1,
+         start_replica/2,
          delete_cluster/1
          ]).
 
@@ -65,20 +64,10 @@ delete_cluster(Config) ->
     [ok = osiris_replica:delete(R, Config) || R <- maps:get(replica_nodes, Config)],
     ok = osiris_writer:delete(Config).
 
-restart_cluster(Config0 = #{name := Name}) ->
-    true = osiris_util:validate_base64uri(Name),
-    {ok, Pid} = osiris_writer:start(Config0),
-    Config = Config0#{leader_pid => Pid},
-    ReplicaPids = [begin
-                       element(2, osiris_replica:start(N, Config))
-                   end
-                   || N <- maps:get(replica_nodes, Config)],
-    {ok, Config#{replica_pids => ReplicaPids}}.
-
-restart_server(Config) ->
+start_writer(Config) ->
     osiris_writer:start(Config).
 
-restart_replica(Replica, Config) ->
+start_replica(Replica, Config) ->
     osiris_replica:start(Replica, Config).
 
 write(Pid, Corr, Data) ->

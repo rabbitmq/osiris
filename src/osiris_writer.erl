@@ -4,6 +4,7 @@
 
 -export([start_link/1,
          start/1,
+         overview/1,
          init_data_reader/2,
          init_offset_reader/2,
          register_data_listener/2,
@@ -70,6 +71,10 @@ delete(#{leader_node := Leader} = Config) ->
 start_link(Config) ->
     gen_batch_server:start_link(?MODULE, Config).
 
+overview(Pid) when node(Pid) == node() ->
+    #{dir := Dir} = gen_batch_server:call(Pid, get_reader_context),
+    {ok, osiris_log:overview(Dir)}.
+
 init_data_reader(Pid, TailInfo) when node(Pid) == node() ->
     Ctx = gen_batch_server:call(Pid, get_reader_context),
     osiris_log:init_data_reader(TailInfo, Ctx).
@@ -108,7 +113,7 @@ init(#{name := Name,
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
     ORef = atomics:new(1, [{signed, true}]),
-    Log = osiris_log:init(Dir, Config),
+    Log = osiris_log:init(Config#{dir => Dir}),
     CntRef = osiris_counters:new({?MODULE, ExtRef}, ?COUNTER_FIELDS),
     LastOffs = osiris_log:next_offset(Log) -1,
     atomics:put(ORef, 1, LastOffs),
