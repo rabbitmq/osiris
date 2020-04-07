@@ -21,6 +21,7 @@
          get_current_epoch/1,
          close/1,
          overview/1,
+         evaluate_retention/2,
 
          directory/1,
          delete_directory/1
@@ -77,10 +78,12 @@
 
 -type record() :: {offset(), iodata()}.
 -type offset_spec() :: osiris:offset_spec().
+-type retention_spec() :: osiris:retention_spec().
 
 %% holds static or rarely changing fields
 -record(cfg, {directory :: file:filename(),
-              max_size = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer()
+              max_segment_size = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer(),
+              retention = [] :: [osiris:retention_spec()]
              }).
 
 
@@ -104,6 +107,7 @@
                      num :: non_neg_integer()}).
 
 -record(seg_info, {file :: file:filename(),
+                   size = 0 :: non_neg_integer(),
                    index :: file:filename(),
                    first :: undefined | #chunk_info{},
                    last :: undefined | #chunk_info{}}).
@@ -131,20 +135,19 @@ directory(#{name := Name} = Config) ->
 init(#{dir := Dir,
        epoch := Epoch} = Config) ->
     %% scan directory for segments if in write mode
-    %% re-builds segment lookup ETS table (used by readers)
-    MaxSize = case Config of
-                  #{max_segment_size := M} ->
-                      M;
-                  _ ->
-                      ?DEFAULT_MAX_SEGMENT_SIZE_B
-              end,
+    MaxSize = maps:get(max_segment_size, Config, ?DEFAULT_MAX_SEGMENT_SIZE_B),
+    Retention = maps:get(retention, Config, []),
+    error_logger:info_msg("log init max seg size ~w, retention ~w",
+                          [MaxSize, Retention]),
     ok = filelib:ensure_dir(Dir),
     case file:make_dir(Dir) of
         ok -> ok;
         {error, eexist} -> ok;
         Err -> throw(Err)
     end,
-    Cfg = #cfg{directory = Dir, max_size = MaxSize},
+    Cfg = #cfg{directory = Dir,
+               max_segment_size = MaxSize,
+               retention = Retention},
     case lists:reverse(build_log_overview(Dir)) of
         [] ->
             open_segment(#?MODULE{cfg = Cfg,
@@ -271,7 +274,9 @@ chunk_id_index_scan0(Fd, ChunkId) ->
 
 delete_segment(#seg_info{file = File,
                          index = Index}) ->
-    error_logger:info_msg("deleting segment ~s", [filename:basename(File)]),
+    error_logger:info_msg("deleting segment ~s in ~s",
+                          [filename:basename(File),
+                           filename:dirname(File)]),
     ok = file:delete(File),
     ok = file:delete(Index),
     ok.
@@ -789,9 +794,11 @@ build_log_overview0([IdxFile | IdxFiles], Acc0) ->
                    LastEpoch:64/unsigned,
                    LastChId:64/unsigned,
                    _/binary>>} = file:read(Fd, ?HEADER_SIZE_B),
+            {ok, Size} = file:position(Fd, eof),
             ok = file:close(Fd),
             Acc = [#seg_info{file = SegFile,
                              index = IdxFile,
+                             size = Size,
                              first = #chunk_info{epoch = FirstEpoch,
                                                  id = FirstChId,
                                                  num = FirstNumRecords},
@@ -809,6 +816,27 @@ overview(Dir) ->
     Range = range_from_segment_infos(SegInfos),
     OffsEpochs = last_offset_epochs(SegInfos),
     {Range, OffsEpochs}.
+
+-spec evaluate_retention(file:filename(), retention_spec()) -> ok.
+evaluate_retention(Dir, {max_bytes, MaxSize}) ->
+    SegInfos = build_log_overview(Dir),
+    _RemSegs = eval_max_bytes(SegInfos, MaxSize),
+    ok.
+
+eval_max_bytes(SegInfos, MaxSize) ->
+    TotalSize = lists:foldl(
+                  fun (#seg_info{size = Size}, Acc) ->
+                          Acc + Size
+                  end, 0, SegInfos),
+    case length(SegInfos) > 1 andalso TotalSize > MaxSize of
+        true ->
+            %% we can delete at least one segment segment
+            [Old | Rem] = SegInfos,
+            ok = delete_segment(Old),
+            eval_max_bytes(Rem, MaxSize);
+        false  ->
+            SegInfos
+    end.
 
 last_offset_epochs([#seg_info{first = undefined,
                               last = undefined}]) ->
@@ -877,7 +905,7 @@ write_chunk(Chunk, Epoch, NumRecords,
             #?MODULE{fd = undefined} = State) ->
     write_chunk(Chunk, Epoch, NumRecords, open_segment(State));
 write_chunk(Chunk, Epoch, NumRecords,
-            #?MODULE{cfg = #cfg{max_size = MaxSize},
+            #?MODULE{cfg = #cfg{max_segment_size = MaxSize},
                      fd = Fd,
                      index_fd = IdxFd,
                      mode = #write{segment_size = SegSize,
@@ -973,7 +1001,8 @@ incr_next_offset(Num, #read{next_offset = NextOffset} = Read) ->
 make_file_name(N, Suff) ->
     lists:flatten(io_lib:format("~20..0B.~s", [N, Suff])).
 
-open_segment(#?MODULE{cfg = #cfg{directory = Dir},
+open_segment(#?MODULE{cfg = #cfg{directory = Dir,
+                                 retention = RetentionSpec},
                       fd = undefined,
                       index_fd = undefined,
                       mode = #write{segment_size = _SegSize,
@@ -986,6 +1015,7 @@ open_segment(#?MODULE{cfg = #cfg{directory = Dir},
     %% cannot use append mode as we'd need to position
     {ok, _} = file:position(Fd, eof),
     {ok, _} = file:position(IdxFd, eof),
+    ok = osiris_retention:eval(Dir, RetentionSpec),
     State#?MODULE{fd = Fd, index_fd = IdxFd}.
 
 -ifdef(TEST).

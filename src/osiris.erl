@@ -19,6 +19,7 @@
 -type config() :: #{name := string(),
                     reference => term(),
                     event_formatter => {module(), atom(), list()},
+                    retention => [osiris:retention_spec()],
                     atom() => term()}.
 -opaque state() :: #?MODULE{}.
 
@@ -26,6 +27,7 @@
 -type epoch() :: non_neg_integer().
 -type tail_info() :: {offset(), empty | {epoch(), offset()}}.
 -type offset_spec() :: first | last | next | {abs, offset()} | offset().
+-type retention_spec() :: {max_bytes, non_neg_integer()}.
 
 -export_type([
               state/0,
@@ -33,10 +35,12 @@
               offset/0,
               epoch/0,
               tail_info/0,
-              offset_spec/0
+              offset_spec/0,
+              retention_spec/0
               ]).
 
--spec start_cluster(config()) -> {ok, config()} | {error, term()} | {error, term(), config()}.
+-spec start_cluster(config()) ->
+    {ok, config()} | {error, term()} | {error, term(), config()}.
 start_cluster(Config00 = #{name := Name}) ->
     true = osiris_util:validate_base64uri(Name),
     Config0 = Config00#{external_ref => maps:get(reference, Config00, Name)},
@@ -56,12 +60,14 @@ start_cluster(Config00 = #{name := Name}) ->
 
 stop_cluster(Config) ->
     ok = osiris_writer:stop(Config),
-    [ok = osiris_replica:stop(N, Config) || N <- maps:get(replica_nodes, Config)],
+    [ok = osiris_replica:stop(N, Config)
+     || N <- maps:get(replica_nodes, Config)],
     ok.
 
 -spec delete_cluster(config()) -> ok.
 delete_cluster(Config) ->
-    [ok = osiris_replica:delete(R, Config) || R <- maps:get(replica_nodes, Config)],
+    [ok = osiris_replica:delete(R, Config)
+     || R <- maps:get(replica_nodes, Config)],
     ok = osiris_writer:delete(Config).
 
 start_writer(Config) ->

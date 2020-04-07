@@ -42,7 +42,8 @@ all_tests() ->
      % truncate,
      % truncate_multi_segment,
      accept_chunk_truncates_tail,
-     overview
+     overview,
+     evaluate_retention
     ].
 
 groups() ->
@@ -467,27 +468,6 @@ init_epoch_offsets_multi_segment2(Config) ->
 %     ok = osiris_log:close(Log),
 %     ok.
 
-% truncate_multi_segment(Config) ->
-%     Data = crypto:strong_rand_bytes(1500),
-%     EpochChunks = [begin
-%                        {1, [Data || _ <- lists:seq(1, 50)]}
-%                    end || _ <- lists:seq(1, 20)],
-%     LDir = ?config(leader_dir, Config),
-%     Log0  = seed_log(LDir, EpochChunks, Config),
-%     UntilEmpty = fun UntilEmpty(L0) ->
-%                          L = osiris_log:truncate(last_chunk, L0),
-%                          case osiris_log:tail_info(L) of
-%                              {0, empty} ->
-%                                  L;
-%                              _ ->
-%                                  UntilEmpty(L)
-%                          end
-%                  end,
-%     Log = UntilEmpty(Log0),
-%     osiris_log:close(Log),
-%     SegFiles = filelib:wildcard(filename:join(LDir, "*.segment")),
-%     ?assertEqual(1, length(SegFiles)),
-%     ok.
 
 accept_chunk_truncates_tail(Config) ->
     EpochChunks = [{1, [<<"one">>]},
@@ -507,24 +487,13 @@ accept_chunk_truncates_tail(Config) ->
         ],
     FDir = ?config(follower1_dir, Config),
     FLog0 = seed_log(FDir, FollowerEpochChunks, Config),
-    % RRConf = #{dir => ?config(leader_dir, Config)},
-    % FTail = osiris_log:tail_info(FLog0),
     osiris_log:close(FLog0),
-    % ?assertEqual({3, {2, 2}}, FTail), %% {NextOffs, {LastEpoch, LastChunkOffset}}
-    % {ok, RLog0} = osiris_log:init_data_reader(FTail, RRConf),
-    % ?assertEqual(3, osiris_log:next_offset(RLog0)),
-
-    %% this should "replicate" the leader chunk with epoch 3 and overwrite
-    %% the follower's last chunk
-    % {ok, {2, 3, Hd, Ch}, RLog} = osiris_log:read_chunk(RLog0),
-    % osiris_log:close(RLog),
 
     {LO, EOffs} = osiris_log:overview(LDir),
     ALog0 = osiris_log:init_acceptor(EOffs, #{dir => FDir, epoch => 2}),
     {ok, RLog0} = osiris_log:init_data_reader(osiris_log:tail_info(ALog0),
                                               #{dir => LDir}),
     {ok, {_, _, Hd, Ch}, _RLog} = osiris_log:read_chunk(RLog0),
-    % ?assertExit({accept_chunk_out_of_order, _, _},
     ALog = osiris_log:accept_chunk([Hd, Ch], ALog0),
     osiris_log:close(ALog),
     % validate equal
@@ -542,6 +511,21 @@ overview(Config) ->
     Log0 = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(Log0),
     {{0, 4}, [{1, 1}, {2, 4}]} = osiris_log:overview(LDir),
+    ok.
+
+evaluate_retention(Config) ->
+    Data = crypto:strong_rand_bytes(1500),
+    EpochChunks = [begin
+                       {1, [Data || _ <- lists:seq(1, 50)]}
+                   end || _ <- lists:seq(1, 20)],
+    LDir = ?config(leader_dir, Config),
+    Log  = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(Log),
+    %% this should delete at least one segment
+    Spec = {max_bytes, 1500 * 100},
+    ok = osiris_log:evaluate_retention(LDir, Spec),
+    SegFiles = filelib:wildcard(filename:join(LDir, "*.segment")),
+    ?assertEqual(1, length(SegFiles)),
     ok.
 
 %% Utility

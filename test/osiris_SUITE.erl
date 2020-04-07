@@ -30,7 +30,8 @@ all_tests() ->
      cluster_restart,
      cluster_delete,
      start_cluster_invalid_replicas,
-     diverged_replica
+     diverged_replica,
+     retention
     ].
 
 -define(BIN_SIZE, 800).
@@ -428,18 +429,38 @@ diverged_replica(Config) ->
     ?assertEqual(Seg1, Seg3),
     ok.
 
+retention(Config) ->
+    _PrivDir = ?config(data_dir, Config),
+    Num = 150000,
+    Name = ?config(cluster_name, Config),
+    SegSize = 50000 * 1000,
+    Conf0 = #{name => Name,
+              epoch => 1,
+              leader_node => node(),
+              retention => [{max_bytes, SegSize}],
+              max_segment_size => SegSize,
+              replica_nodes => []},
+    {ok, #{leader_pid := Leader,
+           replica_pids := []}} = osiris:start_cluster(Conf0),
+    timer:sleep(500),
+    write_n(Leader, Num, 0, 1000 * 8, #{}),
+    timer:sleep(1000),
+    %% assert on num segs
+    ok.
+
+
 %% Utility
 
 write_n(Pid, N, Written) ->
-    write_n(Pid, N, 0, Written).
+    write_n(Pid, N, 0, ?BIN_SIZE, Written).
 
-write_n(_Pid, N, N, Written) ->
+write_n(_Pid, N, N, _BinSize, Written) ->
     %% wait for all written events;
     wait_for_written(Written),
     ok;
-write_n(Pid, N, Next, Written) ->
-    ok = osiris:write(Pid, Next, <<Next:?BIN_SIZE/integer>>),
-    write_n(Pid, N, Next + 1, Written#{Next => ok}).
+write_n(Pid, N, Next, BinSize, Written) ->
+    ok = osiris:write(Pid, Next, <<Next:BinSize/integer>>),
+    write_n(Pid, N, Next + 1, BinSize, Written#{Next => ok}).
 
 wait_for_written(Written0) when is_list(Written0) ->
     wait_for_written(lists:foldl(fun(N, Acc) ->
