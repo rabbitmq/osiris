@@ -1,6 +1,7 @@
 -module(osiris_log).
 
 -include_lib("kernel/include/file.hrl").
+-include("osiris.hrl").
 
 -export([
          init/1,
@@ -17,7 +18,7 @@
          init_offset_reader/2,
          read_chunk/1,
          read_chunk_parsed/1,
-         get_offset_ref/1,
+         committed_offset/1,
          get_current_epoch/1,
          close/1,
          overview/1,
@@ -137,8 +138,8 @@ init(#{dir := Dir,
     %% scan directory for segments if in write mode
     MaxSize = maps:get(max_segment_size, Config, ?DEFAULT_MAX_SEGMENT_SIZE_B),
     Retention = maps:get(retention, Config, []),
-    error_logger:info_msg("log init max seg size ~w, retention ~w",
-                          [MaxSize, Retention]),
+    ?INFO("osiris_log:init/1 max_segment_size: ~b, retention ~w",
+          [MaxSize, Retention]),
     ok = filelib:ensure_dir(Dir),
     case file:make_dir(Dir) of
         ok -> ok;
@@ -166,9 +167,9 @@ init(#{dir := Dir,
                 _ -> ok
             end,
             TailInfo = {ChId + N, {E, ChId}},
-            error_logger:info_msg("~s:~s/~b: next offset ~b",
-                                  [?MODULE, ?FUNCTION_NAME,
-                                   ?FUNCTION_ARITY, element(1, TailInfo)]),
+            ?INFO("~s:~s/~b: next offset ~b",
+                  [?MODULE, ?FUNCTION_NAME,
+                   ?FUNCTION_ARITY, element(1, TailInfo)]),
             {ok, Fd} = file:open(Filename, ?FILE_OPTS_WRITE),
             {ok, IdxFd} = file:open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, _} = file:position(Fd, eof),
@@ -274,9 +275,9 @@ chunk_id_index_scan0(Fd, ChunkId) ->
 
 delete_segment(#seg_info{file = File,
                          index = Index}) ->
-    error_logger:info_msg("deleting segment ~s in ~s",
-                          [filename:basename(File),
-                           filename:dirname(File)]),
+    ?INFO("deleting segment ~s in ~s",
+          [filename:basename(File),
+           filename:dirname(File)]),
     ok = file:delete(File),
     ok = file:delete(Index),
     ok.
@@ -329,12 +330,11 @@ truncate_to([{E, ChId} | NextEOs], SegInfos) ->
     {ok, state()} |
     {error, {offset_out_of_range, empty | {offset(), offset()}}} |
     {error, {invalid_last_offset_epoch, offset(), offset()}}.
-init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = _Config) ->
+init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
     SegInfos = build_log_overview(Dir),
     Range = range_from_segment_infos(SegInfos),
-    error_logger:info_msg(
-      "osiris_segment:init_data_reader/2 at ~b prev ~w range: ~w",
-      [StartOffset, PrevEO, Range]),
+    ?INFO("osiris_segment:init_data_reader/2 at ~b prev ~w range: ~w",
+          [StartOffset, PrevEO, Range]),
     %% Invariant:  there is always at least one segment left on disk
     case Range of
         {F, _L} when StartOffset < F ->
@@ -347,7 +347,7 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = _Config) ->
                     %% this is unexpected and thus an error
                     exit({segment_not_found, F, SegInfos});
                 {_, StartSegmentInfo} ->
-                    {ok, init_data_reader_from_segment(Dir, StartSegmentInfo, F)}
+                    {ok, init_data_reader_from_segment(Config, StartSegmentInfo, F)}
             end;
         empty when StartOffset > 0 ->
             {error, {offset_out_of_range, Range}};
@@ -366,7 +366,8 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = _Config) ->
                             %% this is unexpected and thus an error
                             exit({segment_not_found, StartOffset, SegInfos});
                         {_, StartSegmentInfo} ->
-                            {ok, init_data_reader_from_segment(Dir, StartSegmentInfo,
+                            {ok, init_data_reader_from_segment(Config,
+                                                               StartSegmentInfo,
                                                                StartOffset)}
                     end;
                 {PrevE, PrevO} ->
@@ -394,7 +395,7 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = _Config) ->
                                        _DataSize:32/unsigned>>} ->
                                     ok = file:close(Fd),
                                     {ok, init_data_reader_from_segment(
-                                           Dir, element(2, find_segment_for_offset(StartOffset, SegInfos)),
+                                           Config, element(2, find_segment_for_offset(StartOffset, SegInfos)),
                                            StartOffset)};
                                 {ok, <<?MAGIC:4/unsigned,
                                        ?VERSION:4/unsigned,
@@ -418,18 +419,17 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = _Config) ->
     %% in this case the replica should truncate but how do we signal that?
     %% perhaps we should fail validation in this scenario
 
-init_data_reader_from_segment(Dir, #seg_info{file = StartSegment,
-                                             index = IndexFile}, NextOffs) ->
+init_data_reader_from_segment(#{dir := Dir} = Config,
+                              #seg_info{file = StartSegment,
+                                        index = IndexFile}, NextOffs) ->
     {ok, Fd} = file:open(StartSegment, [raw, binary, read]),
     {ok, Data} = file:read_file(IndexFile),
     %% TODO: next offset needs to be a chunk offset
     {_, FilePos} = scan_index(Data, Fd, NextOffs),
     {ok, _Pos} = file:position(Fd, FilePos),
-    % error_logger:info_msg(
-    %   "osiris_segment:init_data_reader/2 at ~b file pos ~b/~w",
-    %   [NextOffs, Pos, FilePos]),
     #?MODULE{cfg = #cfg{directory = Dir},
              mode = #read{type = data,
+                          offset_ref = maps:get(offset_ref, Config, undefined),
                           next_offset = NextOffs},
              fd = Fd}.
 
@@ -471,8 +471,8 @@ init_offset_reader(OffsetSpec, #{dir := Dir,
                                  offset_ref := OffsetRef}) ->
     SegInfo = build_log_overview(Dir),
     Range = range_from_segment_infos(SegInfo),
-    error_logger:info_msg("osiris_writer/init_offset_reader/2 spec ~w range ~w ",
-                          [OffsetSpec, Range]),
+    ?INFO("osiris_log:init_offset_reader/2 spec ~w range ~w ",
+          [OffsetSpec, Range]),
     StartOffset = case {OffsetSpec, Range} of
                       {_, empty} ->
                           0;
@@ -487,9 +487,6 @@ init_offset_reader(OffsetSpec, #{dir := Dir,
                   end,
     %% find the appopriate segment and scan the index to find the
     %% postition of the next chunk to read
-    % error_logger:info_msg(
-    %   "osiris_segment:init_offset_reader/2 spec requested ~w at ~b seg infos ~p",
-    %   [OffsetSpec, StartOffset, SegInfo]),
     case find_segment_for_offset(StartOffset, SegInfo) of
         not_found ->
             {error, {offset_out_of_range, Range}};
@@ -504,9 +501,6 @@ init_offset_reader(OffsetSpec, #{dir := Dir,
                                         IdxResult
                                 end,
             {ok, _Pos} = file:position(Fd, FilePos),
-            % error_logger:info_msg(
-            %         "osiris_segment:init_offset_reader/2 at ~b file pos ~b/~w",
-            %         [StartOffset, Pos, FilePos]),
             {ok, #?MODULE{cfg = #cfg{directory = Dir},
                           mode = #read{type = offset,
                                        offset_ref = OffsetRef,
@@ -514,9 +508,11 @@ init_offset_reader(OffsetSpec, #{dir := Dir,
                           fd = Fd}}
     end.
 
--spec get_offset_ref(state()) -> atomics:atomics_ref().
-get_offset_ref(#?MODULE{mode = #read{offset_ref = Ref}}) ->
-    Ref.
+-spec committed_offset(state()) -> undefined | offset().
+committed_offset(#?MODULE{mode = #read{offset_ref = undefined}}) ->
+    undefined;
+committed_offset(#?MODULE{mode = #read{offset_ref = Ref}}) ->
+    atomics:get(Ref, 1).
 
 -spec get_current_epoch(state()) -> non_neg_integer().
 get_current_epoch(#?MODULE{mode = #write{current_epoch = Epoch}}) ->
@@ -551,7 +547,6 @@ read_chunk(#?MODULE{cfg = #cfg{directory = Dir},
                      State#?MODULE{mode = incr_next_offset(NumRecords, Read)}};
                 {ok, _} ->
                     %% set the position back for the next read
-                    % error_logger:info_msg("osiris_segment end coff~w", [COffs]),
                     {ok, _} = file:position(Fd, {cur, -?HEADER_SIZE_B}),
                     {end_of_stream, State};
                 eof ->
@@ -634,7 +629,6 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                     case file:open(filename:join(Dir, SegFile),
                                    [raw, binary, read]) of
                         {ok, Fd2} ->
-                            % error_logger:info_msg("sendfile eof ~w", [NextOffs]),
                             ok = file:close(Fd),
                             send_file(Sock, State#?MODULE{fd = Fd2}, Callback);
                         {error, enoent} ->
@@ -681,7 +675,6 @@ scan_index(<<O:64/unsigned,
              Pos:32/unsigned>>, Fd, Offset) ->
     %% TODO: the requested offset may not be found in the last batch as it
     %% may not have been written yet
-    % error_logger:info_msg("scan_index scanning ~b Pos ~b", [O, Pos]),
     {O, E, Num, _} = header_info(Fd, Pos),
     case Offset >= O andalso Offset < (O + Num) of
         true ->
@@ -693,7 +686,6 @@ scan_index(<<O:64/unsigned,
              _E:64/unsigned,
              Pos:32/unsigned, Rem/binary>>, Fd, Offset)  ->
     <<ONext:64/unsigned, _/binary>> = Rem,
-    % error_logger:info_msg("scan_index scanning ~b Pos ~b", [O, Pos]),
      case Offset >= O andalso Offset < ONext of
          true ->
              {O, Pos};

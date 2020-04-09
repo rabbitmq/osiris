@@ -1,7 +1,8 @@
 -module(osiris_util).
 
 -export([validate_base64uri/1,
-         to_base64uri/1]).
+         to_base64uri/1,
+         id/1]).
 
 -define(BASE64_URI_CHARS,
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -29,3 +30,7 @@ to_base64uri(Str) when is_list(Str) ->
                             false -> [$_ | Acc]
                         end
                 end, [], string:to_graphemes(Str)).
+
+-spec id(term()) -> term().
+id(X) -> X.
+

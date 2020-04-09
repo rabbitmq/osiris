@@ -5,6 +5,7 @@
 -export([stop/1]).
 
 start(_Type, _Args) ->
+    osiris:configure_logger(logger),
 	osiris_sup:start_link().
 
 stop(_State) ->

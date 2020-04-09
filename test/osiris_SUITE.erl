@@ -27,6 +27,7 @@ all_tests() ->
      read_validate,
      single_node_offset_listener,
      cluster_offset_listener,
+     replica_offset_listener,
      cluster_restart,
      cluster_delete,
      start_cluster_invalid_replicas,
@@ -42,6 +43,7 @@ groups() ->
     ].
 
 init_per_suite(Config) ->
+    osiris:configure_logger(logger),
     Config.
 
 end_per_suite(_Config) ->
@@ -56,9 +58,11 @@ end_per_group(_Group, _Config) ->
 init_per_testcase(TestCase, Config) ->
     PrivDir = ?config(priv_dir, Config),
     Dir = filename:join(PrivDir, TestCase),
+    application:stop(osiris),
     application:load(osiris),
     application:set_env(osiris, data_dir, Dir),
     {ok, Apps} = application:ensure_all_started(osiris),
+    ok = logger:set_primary_config(level, all),
     % file:make_dir(Dir),
     [{data_dir, Dir},
      {test_case, TestCase},
@@ -101,7 +105,6 @@ cluster_write(Config) ->
               replica_nodes => Replicas},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
-    % osiris_writer:register_data_listener(Leader, 0),
     receive
         {osiris_written, _, [42]} ->
             ok
@@ -134,7 +137,8 @@ cluster_batch_write(Config) ->
               epoch => 1,
               leader_node => LeaderNode,
               replica_nodes => Replicas},
-    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    {ok, #{leader_pid := Leader,
+           replica_pids := [ReplicaPid | _]}} = osiris:start_cluster(Conf0),
     Batch = {batch, 1, 0, <<0:1, 8:31/unsigned, "mah-data">>},
     ok = osiris:write(Leader, 42, Batch),
     receive
@@ -147,7 +151,7 @@ cluster_batch_write(Config) ->
     Self = self(),
     _ = spawn(LeaderNode,
               fun () ->
-                      {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
+                      {ok, Log0} = osiris:init_reader(Leader, first),
                       {[{0, <<"mah-data">>}], _Log} = osiris_log:read_chunk_parsed(Log0),
                       Self ! read_data_ok
               end),
@@ -155,6 +159,18 @@ cluster_batch_write(Config) ->
         read_data_ok -> ok
     after 2000 ->
               exit(read_data_ok_timeout)
+    end,
+    timer:sleep(1000),
+    _ = spawn(node(ReplicaPid),
+              fun () ->
+                      {ok, Log0} = osiris:init_reader(ReplicaPid, first),
+                      {[{0, <<"mah-data">>}], _Log} = osiris_log:read_chunk_parsed(Log0),
+                      Self ! read_data_ok2
+              end),
+    receive
+        read_data_ok2 -> ok
+    after 2000 ->
+              exit(read_data_ok_timeout2)
     end,
     [slave:stop(N) || N <- Nodes],
     ok.
@@ -211,6 +227,50 @@ cluster_offset_listener(Config) ->
     [slave:stop(N) || N <- Nodes],
     ok.
 
+replica_offset_listener(Config) ->
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    [_ | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
+    Conf0 = #{name => Name,
+              epoch => 1,
+              leader_node => node(),
+              replica_nodes => Replicas},
+    {ok, #{leader_pid := Leader,
+           replica_pids := ReplicaPids}} = osiris:start_cluster(Conf0),
+    Self = self(),
+    R = hd(ReplicaPids),
+    _ = spawn(node(R),
+          fun () ->
+                  {ok, Log0} = osiris:init_reader(R, 0),
+                  osiris:register_offset_listener(R, 0),
+                  receive
+                      {osiris_offset, _Name, O} when O > -1 ->
+                          ct:pal("got offset ~w", [O]),
+                          {[{0, <<"mah-data">>}], Log} = osiris_log:read_chunk_parsed(Log0),
+                          slave:stop(hd(Replicas)),
+                          ok = osiris:write(Leader, 43, <<"mah-data2">>),
+                          timer:sleep(10),
+                          {end_of_stream, Log1} = osiris_log:read_chunk_parsed(Log),
+                          osiris_log:close(Log1),
+                          Self ! test_passed,
+                          ok
+                  after 2000 ->
+                            flush(),
+                            exit(osiris_offset_timeout)
+                  end
+          end),
+    ok = osiris:write(Leader, 42, <<"mah-data">>),
+
+    receive
+        test_passed -> ok
+    after 5000 ->
+              flush(),
+              [slave:stop(N) || N <- Nodes],
+              exit(timeout)
+    end,
+    [slave:stop(N) || N <- Nodes],
+    ok.
+
 read_validate_single_node(Config) ->
     _PrivDir = ?config(data_dir, Config),
     Num = 100000,
@@ -238,12 +298,13 @@ read_validate(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
     Num = 1000000,
-    [_LNode | Replicas] = Nodes =  [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
+    Replicas = [start_slave(N, PrivDir) || N <- [r1, r2]],
     Conf0 = #{name => Name,
               epoch => 1,
               leader_node => node(),
               replica_nodes => Replicas},
-    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    {ok, #{leader_pid := Leader,
+           replica_pids := ReplicaPids}} = osiris:start_cluster(Conf0),
     {_, GarbBefore} = erlang:process_info(Leader, garbage_collection),
     {_, MemBefore} = erlang:process_info(Leader, memory),
     {_, BinBefore} = erlang:process_info(Leader, binary),
@@ -275,11 +336,26 @@ read_validate(Config) ->
     ct:pal("~w counters ~p", [node(), osiris_counters:overview()]),
     [begin
          ct:pal("~w counters ~p", [N, rpc:call(N, osiris_counters, overview, [])])
-     end || N <- Nodes],
+     end || N <- Replicas],
     {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
     {_, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
 
-    [slave:stop(N) || N <- Nodes],
+    %% test reading on slave
+    R = hd(ReplicaPids),
+    Self = self(),
+    _ = spawn(node(R),
+          fun() ->
+                  {ok, RLog0} = osiris_writer:init_data_reader(R, {0, empty}),
+                  {_, _} = timer:tc(fun() -> validate_read(Num, RLog0) end),
+                  Self ! validate_read_done
+          end),
+    receive
+        validate_read_done -> ok
+    after 30000 ->
+              exit(validate_read_done_timeout)
+    end,
+
+    [slave:stop(N) || N <- Replicas],
     ok.
 
 cluster_restart(Config) ->

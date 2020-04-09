@@ -2,13 +2,13 @@
 -module(osiris_writer).
 -behaviour(gen_batch_server).
 
+-include("osiris.hrl").
+
 -export([start_link/1,
          start/1,
          overview/1,
          init_data_reader/2,
-         init_offset_reader/2,
          register_data_listener/2,
-         register_offset_listener/2,
          ack/2,
          write/4,
          init/1,
@@ -31,7 +31,7 @@
               replicas = [] :: [node()],
               directory :: file:filename(),
               counter :: counters:counters_ref(),
-              event_formatter :: undefined | {module(), atom(), list()}
+              event_formatter :: undefined | mfa()
              }).
 
 -record(?MODULE, {cfg :: #cfg{},
@@ -39,7 +39,8 @@
                   pending_writes = #{} :: #{osiris:offset() =>
                                             {[node()], #{pid() => [term()]}}},
                   data_listeners = [] :: [{pid(), osiris:offset()}],
-                  offset_listeners = [] :: [{pid(), osiris:offset()}],
+                  offset_listeners = [] :: [{pid(), osiris:offset(),
+                                             mfa() | undefined}],
                   committed_offset = -1 :: osiris:offset()
                  }).
 
@@ -79,15 +80,8 @@ init_data_reader(Pid, TailInfo) when node(Pid) == node() ->
     Ctx = gen_batch_server:call(Pid, get_reader_context),
     osiris_log:init_data_reader(TailInfo, Ctx).
 
-init_offset_reader(Pid, OffsetSpec) when node(Pid) == node() ->
-    Ctx = gen_batch_server:call(Pid, get_reader_context),
-    osiris_log:init_offset_reader(OffsetSpec, Ctx).
-
 register_data_listener(Pid, Offset) ->
     ok = gen_batch_server:cast(Pid, {register_data_listener, self(), Offset}).
-
-register_offset_listener(Pid, Offset) ->
-    ok = gen_batch_server:cast(Pid, {register_offset_listener, self(), Offset}).
 
 ack(LeaderPid, Offsets) ->
     gen_batch_server:cast(LeaderPid, {ack, node(), Offsets}).
@@ -108,7 +102,6 @@ init(#{name := Name,
        external_ref := ExtRef,
        replica_nodes := Replicas} = Config)
   when is_list(Name) ->
-    Formatter = maps:get(event_formatter, Config, undefined),
     Dir = osiris_log:directory(Config),
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
@@ -119,18 +112,17 @@ init(#{name := Name,
     atomics:put(ORef, 1, LastOffs),
     counters:put(CntRef, ?C_OFFSET, LastOffs),
     counters:put(CntRef, ?C_COMMITTED_OFFSET, LastOffs),
+    EvtFmt = maps:get(event_formatter, Config, undefined),
     {ok, #?MODULE{cfg = #cfg{name = Name,
                              %% reference used for notification
                              %% if not provided use the name
                              ext_reference = ExtRef,
-
+                             event_formatter = EvtFmt,
                              offset_ref = ORef,
                              replicas = Replicas,
                              directory = Dir,
                              %% TODO: there is no GC of counter registrations
-                             counter = CntRef,
-                             event_formatter = Formatter},
-
+                             counter = CntRef},
                   committed_offset = LastOffs,
                   log = Log}}.
 
@@ -206,9 +198,11 @@ handle_commands([{cast, {register_data_listener, Pid, Offset}} | Rem],
                 #?MODULE{data_listeners = Listeners} = State0, Acc) ->
     State = State0#?MODULE{data_listeners = [{Pid, Offset} | Listeners]},
     handle_commands(Rem, State, Acc);
-handle_commands([{cast, {register_offset_listener, Pid, Offset}} | Rem],
+handle_commands([{cast,
+                  {register_offset_listener, Pid, EvtFormatter, Offset}} | Rem],
                 #?MODULE{offset_listeners = Listeners} = State0, Acc) ->
-    State1 = State0#?MODULE{offset_listeners = [{Pid, Offset} | Listeners]},
+    State1 = State0#?MODULE{offset_listeners = [{Pid, Offset, EvtFormatter}
+                                                | Listeners]},
     State = notify_offset_listeners(State1),
     handle_commands(Rem, State, Acc);
 handle_commands([{cast, {ack, ReplicaNode, Offsets}} | Rem],
@@ -218,8 +212,6 @@ handle_commands([{cast, {ack, ReplicaNode, Offsets}} | Rem],
                                     event_formatter = EventFormatter},
                          committed_offset = COffs0,
                          pending_writes = Pending0} = State0, Acc) ->
-    % ct:pal("acks ~w", [Offsets]),
-
     {COffs, Pending} =
     lists:foldl(fun (Offset, {C0, P0}) ->
                         case maps:get(Offset, P0) of
@@ -234,7 +226,6 @@ handle_commands([{cast, {ack, ReplicaNode, Offsets}} | Rem],
                                                  P0)}
                         end
                 end, {COffs0, Pending0}, Offsets),
-    % ct:pal("acks after ~w ~W", [COffs, Pending, 5]),
     counters:put(Cnt, ?C_COMMITTED_OFFSET, COffs),
     State1 = State0#?MODULE{pending_writes = Pending,
                            committed_offset = COffs},
@@ -258,7 +249,7 @@ handle_commands([{call, From, get_reader_context} | Rem],
 handle_commands([osiris_stop | _Rem], _State, _Acc) ->
     {stop, normal};
 handle_commands([_Unk | Rem], State, Acc) ->
-    error_logger:info_msg("osiris_writer unknown command ~w", [_Unk]),
+    ?DEBUG("osiris_writer: unknown command ~w", [_Unk]),
     handle_commands(Rem, State, Acc).
 
 
@@ -270,30 +261,35 @@ notify_data_listeners(#?MODULE{log = Seg,
     State#?MODULE{data_listeners = L}.
 
 notify_offset_listeners(#?MODULE{cfg = #cfg{ext_reference = Ref,
-                                            event_formatter = EventFormatter},
+                                            event_formatter = EvtFmt},
                                  committed_offset = COffs,
                                  offset_listeners = L0} = State) ->
-    {Notify, L} = lists:splitwith(fun ({_Pid, O}) -> O =< COffs end, L0),
-    [P ! wrap_osiris_event(EventFormatter, {osiris_offset, Ref, COffs})
-     || {P, _} <- Notify],
+    {Notify, L} = lists:splitwith(fun ({_Pid, O, _}) -> O =< COffs end, L0),
+    [begin
+         Evt = wrap_osiris_event(
+                 %% the per offset listener event formatter takes precedence of
+                 %% the process scoped one
+                 select_formatter(Fmt, EvtFmt), {osiris_offset, Ref, COffs}),
+         P ! Evt
+     end
+     || {P, _, Fmt} <- Notify],
     State#?MODULE{offset_listeners = L}.
 
-% notify_offset_listeners(#?MODULE{cfg = #cfg{ext_reference = Ref},
-%                                  committed_offset = COffs,
-%                                  % log = Seg,
-%                                  offset_listeners = L0}) ->
-%     [begin
-%          % Next = osiris_log:next_offset(Seg),
-%          % error_logger:info_msg("osiris_writer offset listener ~w CO: ~w Next ~w LO: ~w",
-%          %                       [P, COffs, Next, O]),
-%          P ! {osiris_offset, Ref, COffs}
-%      end || P <- L0],
-%     ok.
+select_formatter(undefined, Fmt) ->
+    Fmt;
+select_formatter(Fmt, _) ->
+    Fmt.
 
 notify_writers(Name, Corrs, EventFormatter) ->
+    %% TODO: minor optimisation: use maps:iterator here to avoid building a new
+    %% result map
     maps:map(
       fun (P, V) ->
-              P ! wrap_osiris_event(EventFormatter, {osiris_written, Name, lists:reverse(V)})
+              %% TODO: is the writer is on a remote node this could block
+              %% which is bad but we'd have to consider the downsides of using
+              %% send with noconnect and nosuspend here
+              P ! wrap_osiris_event(EventFormatter,
+                                    {osiris_written, Name, lists:reverse(V)})
       end, Corrs).
 
 wrap_osiris_event(undefined, Evt) ->

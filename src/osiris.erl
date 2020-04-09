@@ -4,11 +4,13 @@
          write/3,
          init_reader/2,
          register_offset_listener/2,
+         register_offset_listener/3,
          start_cluster/1,
          stop_cluster/1,
          start_writer/1,
          start_replica/2,
-         delete_cluster/1
+         delete_cluster/1,
+         configure_logger/1
          ]).
 
 %% holds static or rarely changing fields
@@ -80,7 +82,7 @@ write(Pid, Corr, Data) ->
     osiris_writer:write(Pid, self(), Corr, Data).
 
 %% @doc Initialise a new offset reader
-%% @param LeaderPid the pid of the current osiris cluster leader
+%% @param Pid the pid of a writer or replica process
 %% @param OffsetSpec specifies where in the log to attach the reader
 %% `first': Attach at first available offset.
 %% `last': Attach at the last available chunk offset or the next available offset
@@ -98,16 +100,29 @@ write(Pid, Corr, Data) ->
     {ok, osiris_log:state()} |
     {error, {offset_out_of_range, empty | {offset(), offset()}}} |
     {error, {invalid_last_offset_epoch, offset(), offset()}}.
-init_reader(LeaderPid, OffsetSpec) when is_pid(LeaderPid) ->
-    osiris_writer:init_offset_reader(LeaderPid, OffsetSpec).
+init_reader(Pid, OffsetSpec)
+  when is_pid(Pid) andalso
+       node(Pid) =:= node() ->
+    {ok, Ctx} = gen:call(Pid, '$gen_call', get_reader_context),
+    osiris_log:init_offset_reader(OffsetSpec, Ctx).
+
+-spec register_offset_listener(pid(), offset()) -> ok.
+register_offset_listener(Pid, Offset) ->
+    register_offset_listener(Pid, Offset, undefined).
 
 %% @doc
 %% Registers a one-off offset listener that will send an `{osiris_offset, offset()}'
 %% message when the osiris cluster committed offset moves beyond the provided offset
 %% @end
--spec register_offset_listener(pid(), offset()) -> ok.
-register_offset_listener(Pid, Offset) ->
-    osiris_writer:register_offset_listener(Pid, Offset).
+-spec register_offset_listener(pid(), offset(), mfa() | undefined) -> ok.
+register_offset_listener(Pid, Offset, EvtFormatter) ->
+    Msg = {'$gen_cast', {register_offset_listener, self(),
+                         EvtFormatter, Offset}},
+    try erlang:send(Pid, Msg)
+    catch
+        error:_ -> ok
+    end,
+    ok.
 
 start_replicas(Config) ->
     start_replicas(Config, maps:get(replica_nodes, Config), []).
@@ -121,7 +136,10 @@ start_replicas(Config, [Node | Nodes], ReplicaPids) ->
                 start_replicas(Config, Nodes, [Pid | ReplicaPids]);
             {ok, Pid, _} ->
                 start_replicas(Config, Nodes, [Pid | ReplicaPids]);
-            {error, _Reason} ->
+            {error, Reason} ->
+                error_logger:info_msg("osiris:start_replicas failed to start"
+                                      " replica on ~w, reason: ~w",
+                                      [Node, Reason]),
                 %% coordinator might try to start this replica in the future
                 start_replicas(Config, Nodes, ReplicaPids)
         end
@@ -130,6 +148,10 @@ start_replicas(Config, [Node | Nodes], ReplicaPids) ->
             %% coordinator might try to start this replica in the future
             start_replicas(Config, Nodes, ReplicaPids)
     end.
+
+-spec configure_logger(module()) -> ok.
+configure_logger(Module) ->
+    persistent_term:put('$osiris_logger', Module).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

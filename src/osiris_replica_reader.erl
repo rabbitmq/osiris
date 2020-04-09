@@ -1,6 +1,8 @@
 -module(osiris_replica_reader).
-
 -behaviour(gen_server).
+
+-include("osiris.hrl").
+
 
 %% replica reader, spawned remoted by replica process, connects back to
 %% configured host/port, reads entries from master and uses file:sendfile to
@@ -19,9 +21,11 @@
 
 -record(state, {log :: osiris_log:state(),
                 socket :: gen_tcp:socket(),
+                replica_pid :: pid(),
                 leader_pid :: pid(),
                 counter :: counters:counters_ref(),
-                counter_id :: term()}).
+                counter_id :: term(),
+                committed_offset = -1 :: -1 | osiris:offset()}).
 
 -define(COUNTER_FIELDS,
         [chunks_sent,
@@ -66,6 +70,7 @@ stop(Pid) ->
 %%--------------------------------------------------------------------
 init(#{host := Host,
        port := Port,
+       replica_pid := ReplicaPid,
        leader_pid := LeaderPid,
        start_offset := {StartOffset, _} = TailInfo,
        external_ref := ExtRef} = Args) ->
@@ -73,21 +78,21 @@ init(#{host := Host,
     CntRef = osiris_counters:new(CntId, ?COUNTER_FIELDS),
     %% TODO: handle errors
     {ok, Log} = osiris_writer:init_data_reader(LeaderPid, TailInfo),
-    error_logger:info_msg("starting replica reader with ~w NextOffs ~b~n",
-                          [Args, osiris_log:next_offset(Log)]),
+    ?INFO("starting replica reader with ~w NextOffs ~b~n",
+          [Args, osiris_log:next_offset(Log)]),
     SndBuf = 146988 * 10,
     {ok, Sock} = gen_tcp:connect(Host, Port, [binary, {packet, 0},
                                               {nodelay, true},
                                               {sndbuf, SndBuf}]),
-    error_logger:info_msg("gen tcp opts snd buf~p",
-                          [inet:getopts(Sock, [sndbuf])]),
     %% register data listener with osiris_proc
     ok = osiris_writer:register_data_listener(LeaderPid, StartOffset),
-    {ok, #state{log = Log,
-                socket = Sock,
-                leader_pid = LeaderPid,
-                counter = CntRef,
-                counter_id = CntId}}.
+    State = maybe_send_committed_offset(#state{log = Log,
+                                               socket = Sock,
+                                               replica_pid = ReplicaPid,
+                                               leader_pid = LeaderPid,
+                                               counter = CntRef,
+                                               counter_id = CntId}),
+    {ok, State}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -118,30 +123,19 @@ handle_call(_Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast({more_data, _LastOffset},
-            #state{log = Seg0,
+            #state{log = Log0,
                    leader_pid = LeaderPid,
                    socket = Sock,
-                   counter = Cnt} = State) ->
-    {ok, Seg} = do_sendfile(Sock, Cnt, Seg0),
-    ok = osiris_writer:register_data_listener(LeaderPid,
-                                              osiris_log:next_offset(Seg)),
+                   committed_offset = Last,
+                   counter = Cnt} = State0) ->
+    #state{log = Log} = State = do_sendfile(Sock, State0, Log0),
+    NextOffs = osiris_log:next_offset(Log),
+    ok = osiris_writer:register_data_listener(LeaderPid, NextOffs),
+    ok = osiris:register_offset_listener(LeaderPid, Last + 1),
     ok = counters:add(Cnt, ?C_OFFSET_LISTENERS, 1),
-    {noreply, State#state{log = Seg}};
+    {noreply, State};
 handle_cast(stop, State) ->
     {stop, normal, State}.
-
-do_sendfile(Sock, Cnt, Seg0) ->
-    case osiris_log:send_file(Sock, Seg0) of
-        {ok, Seg} ->
-            Offset = osiris_log:next_offset(Seg) - 1,
-            ok = counters:add(Cnt, ?C_CHUNKS_SENT, 1),
-            ok = counters:put(Cnt, ?C_OFFSET, Offset),
-            % error_logger:info_msg("~w replicate reader next offs ~b",
-            %                       [self(), osiris_log:next_offset(Seg)]),
-            do_sendfile(Sock, Cnt, Seg);
-        {end_of_stream, Seg} ->
-            {ok, Seg}
-    end.
 
 
 %%--------------------------------------------------------------------
@@ -154,6 +148,12 @@ do_sendfile(Sock, Cnt, Seg0) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_info({osiris_offset, _, _Offs},
+            #state{leader_pid = LeaderPid,
+                   committed_offset = Last} = State0) ->
+    State = maybe_send_committed_offset(State0),
+    ok = osiris:register_offset_listener(LeaderPid, Last + 1),
+    {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -186,3 +186,30 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+
+do_sendfile(Sock, #state{counter = Cnt} = State0, Log0) ->
+    case osiris_log:send_file(Sock, Log0) of
+        {ok, Log} ->
+            Offset = osiris_log:next_offset(Log) - 1,
+            ok = counters:add(Cnt, ?C_CHUNKS_SENT, 1),
+            ok = counters:put(Cnt, ?C_OFFSET, Offset),
+            State = maybe_send_committed_offset(State0),
+            do_sendfile(Sock, State, Log);
+        {end_of_stream, Log} ->
+            maybe_send_committed_offset(State0#state{log = Log})
+    end.
+
+maybe_send_committed_offset(#state{log = Log,
+                                   committed_offset = Last,
+                                   replica_pid = RPid} = State) ->
+    COffs = osiris_log:committed_offset(Log),
+    case COffs of
+        COffs when COffs > Last ->
+            ok = erlang:send(RPid, {'$gen_cast', {committed_offset, COffs}},
+                             [noconnect, nosuspend]),
+            State#state{committed_offset = COffs};
+        _ ->
+            State
+    end.
+
+
