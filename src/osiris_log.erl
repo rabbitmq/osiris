@@ -747,17 +747,16 @@ build_log_overview0([], Acc) ->
 build_log_overview0([IdxFile | IdxFiles], Acc0) ->
     %% TODO: make this more efficient, index files could become very large
     % file:read_file_info(
-    {ok, Data} = file:read_file(IdxFile),
-    case Data of
-        <<>> when IdxFiles == [] andalso Acc0 == [] ->
+    case file:read_file(IdxFile) of
+        {ok, <<>>} when IdxFiles == [] andalso Acc0 == [] ->
             %% special case for the very first empty segment
             SegFile = segment_from_index_file(IdxFile),
             [#seg_info{file = SegFile,
                        index = IdxFile}];
-        <<>> ->
+        {ok, <<>>} ->
             %% read prevous if exists
             build_log_overview0(IdxFiles, Acc0);
-        Data ->
+        {ok, Data} ->
             %% get last batch offset
             IdxSize = byte_size(Data),
             %% ASSERTION: byte size is a multiple of index record size
@@ -798,7 +797,10 @@ build_log_overview0([IdxFile | IdxFiles], Acc0) ->
                                                 id = LastChId,
                                                 num = LastNumRecords}}
                    | Acc0],
-            build_log_overview0(IdxFiles, Acc)
+            build_log_overview0(IdxFiles, Acc);
+        {error, enoent} ->
+            %% The retention policy could have just been applied
+            build_log_overview0(IdxFiles, Acc0)
     end.
 
 
