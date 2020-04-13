@@ -769,40 +769,54 @@ build_log_overview0([IdxFile | IdxFiles], Acc0) ->
               LastChunkPos:32/unsigned>> = binary:part(Data, LastIdxRecordPos,
                                                        ?INDEX_RECORD_SIZE_B),
             SegFile = segment_from_index_file(IdxFile),
-            {ok, Fd} = file:open(SegFile, [read, binary, raw]),
-            {ok, <<?MAGIC:4/unsigned,
-                   ?VERSION:4/unsigned,
-                   _NumEntries:16/unsigned,
-                   FirstNumRecords:32/unsigned,
-                   FirstEpoch:64/unsigned,
-                   FirstChId:64/unsigned,
-                   _/binary>>} = file:read(Fd, ?HEADER_SIZE_B),
-            {ok, LastChunkPos} = file:position(Fd, LastChunkPos),
-            {ok, <<?MAGIC:4/unsigned,
-                   ?VERSION:4/unsigned,
-                   _LastNumEntries:16/unsigned,
-                   LastNumRecords:32/unsigned,
-                   LastEpoch:64/unsigned,
-                   LastChId:64/unsigned,
-                   _/binary>>} = file:read(Fd, ?HEADER_SIZE_B),
-            {ok, Size} = file:position(Fd, eof),
-            ok = file:close(Fd),
-            Acc = [#seg_info{file = SegFile,
-                             index = IdxFile,
-                             size = Size,
-                             first = #chunk_info{epoch = FirstEpoch,
-                                                 id = FirstChId,
-                                                 num = FirstNumRecords},
-                             last = #chunk_info{epoch = LastEpoch,
-                                                id = LastChId,
-                                                num = LastNumRecords}}
-                   | Acc0],
+            Acc = build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0),
             build_log_overview0(IdxFiles, Acc);
         {error, enoent} ->
             %% The retention policy could have just been applied
             build_log_overview0(IdxFiles, Acc0)
     end.
 
+build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
+    try
+        {ok, Fd} = throw_missing(file:open(SegFile, [read, binary, raw])),
+        {ok, <<?MAGIC:4/unsigned,
+               ?VERSION:4/unsigned,
+               _NumEntries:16/unsigned,
+               FirstNumRecords:32/unsigned,
+               FirstEpoch:64/unsigned,
+               FirstChId:64/unsigned,
+               _/binary>>} = throw_missing(file:read(Fd, ?HEADER_SIZE_B)),
+        {ok, LastChunkPos} = throw_missing(file:position(Fd, LastChunkPos)),
+        {ok, <<?MAGIC:4/unsigned,
+               ?VERSION:4/unsigned,
+               _LastNumEntries:16/unsigned,
+               LastNumRecords:32/unsigned,
+               LastEpoch:64/unsigned,
+               LastChId:64/unsigned,
+               _/binary>>} = throw_missing(file:read(Fd, ?HEADER_SIZE_B)),
+        {ok, Size} = throw_missing(file:position(Fd, eof)),
+        _ = file:close(Fd),
+        [#seg_info{file = SegFile,
+                   index = IdxFile,
+                   size = Size,
+                   first = #chunk_info{epoch = FirstEpoch,
+                                       id = FirstChId,
+                                       num = FirstNumRecords},
+                   last = #chunk_info{epoch = LastEpoch,
+                                      id = LastChId,
+                                      num = LastNumRecords}}
+         | Acc0]
+    catch
+        missing_file ->
+            %% Indexes and segments could be deleted by retention policies while
+            %% the log overview is being built. Ignore those segments and keep going
+            Acc0
+    end.
+
+throw_missing({error, enoent}) ->
+    throw(missing_file);
+throw_missing(Any) ->
+    Any.
 
 -spec overview(term()) -> {range(), [{offset(), epoch()}]}.
 overview(Dir) ->
