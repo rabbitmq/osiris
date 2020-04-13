@@ -19,6 +19,8 @@
          terminate/2,
          code_change/3]).
 
+-export([formatter/1]).
+
 -record(state, {log :: osiris_log:state(),
                 socket :: gen_tcp:socket(),
                 replica_pid :: pid(),
@@ -131,7 +133,7 @@ handle_cast({more_data, _LastOffset},
     #state{log = Log} = State = do_sendfile(Sock, State0, Log0),
     NextOffs = osiris_log:next_offset(Log),
     ok = osiris_writer:register_data_listener(LeaderPid, NextOffs),
-    ok = osiris:register_offset_listener(LeaderPid, Last + 1),
+    ok = osiris:register_offset_listener(LeaderPid, Last + 1, {?MODULE, formatter, []}),
     ok = counters:add(Cnt, ?C_OFFSET_LISTENERS, 1),
     {noreply, State};
 handle_cast(stop, State) ->
@@ -152,7 +154,7 @@ handle_info({osiris_offset, _, _Offs},
             #state{leader_pid = LeaderPid,
                    committed_offset = Last} = State0) ->
     State = maybe_send_committed_offset(State0),
-    ok = osiris:register_offset_listener(LeaderPid, Last + 1),
+    ok = osiris:register_offset_listener(LeaderPid, Last + 1, {?MODULE, formatter, []}),
     {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -212,4 +214,5 @@ maybe_send_committed_offset(#state{log = Log,
             State
     end.
 
-
+formatter(Evt) ->
+    Evt.
