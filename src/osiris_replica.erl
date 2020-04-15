@@ -39,7 +39,8 @@
               gc_interval :: non_neg_integer(),
               external_ref :: term(),
               offset_ref :: atomics:atomics_ref(),
-              event_formatter :: undefined | mfa()
+              event_formatter :: undefined | mfa(),
+              reader_monitor_ref :: reference()
              }).
 
 -type parse_state() :: undefined |
@@ -144,8 +145,15 @@ init(#{leader_pid := LeaderPid,
 
     Dir = osiris_log:directory(Config),
     Log = osiris_log:init_acceptor(LeaderEpochOffs, Config#{dir => Dir}),
-    NextOffset = osiris_log:next_offset(Log),
-    ?INFO("osiris_replica:init/1: next offset ~b", [NextOffset]),
+    {NextOffset, LastChunk} = TailInfo = osiris_log:tail_info(Log),
+    case LastChunk of
+        empty ->
+            ok;
+        {_, LastChId} ->
+            %% need to ack last chunk back to leader so that it can
+            %% re-discover the committed offset
+            osiris_writer:ack(LeaderPid, [LastChId])
+    end,
     %% spawn reader process on leader node
     {ok, HostName} = inet:gethostname(),
     {ok, Ip} = inet:getaddr(HostName, inet),
@@ -153,29 +161,34 @@ init(#{leader_pid := LeaderPid,
                           port => Port,
                           replica_pid => self(),
                           leader_pid => LeaderPid,
-                          start_offset => osiris_log:tail_info(Log),
+                          start_offset => TailInfo,
                           external_ref => ExtRef},
-    case supervisor:start_child({osiris_replica_reader_sup, Node},
-                                #{
-                                  id => make_ref(),
-                                  start => {osiris_replica_reader,
-                                            start_link,
-                                            [ReplicaReaderConf]},
-                                  restart => transient,
-                                  shutdown => 5000,
-                                  type => worker,
-                                  modules => [osiris_replica_reader]}) of
-        {ok, _} ->
-            ok;
-        {ok, _, _} ->
-            ok
-    end,
+    RRPid = case supervisor:start_child({osiris_replica_reader_sup, Node},
+                                        #{id => make_ref(),
+                                          start => {osiris_replica_reader,
+                                                    start_link,
+                                                    [ReplicaReaderConf]},
+                                          %% replica readers should never be
+                                          %% restarted by their sups
+                                          %% instead they need to be re-started
+                                          %% by their replica
+                                          restart => temporary,
+                                          shutdown => 5000,
+                                          type => worker,
+                                          modules => [osiris_replica_reader]})
+            of
+                {ok, Pid} ->
+                    Pid;
+                {ok, Pid, _} ->
+                    Pid
+            end,
     Interval = maps:get(replica_gc_interval, Config, 5000),
     erlang:send_after(Interval, self(), force_gc),
     %% TODO: monitor leader pid
     ORef = atomics:new(1, [{signed, true}]),
     atomics:put(ORef, 1, -1),
     EvtFmt = maps:get(event_formatter, Config, undefined),
+    ?INFO("osiris_replica:init/1: next offset ~b", [NextOffset]),
     {ok, #?MODULE{cfg = #cfg{leader_pid = LeaderPid,
                              directory = Dir,
                              port = Port,
@@ -183,7 +196,8 @@ init(#{leader_pid := LeaderPid,
                              gc_interval = Interval,
                              external_ref = ExtRef,
                              offset_ref = ORef,
-                             event_formatter = EvtFmt},
+                             event_formatter = EvtFmt,
+                             reader_monitor_ref = monitor(process, RRPid)},
                   log = Log,
                   counter = CntRef}}.
 
@@ -329,7 +343,12 @@ handle_info({tcp_closed, Socket},
 handle_info({tcp_error, Socket, Error},
             #?MODULE{cfg = #cfg{socket = Socket}} = State) ->
     ?DEBUG("Socket error ~p~n", [Error]),
+    {noreply, State};
+handle_info({'DOWN', _Ref, process, Pid, Info}, State) ->
+    ?DEBUG("osiris_replica:handle_info/2: DOWN received Pid ~w, Info: ~w",
+           [Pid, Info]),
     {noreply, State}.
+
 
 %%--------------------------------------------------------------------
 %% @private

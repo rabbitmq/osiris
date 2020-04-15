@@ -36,8 +36,8 @@
 
 -record(?MODULE, {cfg :: #cfg{},
                   log = osiris_log:state(),
-                  pending_writes = #{} :: #{osiris:offset() =>
-                                            {[node()], #{pid() => [term()]}}},
+                  replica_state = #{} :: #{node() => osiris:offset()},
+                  pending_corrs = queue:new() :: queue:queue(),
                   data_listeners = [] :: [{pid(), osiris:offset()}],
                   offset_listeners = [] :: [{pid(), osiris:offset(),
                                              mfa() | undefined}],
@@ -108,11 +108,23 @@ init(#{name := Name,
     ORef = atomics:new(1, [{signed, true}]),
     Log = osiris_log:init(Config#{dir => Dir}),
     CntRef = osiris_counters:new({?MODULE, ExtRef}, ?COUNTER_FIELDS),
+    %% should this not be be chunk id rather than last offset?
     LastOffs = osiris_log:next_offset(Log) -1,
-    atomics:put(ORef, 1, LastOffs),
+    CommittedOffset = case osiris_log:tail_info(Log) of
+                          {_, {_, BatchOffs}} when Replicas == [] ->
+                              %% only when there are no replicas can we
+                              %% recover the committed offset from the last
+                              %% batch offset in the log
+                              BatchOffs;
+                          _ ->
+                              -1
+                      end,
+    atomics:put(ORef, 1, CommittedOffset),
     counters:put(CntRef, ?C_OFFSET, LastOffs),
-    counters:put(CntRef, ?C_COMMITTED_OFFSET, LastOffs),
+    counters:put(CntRef, ?C_COMMITTED_OFFSET, CommittedOffset),
     EvtFmt = maps:get(event_formatter, Config, undefined),
+    ?INFO("osiris_writer:init/1: name: ~s last offset: ~b committed chunk id: ~b",
+          [Name, LastOffs, CommittedOffset]),
     {ok, #?MODULE{cfg = #cfg{name = Name,
                              %% reference used for notification
                              %% if not provided use the name
@@ -123,7 +135,7 @@ init(#{name := Name,
                              directory = Dir,
                              %% TODO: there is no GC of counter registrations
                              counter = CntRef},
-                  committed_offset = LastOffs,
+                  committed_offset = CommittedOffset,
                   log = Log}}.
 
 handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt},
@@ -166,25 +178,23 @@ format_status(State) ->
 %% Internal
 
 update_pending(BatchOffs, Corrs,
-               #?MODULE{cfg = #cfg{ext_reference = Ref,
-                                   counter = Cnt,
+               #?MODULE{cfg = #cfg{counter = Cnt,
                                    offset_ref = OffsRef,
-                                   replicas = [],
-                                   event_formatter = EventFormatter}} = State0) ->
-    _ = notify_writers(Ref, Corrs, EventFormatter),
+                                   replicas = []} = Cfg} = State0) ->
+    send_written_events(Cfg, Corrs),
     atomics:put(OffsRef, 1, BatchOffs),
     counters:put(Cnt, ?C_COMMITTED_OFFSET, BatchOffs),
     State = State0#?MODULE{committed_offset = BatchOffs},
     notify_offset_listeners(State);
 update_pending(BatchOffs, Corrs,
-               #?MODULE{cfg = #cfg{replicas = Replicas},
-                        pending_writes = Pending0} = State) ->
+               #?MODULE{cfg = #cfg{},
+                        pending_corrs = Pending0} = State) ->
     case Corrs of
         _  when map_size(Corrs) == 0 ->
             State;
         _ ->
-            State#?MODULE{pending_writes =
-                          Pending0#{BatchOffs => {Replicas, Corrs}}}
+            State#?MODULE{pending_corrs =
+                          queue:in({BatchOffs, Corrs}, Pending0)}
     end.
 
 handle_commands([], State, {Records, Replies, Corrs}) ->
@@ -205,36 +215,37 @@ handle_commands([{cast,
                                                 | Listeners]},
     State = notify_offset_listeners(State1),
     handle_commands(Rem, State, Acc);
-handle_commands([{cast, {ack, ReplicaNode, Offsets}} | Rem],
-                #?MODULE{cfg = #cfg{ext_reference = Ref,
-                                    counter = Cnt,
-                                    offset_ref = ORef,
-                                    event_formatter = EventFormatter},
+handle_commands([{cast, {ack, ReplicaNode, Offset}} | Rem],
+                #?MODULE{cfg = #cfg{counter = Cnt,
+                                    offset_ref = ORef} = Cfg,
                          committed_offset = COffs0,
-                         pending_writes = Pending0} = State0, Acc) ->
-    {COffs, Pending} =
-    lists:foldl(fun (Offset, {C0, P0}) ->
-                        case maps:get(Offset, P0) of
-                            {[ReplicaNode], Corrs} ->
-                                _ = notify_writers(Ref, Corrs, EventFormatter),
-                                atomics:put(ORef, 1, Offset),
-                                {Offset, maps:remove(Offset, P0)};
-                            {Reps, Corrs} ->
-                                Reps1 = lists:delete(ReplicaNode, Reps),
-                                {C0, maps:update(Offset,
-                                                 {Reps1, Corrs},
-                                                 P0)}
-                        end
-                end, {COffs0, Pending0}, Offsets),
-    counters:put(Cnt, ?C_COMMITTED_OFFSET, COffs),
-    State1 = State0#?MODULE{pending_writes = Pending,
-                           committed_offset = COffs},
-    %% if committed offset has incresed - update 
+                         log = Log,
+                         replica_state = ReplicaState0,
+                         pending_corrs = Pending0} = State0, Acc) ->
+    % ?DEBUG("osiris_writer ack from ~w at ~b", [ReplicaNode, Offset]),
+    ReplicaState = maps:update_with(ReplicaNode,
+                                    fun (O) -> max(O, Offset) end,
+                                    Offset, ReplicaState0),
+    %% work out new committed offset
+    LastChId = case osiris_log:tail_info(Log) of
+                   {_, {_, BatchOffs}} ->
+                       BatchOffs;
+                   _ ->
+                       -1
+               end,
+    COffs = agreed_commit([LastChId | maps:values(ReplicaState)]),
+
+    %% if committed offset has incresed - update
     State = case COffs > COffs0 of
                 true ->
+                    atomics:put(ORef, 1, COffs),
+                    counters:put(Cnt, ?C_COMMITTED_OFFSET, COffs),
+                    Pending = notify_writers(Pending0, COffs, Cfg),
+                    State1 = State0#?MODULE{committed_offset = COffs,
+                                            pending_corrs = Pending},
                     notify_offset_listeners(State1);
                 false ->
-                    State1
+                    State0
             end,
     handle_commands(Rem, State, Acc);
 handle_commands([{call, From, get_reader_context} | Rem],
@@ -280,7 +291,18 @@ select_formatter(undefined, Fmt) ->
 select_formatter(Fmt, _) ->
     Fmt.
 
-notify_writers(Name, Corrs, EventFormatter) ->
+notify_writers(Q0, COffs, Cfg) ->
+    case queue:peek(Q0) of
+        {value, {O, Corrs}} when O =< COffs ->
+            send_written_events(Cfg, Corrs),
+            {_, Q} = queue:out(Q0),
+            notify_writers(Q, COffs, Cfg);
+        _ ->
+            Q0
+    end.
+
+send_written_events(#cfg{ext_reference = ExtRef,
+                         event_formatter = Fmt}, Corrs) ->
     %% TODO: minor optimisation: use maps:iterator here to avoid building a new
     %% result map
     maps:map(
@@ -288,11 +310,20 @@ notify_writers(Name, Corrs, EventFormatter) ->
               %% TODO: is the writer is on a remote node this could block
               %% which is bad but we'd have to consider the downsides of using
               %% send with noconnect and nosuspend here
-              P ! wrap_osiris_event(EventFormatter,
-                                    {osiris_written, Name, lists:reverse(V)})
-      end, Corrs).
+              P ! wrap_osiris_event(Fmt,
+                                    {osiris_written, ExtRef,
+                                     lists:reverse(V)})
+      end, Corrs),
+    ok.
 
 wrap_osiris_event(undefined, Evt) ->
     Evt;
 wrap_osiris_event({M, F, A}, Evt) ->
     apply(M, F, [Evt | A]).
+
+
+-spec agreed_commit([osiris:offset()]) -> osiris:offset().
+agreed_commit(Indexes) ->
+    SortedIdxs = lists:sort(fun erlang:'>'/2, Indexes),
+    Nth = (length(SortedIdxs) div 2) + 1,
+    lists:nth(Nth, SortedIdxs).
