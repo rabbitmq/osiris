@@ -99,7 +99,8 @@ single_node_write(Config) ->
 cluster_write(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
+    [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir)
+                                       || N <- [s1, s2, s3]],
     Conf0 = #{name => Name,
               epoch => 1,
               leader_node => LeaderNode,

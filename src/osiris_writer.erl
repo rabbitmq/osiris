@@ -53,7 +53,7 @@ start(Config = #{name := Name,
     supervisor:start_child({?SUP, Leader},
                            #{id => Name,
                              start => {?MODULE, start_link, [Config]},
-                             restart => transient,
+                             restart => temporary,
                              shutdown => 5000,
                              type => worker}).
 
@@ -307,7 +307,7 @@ send_written_events(#cfg{ext_reference = ExtRef,
     %% result map
     maps:map(
       fun (P, V) ->
-              %% TODO: is the writer is on a remote node this could block
+              %% TODO: if the writer is on a remote node this could block
               %% which is bad but we'd have to consider the downsides of using
               %% send with noconnect and nosuspend here
               P ! wrap_osiris_event(Fmt,

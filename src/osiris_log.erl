@@ -28,13 +28,21 @@
          delete_directory/1
          ]).
 
+-define(IDX_VERSION, 1).
+-define(LOG_VERSION, 1).
+-define(IDX_HEADER, <<"OSII", ?IDX_VERSION:32/unsigned>>).
+-define(LOG_HEADER, <<"OSIL", ?LOG_VERSION:32/unsigned>>).
+-define(IDX_HEADER_SIZE, 8).
+-define(LOG_HEADER_SIZE, 8).
+
 -define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
 -define(INDEX_RECORD_SIZE_B, 20).
 -define(MAGIC, 5).
-%% format version
+%% chunk format version
 -define(VERSION, 0).
 -define(HEADER_SIZE_B, 31).
 -define(FILE_OPTS_WRITE, [raw, binary, write, read]).
+
 %% Data format
 %% Write in "chunks" which are batches of blobs
 %%
@@ -151,9 +159,9 @@ init(#{dir := Dir,
                retention = Retention},
     case lists:reverse(build_log_overview(Dir)) of
         [] ->
-            open_segment(#?MODULE{cfg = Cfg,
-                                  mode = #write{tail_info = {0, empty},
-                                                current_epoch = Epoch}});
+            open_new_segment(#?MODULE{cfg = Cfg,
+                                      mode = #write{tail_info = {0, empty},
+                                                    current_epoch = Epoch}});
         [#seg_info{file = Filename,
                    index = IdxFilename,
                    last = #chunk_info{epoch = E,
@@ -220,10 +228,6 @@ accept_chunk([<<?MAGIC:4/unsigned,
               | _] = _Chunk,
              #?MODULE{cfg = #cfg{},
                       mode = #write{tail_info = {ExpectedNext, _}}}) ->
-    %% TODO if the expected next is higher than next we should truncate the tail
-    %% until the entry can be written in the correct place
-    %% when accepting we always trust the source to have negotiated the correct
-    %% data
     exit({accept_chunk_out_of_order, Next, ExpectedNext}).
 
 
@@ -255,7 +259,7 @@ init_acceptor(EpochOffsets0, #{dir := Dir} = Conf) ->
     init(Conf).
 
 chunk_id_index_scan(IdxFile, ChunkId) when is_list(IdxFile) ->
-    {ok, Fd} = file:open(IdxFile, [read, raw, binary]),
+    Fd = open_index_read(IdxFile),
     chunk_id_index_scan0(Fd, ChunkId).
 
 chunk_id_index_scan0(Fd, ChunkId) ->
@@ -264,12 +268,12 @@ chunk_id_index_scan0(Fd, ChunkId) ->
         {ok, <<ChunkId:64/unsigned,
                Epoch:64/unsigned,
                FilePos:32/unsigned>>} ->
-            file:close(Fd),
+            ok = file:close(Fd),
             {ChunkId, Epoch, FilePos, IdxPos};
         {ok, _} ->
             chunk_id_index_scan0(Fd, ChunkId);
         eof ->
-            file:close(Fd),
+            ok = file:close(Fd),
             eof
     end.
 
@@ -305,7 +309,7 @@ truncate_to([{E, ChId} | NextEOs], SegInfos) ->
                     %% FilePos could be eof here which means the next offset
                     {ok, Fd} = file:open(File, [read, write, binary, raw]),
                     {ok, IdxFd} = file:open(Idx, [read, write, binary, raw]),
-                    %% TODO: truncate at _NEXT_ chunk position
+
                     {ChId, E, _Num, Size} = header_info(Fd, Pos),
                     %% position at end of chunk
                     {ok, _Pos} = file:position(Fd, {cur, Size}),
@@ -315,7 +319,7 @@ truncate_to([{E, ChId} | NextEOs], SegInfos) ->
                     ok = file:truncate(IdxFd),
                     ok = file:close(Fd),
                     ok = file:close(IdxFd),
-                    %% TODO: delete all segments with a first offset larger then ChId
+                    %% delete all segments with a first offset larger then ChId
                     [begin
                          ok = delete_segment(I)
                      end || I <- SegInfos,
@@ -380,9 +384,8 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
                             %% prev segment exists, does it have the correct
                             %% epoch?
                             {ok, Fd} = file:open(PrevSeg, [raw, binary, read]),
-                            {ok, Data} = file:read_file(PrevIdxFile),
                             %% TODO: next offset needs to be a chunk offset
-                            {_, FilePos} = scan_index(Data, Fd, PrevO),
+                            {_, FilePos} = scan_index(PrevIdxFile, Fd, PrevO),
                             {ok, FilePos} = file:position(Fd, FilePos),
                             case file:read(Fd, ?HEADER_SIZE_B) of
                                 {ok, <<?MAGIC:4/unsigned,
@@ -411,21 +414,13 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
                     end
             end
     end.
-    %% TODO we only need to validate if the attach request is in range
-    %% if NextOffs has been forwarded there is no point in validating as the
-    %% entry will not exist
-    %% also when start offset is the at the exact lower bound of the range
-    %% we cannot validate as the prior entry did not exist
-    %% in this case the replica should truncate but how do we signal that?
-    %% perhaps we should fail validation in this scenario
 
 init_data_reader_from_segment(#{dir := Dir} = Config,
                               #seg_info{file = StartSegment,
                                         index = IndexFile}, NextOffs) ->
     {ok, Fd} = file:open(StartSegment, [raw, binary, read]),
-    {ok, Data} = file:read_file(IndexFile),
     %% TODO: next offset needs to be a chunk offset
-    {_, FilePos} = scan_index(Data, Fd, NextOffs),
+    {_, FilePos} = scan_index(IndexFile, Fd, NextOffs),
     {ok, _Pos} = file:position(Fd, FilePos),
     #?MODULE{cfg = #cfg{directory = Dir},
              mode = #read{type = data,
@@ -493,8 +488,7 @@ init_offset_reader(OffsetSpec, #{dir := Dir,
         {_, #seg_info{file = StartSegment,
                       index = IndexFile}} ->
             {ok, Fd} = file:open(StartSegment, [raw, binary, read]),
-            {ok, Data} = file:read_file(IndexFile),
-            {ChOffs, FilePos} = case scan_index(Data, Fd, StartOffset) of
+            {ChOffs, FilePos} = case scan_index(IndexFile, Fd, StartOffset) of
                                     eof ->
                                         {StartOffset, 0};
                                     IdxResult ->
@@ -552,12 +546,12 @@ read_chunk(#?MODULE{cfg = #cfg{directory = Dir},
                 eof ->
                     %% open next segment file and start there if it exists
                     SegFile = make_file_name(Next, "segment"),
-                    %% TODO check for error and return end_of_stream if the file
-                    %% does not exist
+
                     case file:open(filename:join(Dir, SegFile),
                                    [raw, binary, read]) of
                         {ok, Fd2} ->
                             ok = file:close(Fd),
+                            {ok, _} = file:position(Fd2, ?LOG_HEADER_SIZE),
                             read_chunk_parsed(State#?MODULE{fd = Fd2});
                         {error, enoent} ->
                             {end_of_stream, State}
@@ -629,6 +623,7 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                     case file:open(filename:join(Dir, SegFile),
                                    [raw, binary, read]) of
                         {ok, Fd2} ->
+                            {ok, _} = file:position(Fd2, ?IDX_HEADER_SIZE),
                             ok = file:close(Fd),
                             send_file(Sock, State#?MODULE{fd = Fd2}, Callback);
                         {error, enoent} ->
@@ -664,17 +659,28 @@ header_info(Fd, Pos) ->
            Size:32/unsigned>>} = file:read(Fd, ?HEADER_SIZE_B),
     {Offset, Epoch, Num, Size}.
 
-scan_index(<<>>, _Fd, 0) ->
+scan_index(IdxFile, SegFd, Offs) when is_list(IdxFile) ->
+    {ok, Fd} = file:open(IdxFile, [read, raw, binary, read_ahead]),
+    case file:read(Fd, ?IDX_HEADER_SIZE) of
+        {ok, ?IDX_HEADER} ->
+            scan_index(file:read(Fd, ?INDEX_RECORD_SIZE_B * 2),
+                                 Fd, SegFd, Offs);
+        Err ->
+            Err
+    end.
+
+scan_index(eof, IdxFd, _Fd, 0) ->
+    ok = file:close(IdxFd),
     %% if the index is empty do we really know the offset will be next
     %% this relies on us always reducing the Offset to within the log range
-    {0, 0};
-scan_index(<<>>, _Fd, _) ->
+    {0, ?LOG_HEADER_SIZE};
+scan_index(eof, IdxFd, _Fd, _) ->
+    ok = file:close(IdxFd),
     eof;
-scan_index(<<O:64/unsigned,
-             E:64/unsigned,
-             Pos:32/unsigned>>, Fd, Offset) ->
-    %% TODO: the requested offset may not be found in the last batch as it
-    %% may not have been written yet
+scan_index({ok, <<O:64/unsigned,
+                  E:64/unsigned,
+                  Pos:32/unsigned>>}, IdxFd, Fd, Offset) ->
+    ok = file:close(IdxFd),
     {O, E, Num, _} = header_info(Fd, Pos),
     case Offset >= O andalso Offset < (O + Num) of
         true ->
@@ -682,15 +688,20 @@ scan_index(<<O:64/unsigned,
         false ->
             {O + Num, eof}
     end;
-scan_index(<<O:64/unsigned,
-             _E:64/unsigned,
-             Pos:32/unsigned, Rem/binary>>, Fd, Offset)  ->
-    <<ONext:64/unsigned, _/binary>> = Rem,
+scan_index({ok, <<O:64/unsigned,
+                  _E:64/unsigned,
+                  Pos:32/unsigned,
+                  ONext:64/unsigned,
+                  _:64/unsigned,
+                  _:32/unsigned>>},
+           IdxFd, Fd, Offset)  ->
      case Offset >= O andalso Offset < ONext of
          true ->
              {O, Pos};
          false ->
-             scan_index(Rem, Fd, Offset)
+             {ok, _} = file:position(IdxFd, {cur, -?INDEX_RECORD_SIZE_B}),
+             scan_index(file:read(IdxFd, ?INDEX_RECORD_SIZE_B * 2),
+                                  IdxFd, Fd, Offset)
      end.
 
 parse_records(_Offs, <<>>, Acc) ->
@@ -711,32 +722,6 @@ parse_records(Offs, <<1:1, %% simple
     Recs = parse_records(Offs, Data, []),
     parse_records(Offs+NumRecs, Rem, lists:reverse(Recs) ++ Acc).
 
-% read_tail_info(Fd, IdxFd) ->
-%     {ok, EofPos} = file:position(IdxFd, eof),
-%     case EofPos of
-%         0 ->
-%             eof;
-%         _ ->
-%             case file:pread(IdxFd, EofPos - ?INDEX_RECORD_SIZE_B, ?INDEX_RECORD_SIZE_B) of
-%                 {ok, <<Offset:64/unsigned,
-%                        Epoch:64/unsigned,
-%                        FilePos:32/unsigned>>} ->
-%                     {ok, FilePos} = file:position(Fd, FilePos),
-%                     {ok, <<?MAGIC:4/unsigned,
-%                            ?VERSION:4/unsigned,
-%                            _NumEntries:16/unsigned,
-%                            Num:32/unsigned,
-%                            Epoch:64/unsigned>>} = file:read(Fd, 15),
-%                     {ok, _} = file:position(IdxFd, eof),
-%                     {ok, _} = file:position(Fd, eof),
-%                     {Offset + Num, {Epoch, Offset}};
-%                 eof ->
-%                     {ok, _} = file:position(IdxFd, eof),
-%                     eof
-%             end
-%     end.
-
-
 build_log_overview(Dir) when is_list(Dir) ->
     IdxFiles = lists:sort(filelib:wildcard(
                             filename:join(Dir, "*.index"))),
@@ -745,40 +730,40 @@ build_log_overview(Dir) when is_list(Dir) ->
 build_log_overview0([], Acc) ->
     lists:reverse(Acc);
 build_log_overview0([IdxFile | IdxFiles], Acc0) ->
-    %% TODO: make this more efficient, index files could become very large
-    % file:read_file_info(
-    case file:read_file(IdxFile) of
-        {ok, <<>>} when IdxFiles == [] andalso Acc0 == [] ->
-            %% special case for the very first empty segment
+    IdxFd = open_index_read(IdxFile),
+    case file:position(IdxFd, {eof, -?INDEX_RECORD_SIZE_B}) of
+        {error, einval} when IdxFiles == [] andalso Acc0 == [] ->
+            %% this would happen if the file only contained a header
+            ok = file:close(IdxFd),
             SegFile = segment_from_index_file(IdxFile),
             [#seg_info{file = SegFile,
                        index = IdxFile}];
-        {ok, <<>>} ->
-            %% read prevous if exists
+        {error, einval} ->
+            ok = file:close(IdxFd),
             build_log_overview0(IdxFiles, Acc0);
-        {ok, Data} ->
-            %% get last batch offset
-            IdxSize = byte_size(Data),
-            %% ASSERTION: byte size is a multiple of index record size
-            0 = IdxSize rem ?INDEX_RECORD_SIZE_B,
-            %% TODO: truncate partial index entry or rebuild from segment file
-            %% when byte size has a remainder
-            LastIdxRecordPos = IdxSize - ?INDEX_RECORD_SIZE_B,
-            <<_Offset:64/unsigned,
-              _Epoch:64/unsigned,
-              LastChunkPos:32/unsigned>> = binary:part(Data, LastIdxRecordPos,
-                                                       ?INDEX_RECORD_SIZE_B),
-            SegFile = segment_from_index_file(IdxFile),
-            Acc = build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0),
-            build_log_overview0(IdxFiles, Acc);
-        {error, enoent} ->
-            %% The retention policy could have just been applied
-            build_log_overview0(IdxFiles, Acc0)
+        {ok, Pos} ->
+            %% ASSERTION: ensure we don't have rubbish data at end of idex
+            0 = (Pos - ?IDX_HEADER_SIZE) rem ?INDEX_RECORD_SIZE_B,
+            case file:read(IdxFd, ?INDEX_RECORD_SIZE_B) of
+                {ok, <<_Offset:64/unsigned,
+                      _Epoch:64/unsigned,
+                      LastChunkPos:32/unsigned>>} ->
+                    ok = file:close(IdxFd),
+                    SegFile = segment_from_index_file(IdxFile),
+                    Acc = build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0),
+                    build_log_overview0(IdxFiles, Acc);
+                {error, enoent} ->
+                    %% The retention policy could have just been applied
+                    ok = file:close(IdxFd),
+                    build_log_overview0(IdxFiles, Acc0)
+            end
     end.
 
 build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
     try
         {ok, Fd} = throw_missing(file:open(SegFile, [read, binary, raw])),
+        %% skip header,
+        {ok, ?LOG_HEADER_SIZE} = file:position(Fd, ?LOG_HEADER_SIZE),
         {ok, <<?MAGIC:4/unsigned,
                ?VERSION:4/unsigned,
                _NumEntries:16/unsigned,
@@ -853,29 +838,35 @@ last_offset_epochs([#seg_info{index = IdxFile,
                               first = #chunk_info{epoch = FstE,
                                                   id = FstChId}}
                     | SegInfos]) ->
-    {ok, IdxData} = file:read_file(IdxFile),
+    FstFd = open_index_read(IdxFile),
     {LastE, LastO, Res} =
         lists:foldl(
           fun (#seg_info{index = I}, Acc) ->
-                  {ok, Data} = file:read_file(I),
-                  last_offset_epoch(Data, Acc)
-          end, last_offset_epoch(IdxData, {FstE, FstChId, []}),
-          SegInfos),
+                  Fd = open_index_read(I),
+                  last_offset_epoch(
+                    file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd, Acc)
+          end, last_offset_epoch(
+                 file:read(FstFd, ?INDEX_RECORD_SIZE_B), FstFd,
+                 {FstE, FstChId, []}), SegInfos),
     lists:reverse([{LastE, LastO} | Res]).
 
 %% aggregates the chunk offsets for each epoch
-last_offset_epoch(<<>>, Acc) ->
+last_offset_epoch(eof, Fd, Acc) ->
+    ok = file:close(Fd),
     Acc;
-last_offset_epoch(<<O:64/unsigned,
-                    CurEpoch:64/unsigned,
-                    _:32/unsigned, Rem/binary>>, {CurEpoch, _LastOffs, Acc})  ->
+last_offset_epoch({ok, <<O:64/unsigned,
+                         CurEpoch:64/unsigned,
+                         _:32/unsigned>>},
+                   Fd, {CurEpoch, _LastOffs, Acc})  ->
     %% epoch is unchanged
-    last_offset_epoch(Rem, {CurEpoch, O, Acc});
-last_offset_epoch(<<O:64/unsigned,
+    last_offset_epoch(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
+                      {CurEpoch, O, Acc});
+last_offset_epoch({ok, <<O:64/unsigned,
                     Epoch:64/unsigned,
-                    _:32/unsigned, Rem/binary>>, {CurEpoch, LastOffs, Acc})
+                    _:32/unsigned>>}, Fd, {CurEpoch, LastOffs, Acc})
   when Epoch > CurEpoch ->
-    last_offset_epoch(Rem, {Epoch, O, [{CurEpoch, LastOffs} |  Acc]}).
+    last_offset_epoch(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
+                      {Epoch, O, [{CurEpoch, LastOffs} |  Acc]}).
 
 segment_from_index_file(IdxFile) ->
     Basename = filename:basename(IdxFile, ".index"),
@@ -911,7 +902,7 @@ make_chunk(Blobs, Epoch, Next) ->
 
 write_chunk(Chunk, Epoch, NumRecords,
             #?MODULE{fd = undefined} = State) ->
-    write_chunk(Chunk, Epoch, NumRecords, open_segment(State));
+    write_chunk(Chunk, Epoch, NumRecords, open_new_segment(State));
 write_chunk(Chunk, Epoch, NumRecords,
             #?MODULE{cfg = #cfg{max_segment_size = MaxSize},
                      fd = Fd,
@@ -1009,22 +1000,31 @@ incr_next_offset(Num, #read{next_offset = NextOffset} = Read) ->
 make_file_name(N, Suff) ->
     lists:flatten(io_lib:format("~20..0B.~s", [N, Suff])).
 
-open_segment(#?MODULE{cfg = #cfg{directory = Dir,
-                                 retention = RetentionSpec},
-                      fd = undefined,
-                      index_fd = undefined,
-                      mode = #write{segment_size = _SegSize,
-                                    tail_info = {NextOffset, _}}} = State) ->
+open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
+                                     retention = RetentionSpec},
+                          fd = undefined,
+                          index_fd = undefined,
+                          mode = #write{segment_size = _SegSize,
+                                        tail_info = {NextOffset, _}}}
+                 = State) ->
     Filename = make_file_name(NextOffset, "segment"),
     IdxFilename = make_file_name(NextOffset, "index"),
     {ok, Fd} = file:open(filename:join(Dir, Filename), ?FILE_OPTS_WRITE),
+    ok = file:write(Fd, ?LOG_HEADER),
     {ok, IdxFd} = file:open(filename:join(Dir, IdxFilename), ?FILE_OPTS_WRITE),
-    %% we always move to the end of the file - because of truncation we
-    %% cannot use append mode as we'd need to position
+    ok = file:write(IdxFd, ?IDX_HEADER),
+    %% we always move to the end of the file
     {ok, _} = file:position(Fd, eof),
     {ok, _} = file:position(IdxFd, eof),
+    %% ask to evaluate retention
     ok = osiris_retention:eval(Dir, RetentionSpec),
     State#?MODULE{fd = Fd, index_fd = IdxFd}.
+
+open_index_read(File) ->
+    {ok, Fd} = file:open(File, [read, raw, binary, read_ahead]),
+    %% assertion that index header is correct
+    {ok, ?IDX_HEADER} = file:read(Fd, ?IDX_HEADER_SIZE),
+    Fd.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
