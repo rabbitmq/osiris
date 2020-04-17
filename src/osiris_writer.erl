@@ -128,12 +128,10 @@ init(#{name := Name,
     {ok, #?MODULE{cfg = #cfg{name = Name,
                              %% reference used for notification
                              %% if not provided use the name
-                             ext_reference = ExtRef,
                              event_formatter = EvtFmt,
                              offset_ref = ORef,
                              replicas = Replicas,
                              directory = Dir,
-                             %% TODO: there is no GC of counter registrations
                              counter = CntRef},
                   committed_offset = CommittedOffset,
                   log = Log}}.

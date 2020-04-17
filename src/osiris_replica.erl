@@ -77,14 +77,6 @@
 %%%===================================================================
 
 start(Node, Config = #{name := Name}) when is_list(Name) ->
-    %% READERS pumps data on replicas!!! replicas are the gen_tcp listeners - whch is
-    %% different from this
-    %% master unaware of replicas
-    %% TODO if we select from a range, how do we know in the other side
-    %% which one have we selected???
-    %% TODO What's the Id? How many replicas do we have?
-    %% TODO How do we know the name of the log to write to disk?
-    %%` TODO another replica for the index?
     supervisor:start_child({?SUP, Node},
                            #{id => Name,
                              start => {?MODULE, start_link, [Config]},
@@ -133,7 +125,6 @@ get_port(Server) ->
 init(#{leader_pid := LeaderPid,
        external_ref := ExtRef} = Config) ->
     {ok, {Min, Max}} = application:get_env(port_range),
-    %% TODO: use locally configured port range
     {Port, LSock} = open_tcp_port(Min, Max),
     Self = self(),
     spawn_link(fun() -> accept(LSock, Self) end),
@@ -184,7 +175,6 @@ init(#{leader_pid := LeaderPid,
             end,
     Interval = maps:get(replica_gc_interval, Config, 5000),
     erlang:send_after(Interval, self(), force_gc),
-    %% TODO: monitor leader pid
     ORef = atomics:new(1, [{signed, true}]),
     atomics:put(ORef, 1, -1),
     EvtFmt = maps:get(event_formatter, Config, undefined),
@@ -410,8 +400,8 @@ parse_chunk(<<?MAGIC:4/unsigned,
     {{FirstOffset, [All], Size - byte_size(Partial)}, lists:reverse(Acc)};
 parse_chunk(Bin, PartialHeaderBin, Acc)
   when is_binary(PartialHeaderBin) ->
-    %% TODO: slight inneficiency but partial headers should be relatively
-    %% rare - also ensures the header is always intact
+    %% slight inneficiency but partial headers should be relatively
+    %% rare and fairly small - also ensures the header is always intact
     parse_chunk(<<PartialHeaderBin/binary, Bin/binary>>, undefined, Acc);
 parse_chunk(Bin, {FirstOffset, IOData, RemSize}, Acc)
   when byte_size(Bin) >= RemSize ->
