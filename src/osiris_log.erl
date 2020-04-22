@@ -178,8 +178,8 @@ init(#{dir := Dir,
             ?INFO("~s:~s/~b: next offset ~b",
                   [?MODULE, ?FUNCTION_NAME,
                    ?FUNCTION_ARITY, element(1, TailInfo)]),
-            {ok, Fd} = file:open(Filename, ?FILE_OPTS_WRITE),
-            {ok, IdxFd} = file:open(IdxFilename, ?FILE_OPTS_WRITE),
+            {ok, Fd} = open(Filename, ?FILE_OPTS_WRITE),
+            {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, _} = file:position(Fd, eof),
             {ok, _} = file:position(IdxFd, eof),
             #?MODULE{cfg = Cfg,
@@ -463,7 +463,7 @@ init_offset_reader({abs, Offs}, #{dir := Dir} = Conf) ->
             init_offset_reader(Offs, Conf)
     end;
 init_offset_reader(OffsetSpec, #{dir := Dir,
-                                 offset_ref := OffsetRef}) ->
+                                 offset_ref := OffsetRef} = Conf) ->
     SegInfo = build_log_overview(Dir),
     Range = range_from_segment_infos(SegInfo),
     ?INFO("osiris_log:init_offset_reader/2 spec ~w range ~w ",
@@ -487,19 +487,26 @@ init_offset_reader(OffsetSpec, #{dir := Dir,
             {error, {offset_out_of_range, Range}};
         {_, #seg_info{file = StartSegment,
                       index = IndexFile}} ->
-            {ok, Fd} = file:open(StartSegment, [raw, binary, read]),
-            {ChOffs, FilePos} = case scan_index(IndexFile, Fd, StartOffset) of
-                                    eof ->
-                                        {StartOffset, 0};
-                                    IdxResult ->
-                                        IdxResult
-                                end,
-            {ok, _Pos} = file:position(Fd, FilePos),
-            {ok, #?MODULE{cfg = #cfg{directory = Dir},
-                          mode = #read{type = offset,
-                                       offset_ref = OffsetRef,
-                                       next_offset = ChOffs},
-                          fd = Fd}}
+            try
+                {ok, Fd} = open(StartSegment, [raw, binary, read]),
+                {ChOffs, FilePos} = case scan_index(IndexFile, Fd, StartOffset) of
+                                        eof ->
+                                            {StartOffset, 0};
+                                        IdxResult ->
+                                            IdxResult
+                                    end,
+                {ok, _Pos} = position(Fd, FilePos),
+                {ok, #?MODULE{cfg = #cfg{directory = Dir},
+                              mode = #read{type = offset,
+                                           offset_ref = OffsetRef,
+                                           next_offset = ChOffs},
+                              fd = Fd}}
+            catch
+                missing_file ->
+                    %% Retention policies are likely being applied, let's try again
+                    %% TODO: should we limit the number of retries?
+                    init_offset_reader(OffsetSpec, Conf)
+            end
     end.
 
 -spec committed_offset(state()) -> undefined | offset().
@@ -648,7 +655,7 @@ delete_directory(Config) ->
 %% Internal
 
 header_info(Fd, Pos) ->
-    {ok, Pos} = file:position(Fd, Pos),
+    {ok, Pos} = position(Fd, Pos),
     {ok, <<?MAGIC:4/unsigned,
            ?VERSION:4/unsigned,
            _NumEntries:16/unsigned,
@@ -656,7 +663,7 @@ header_info(Fd, Pos) ->
            Epoch:64/unsigned,
            Offset:64/unsigned,
            _Crc:32/integer,
-           Size:32/unsigned>>} = file:read(Fd, ?HEADER_SIZE_B),
+           Size:32/unsigned>>} = read(Fd, ?HEADER_SIZE_B),
     {Offset, Epoch, Num, Size}.
 
 scan_index(IdxFile, SegFd, Offs) when is_list(IdxFile) ->
@@ -761,25 +768,25 @@ build_log_overview0([IdxFile | IdxFiles], Acc0) ->
 
 build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
     try
-        {ok, Fd} = throw_missing(file:open(SegFile, [read, binary, raw])),
+        {ok, Fd} = open(SegFile, [read, binary, raw]),
         %% skip header,
-        {ok, ?LOG_HEADER_SIZE} = file:position(Fd, ?LOG_HEADER_SIZE),
+        {ok, ?LOG_HEADER_SIZE} = position(Fd, ?LOG_HEADER_SIZE),
         {ok, <<?MAGIC:4/unsigned,
                ?VERSION:4/unsigned,
                _NumEntries:16/unsigned,
                FirstNumRecords:32/unsigned,
                FirstEpoch:64/unsigned,
                FirstChId:64/unsigned,
-               _/binary>>} = throw_missing(file:read(Fd, ?HEADER_SIZE_B)),
-        {ok, LastChunkPos} = throw_missing(file:position(Fd, LastChunkPos)),
+               _/binary>>} = read(Fd, ?HEADER_SIZE_B),
+        {ok, LastChunkPos} = position(Fd, LastChunkPos),
         {ok, <<?MAGIC:4/unsigned,
                ?VERSION:4/unsigned,
                _LastNumEntries:16/unsigned,
                LastNumRecords:32/unsigned,
                LastEpoch:64/unsigned,
                LastChId:64/unsigned,
-               _/binary>>} = throw_missing(file:read(Fd, ?HEADER_SIZE_B)),
-        {ok, Size} = throw_missing(file:position(Fd, eof)),
+               _/binary>>} = read(Fd, ?HEADER_SIZE_B),
+        {ok, Size} = position(Fd, eof),
         _ = file:close(Fd),
         [#seg_info{file = SegFile,
                    index = IdxFile,
@@ -797,11 +804,6 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
             %% the log overview is being built. Ignore those segments and keep going
             Acc0
     end.
-
-throw_missing({error, enoent}) ->
-    throw(missing_file);
-throw_missing(Any) ->
-    Any.
 
 -spec overview(term()) -> {range(), [{offset(), epoch()}]}.
 overview(Dir) ->
@@ -1025,6 +1027,23 @@ open_index_read(File) ->
     %% assertion that index header is correct
     {ok, ?IDX_HEADER} = file:read(Fd, ?IDX_HEADER_SIZE),
     Fd.
+
+throw_missing({error, enoent}) ->
+    throw(missing_file);
+throw_missing(Any) ->
+    Any.
+
+open(SegFile, Options) ->
+    throw_missing(file:open(SegFile, Options)).
+
+read(Fd, Size) ->
+    throw_missing(file:read(Fd, Size)).
+
+position(Fd, Pos) ->
+    throw_missing(file:position(Fd, Pos)).
+
+read_file(Fd) ->
+    throw_missing(file:read_file(Fd)).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
