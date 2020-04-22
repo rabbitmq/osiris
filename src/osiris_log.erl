@@ -495,7 +495,7 @@ init_offset_reader(OffsetSpec, #{dir := Dir,
                                         IdxResult ->
                                             IdxResult
                                     end,
-                {ok, _Pos} = position(Fd, FilePos),
+                {ok, _Pos} = file:position(Fd, FilePos),
                 {ok, #?MODULE{cfg = #cfg{directory = Dir},
                               mode = #read{type = offset,
                                            offset_ref = OffsetRef,
@@ -655,7 +655,7 @@ delete_directory(Config) ->
 %% Internal
 
 header_info(Fd, Pos) ->
-    {ok, Pos} = position(Fd, Pos),
+    {ok, Pos} = file:position(Fd, Pos),
     {ok, <<?MAGIC:4/unsigned,
            ?VERSION:4/unsigned,
            _NumEntries:16/unsigned,
@@ -663,7 +663,7 @@ header_info(Fd, Pos) ->
            Epoch:64/unsigned,
            Offset:64/unsigned,
            _Crc:32/integer,
-           Size:32/unsigned>>} = read(Fd, ?HEADER_SIZE_B),
+           Size:32/unsigned>>} = file:read(Fd, ?HEADER_SIZE_B),
     {Offset, Epoch, Num, Size}.
 
 scan_index(IdxFile, SegFd, Offs) when is_list(IdxFile) ->
@@ -770,23 +770,23 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
     try
         {ok, Fd} = open(SegFile, [read, binary, raw]),
         %% skip header,
-        {ok, ?LOG_HEADER_SIZE} = position(Fd, ?LOG_HEADER_SIZE),
+        {ok, ?LOG_HEADER_SIZE} = file:position(Fd, ?LOG_HEADER_SIZE),
         {ok, <<?MAGIC:4/unsigned,
                ?VERSION:4/unsigned,
                _NumEntries:16/unsigned,
                FirstNumRecords:32/unsigned,
                FirstEpoch:64/unsigned,
                FirstChId:64/unsigned,
-               _/binary>>} = read(Fd, ?HEADER_SIZE_B),
-        {ok, LastChunkPos} = position(Fd, LastChunkPos),
+               _/binary>>} = file:read(Fd, ?HEADER_SIZE_B),
+        {ok, LastChunkPos} = file:position(Fd, LastChunkPos),
         {ok, <<?MAGIC:4/unsigned,
                ?VERSION:4/unsigned,
                _LastNumEntries:16/unsigned,
                LastNumRecords:32/unsigned,
                LastEpoch:64/unsigned,
                LastChId:64/unsigned,
-               _/binary>>} = read(Fd, ?HEADER_SIZE_B),
-        {ok, Size} = position(Fd, eof),
+               _/binary>>} = file:read(Fd, ?HEADER_SIZE_B),
+        {ok, Size} = file:position(Fd, eof),
         _ = file:close(Fd),
         [#seg_info{file = SegFile,
                    index = IdxFile,
@@ -1023,7 +1023,7 @@ open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
     State#?MODULE{fd = Fd, index_fd = IdxFd}.
 
 open_index_read(File) ->
-    {ok, Fd} = file:open(File, [read, raw, binary, read_ahead]),
+    {ok, Fd} = open(File, [read, raw, binary, read_ahead]),
     %% assertion that index header is correct
     {ok, ?IDX_HEADER} = file:read(Fd, ?IDX_HEADER_SIZE),
     Fd.
@@ -1035,15 +1035,6 @@ throw_missing(Any) ->
 
 open(SegFile, Options) ->
     throw_missing(file:open(SegFile, Options)).
-
-read(Fd, Size) ->
-    throw_missing(file:read(Fd, Size)).
-
-position(Fd, Pos) ->
-    throw_missing(file:position(Fd, Pos)).
-
-read_file(Fd) ->
-    throw_missing(file:read_file(Fd)).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
