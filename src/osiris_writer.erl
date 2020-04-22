@@ -128,6 +128,7 @@ init(#{name := Name,
     {ok, #?MODULE{cfg = #cfg{name = Name,
                              %% reference used for notification
                              %% if not provided use the name
+                             ext_reference = ExtRef,
                              event_formatter = EvtFmt,
                              offset_ref = ORef,
                              replicas = Replicas,
