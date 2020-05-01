@@ -186,6 +186,18 @@ init(#{dir := Dir,
                      mode = #write{tail_info = TailInfo,
                                    current_epoch = Epoch},
                      fd = Fd,
+                     index_fd = IdxFd};
+        [#seg_info{file = Filename,
+                   index = IdxFilename,
+                   last = undefined} | _] ->
+            {ok, Fd} = open(Filename, ?FILE_OPTS_WRITE),
+            {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
+            {ok, _} = file:position(Fd, eof),
+            {ok, _} = file:position(IdxFd, eof),
+            #?MODULE{cfg = Cfg,
+                     mode = #write{tail_info = {0, empty},
+                                   current_epoch = Epoch},
+                     fd = Fd,
                      index_fd = IdxFd}
     end.
 
