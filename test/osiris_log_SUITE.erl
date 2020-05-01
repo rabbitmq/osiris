@@ -21,6 +21,7 @@ all() ->
 all_tests() ->
     [
      init_empty,
+     init_twice,
      init_recover,
      init_with_lower_epoch,
      write_batch,
@@ -83,6 +84,12 @@ end_per_testcase(_TestCase, _Config) ->
 init_empty(Config) ->
     S0 = osiris_log:init(#{dir => ?config(dir, Config), epoch => 1}),
     ?assertEqual(0, osiris_log:next_offset(S0)),
+    ok.
+
+init_twice(Config) ->
+    _ = osiris_log:init(#{dir => ?config(dir, Config), epoch => 1}),
+    S1 = osiris_log:init(#{dir => ?config(dir, Config), epoch => 1}),
+    ?assertEqual(0, osiris_log:next_offset(S1)),
     ok.
 
 init_recover(Config) ->
