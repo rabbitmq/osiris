@@ -835,14 +835,21 @@ eval_max_bytes(SegInfos, MaxSize) ->
                   fun (#seg_info{size = Size}, Acc) ->
                           Acc + Size
                   end, 0, SegInfos),
-    case length(SegInfos) > 1 andalso TotalSize > MaxSize of
-        true ->
-            %% we can delete at least one segment segment
-            [Old | Rem] = SegInfos,
-            ok = delete_segment(Old),
-            eval_max_bytes(Rem, MaxSize);
-        false  ->
-            SegInfos
+    case SegInfos of
+        _ when length(SegInfos) =< 1 ->
+            SegInfos;
+        [_, #seg_info{size = 0}] ->
+            SegInfos;
+        _ ->
+            case TotalSize > MaxSize of
+                true ->
+                    %% we can delete at least one segment segment
+                    [Old | Rem] = SegInfos,
+                    ok = delete_segment(Old),
+                    eval_max_bytes(Rem, MaxSize);
+                false  ->
+                    SegInfos
+            end
     end.
 
 last_offset_epochs([#seg_info{first = undefined,
