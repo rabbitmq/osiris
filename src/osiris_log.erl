@@ -742,9 +742,14 @@ parse_records(Offs, <<1:1, %% simple
     parse_records(Offs+NumRecs, Rem, lists:reverse(Recs) ++ Acc).
 
 build_log_overview(Dir) when is_list(Dir) ->
-    IdxFiles = lists:sort(filelib:wildcard(
-                            filename:join(Dir, "*.index"))),
-    build_log_overview0(IdxFiles, []).
+    try
+        IdxFiles = lists:sort(filelib:wildcard(
+                                filename:join(Dir, "*.index"))),
+        build_log_overview0(IdxFiles, [])
+    catch
+        missing_file ->
+            build_log_overview(Dir)
+    end.
 
 build_log_overview0([], Acc) ->
     lists:reverse(Acc);
