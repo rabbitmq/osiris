@@ -29,7 +29,7 @@
         <listEntry value="1NoDivergence"/>
         <listEntry value="1FollowerEqualOrLowerEpoch"/>
         <listEntry value="1NoLossOfConfirmedWrite"/>
-        <listEntry value="1LeoMatchesLog"/>
+        <listEntry value="1LerMatchesLog"/>
         <listEntry value="1TestInv"/>
     </listAttribute>
     <listAttribute key="modelCorrectnessProperties"/>
@@ -37,10 +37,10 @@
     <stringAttribute key="modelExpressionEval" value=""/>
     <stringAttribute key="modelParameterActionConstraint" value=""/>
     <listAttribute key="modelParameterConstants">
-        <listEntry value="R;;{r1, r2, r3};1;0"/>
-        <listEntry value="V;;{a, b};1;1"/>
+        <listEntry value="R;;{r1, r2, r3};1;1"/>
+        <listEntry value="V;;{a, b, c};1;1"/>
     </listAttribute>
-    <stringAttribute key="modelParameterContraint" value="/\ coord_epoch &lt; 3&#13;&#10;/\ start_stop_ctr &lt; 3"/>
+    <stringAttribute key="modelParameterContraint" value="/\ coord_epoch &lt; 4&#13;&#10;/\ start_stop_ctr &lt; 4"/>
     <listAttribute key="modelParameterDefinitions"/>
     <stringAttribute key="modelParameterModelValues" value="{}"/>
     <stringAttribute key="modelParameterNewDefinitions" value=""/>
