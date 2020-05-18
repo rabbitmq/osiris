@@ -24,6 +24,7 @@
                     retention => [osiris:retention_spec()],
                     atom() => term()}.
 -opaque state() :: #?MODULE{}.
+-type mfarg() :: {module(), atom(), list()}.
 
 -type offset() :: non_neg_integer().
 -type epoch() :: non_neg_integer().
@@ -114,7 +115,7 @@ register_offset_listener(Pid, Offset) ->
 %% Registers a one-off offset listener that will send an `{osiris_offset, offset()}'
 %% message when the osiris cluster committed offset moves beyond the provided offset
 %% @end
--spec register_offset_listener(pid(), offset(), mfa() | undefined) -> ok.
+-spec register_offset_listener(pid(), offset(), mfarg() | undefined) -> ok.
 register_offset_listener(Pid, Offset, EvtFormatter) ->
     Msg = {'$gen_cast', {register_offset_listener, self(),
                          EvtFormatter, Offset}},
