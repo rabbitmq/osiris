@@ -15,10 +15,8 @@ ct.coverdata
 test/ct.cover.spec
 _build
 
-rabbitmq_rtopic_exchange.d
+osiris.d
 *.plt
 *.d
 
 *.jar
-
-

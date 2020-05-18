@@ -1,8 +1,8 @@
-# Contributing to Ra
+# Contributing to Osiris
 
 ## Overview
 
-Ra is a project under heavy development, so consider discussing your idea with
+Osiris is a very young project under heavy development, so consider discussing your idea with
 the maintainers on the RabbitMQ mailing list, rabbitmq-users.
 
 The process is fairly standard and straightforward:
@@ -17,16 +17,22 @@ The process is fairly standard and straightforward:
 
 ## Building
 
-Ra uses [erlang.mk](https://erlang.mk/) for build system. Build it with
+Osiris uses [erlang.mk](https://erlang.mk/) for build system. Build it with
 
-    make
+``` shell
+make
+```
 
 Clean compilation artifacts with
 
-    make clean
+``` shell
+make clean
+```
 
 ## Running Tests
 
-    make tests
+```
+make tests
+```
 
 and then open `logs/index.html` to see test run results.
