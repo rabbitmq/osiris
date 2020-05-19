@@ -80,7 +80,7 @@ start(Node, Config = #{name := Name}) when is_list(Name) ->
     supervisor:start_child({?SUP, Node},
                            #{id => Name,
                              start => {?MODULE, start_link, [Config]},
-                             restart => transient,
+                             restart => temporary,
                              shutdown => 5000,
                              type => worker,
                              modules => [?MODULE]}) .
