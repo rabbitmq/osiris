@@ -107,8 +107,9 @@ cluster_write(Config) ->
               replica_nodes => Replicas},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     ok = osiris:write(Leader, 42, <<"mah-data">>),
+    ok = osiris:write(Leader, 43, <<"mah-data2">>),
     receive
-        {osiris_written, _, [42]} ->
+        {osiris_written, _, [42, 43]} ->
             ok
     after 2000 ->
               flush(),
@@ -119,7 +120,8 @@ cluster_write(Config) ->
           LeaderNode,
           fun () ->
                   {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
-                  {[{0, <<"mah-data">>}], _Log} = osiris_log:read_chunk_parsed(Log0),
+                  {[{0, <<"mah-data">>},
+                    {1,  <<"mah-data2">>}], _Log} = osiris_log:read_chunk_parsed(Log0),
                   Self ! read_data_ok
           end),
     receive
@@ -315,10 +317,10 @@ read_validate_single_node(Config) ->
     {ok, #{leader_pid := Leader,
            replica_pids := []}} = osiris:start_cluster(Conf0),
     timer:sleep(500),
-    % start_profile(Config, [osiris_writer, gen_batch_server,
-    %                        osiris_log, lists, file]),
+    start_profile(Config, [osiris_writer, gen_batch_server,
+                           osiris_log, lists, file]),
     write_n(Leader, Num, #{}),
-    % stop_profile(Config),
+    stop_profile(Config),
     {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
 
     {Time, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
@@ -328,12 +330,15 @@ read_validate_single_node(Config) ->
 
 
 read_validate(Config) ->
+    ValidateRead = false,
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    Num = 1000000,
+    NumWriters = 2,
+    Num = 1000000 * NumWriters,
     Replicas = [start_slave(N, PrivDir) || N <- [r1, r2]],
     Conf0 = #{name => Name,
               epoch => 1,
+              retention => [{max_bytes, 1000000}],
               leader_node => node(),
               replica_nodes => Replicas},
     {ok, #{leader_pid := Leader,
@@ -344,16 +349,19 @@ read_validate(Config) ->
     timer:sleep(500),
     {Time, _} = timer:tc(fun () ->
                                  Self = self(),
-                                 spawn(fun () ->
-                                               write_n(Leader, Num div 2, #{}),
-                                               Self ! done
-                                       end),
-                                 write_n(Leader, Num div 2, #{}),
-                                 receive
-                                     done -> ok
-                                 after 1000 * 60 ->
-                                           exit(blah)
-                                 end
+                                 N = Num div NumWriters,
+                                 [begin
+                                      spawn(fun () ->
+                                                    write_n(Leader, N div 2, #{}),
+                                                    Self ! done
+                                            end),
+                                      write_n(Leader, N div 2, #{}),
+                                      receive
+                                          done -> ok
+                                      after 1000 * 60 ->
+                                                exit(blah)
+                                      end
+                                  end || _ <- lists:seq(1, NumWriters)]
                          end),
     {_, BinAfter} = erlang:process_info(Leader, binary),
     {_, GarbAfter} = erlang:process_info(Leader, garbage_collection),
@@ -370,22 +378,26 @@ read_validate(Config) ->
     [begin
          ct:pal("~w counters ~p", [N, rpc:call(N, osiris_counters, overview, [])])
      end || N <- Replicas],
-    {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
-    {_, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
+    case ValidateRead of
+        true ->
+            {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
+            {_, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
 
-    %% test reading on slave
-    R = hd(ReplicaPids),
-    Self = self(),
-    _ = spawn(node(R),
-          fun() ->
-                  {ok, RLog0} = osiris_writer:init_data_reader(R, {0, empty}),
-                  {_, _} = timer:tc(fun() -> validate_read(Num, RLog0) end),
-                  Self ! validate_read_done
-          end),
-    receive
-        validate_read_done -> ok
-    after 30000 ->
-              exit(validate_read_done_timeout)
+            %% test reading on slave
+            R = hd(ReplicaPids),
+            Self = self(),
+            _ = spawn(node(R),
+                      fun() ->
+                              {ok, RLog0} = osiris_writer:init_data_reader(R, {0, empty}),
+                              {_, _} = timer:tc(fun() -> validate_read(Num, RLog0) end),
+                              Self ! validate_read_done
+                      end),
+            receive
+                validate_read_done -> ok
+            after 30000 ->
+                      exit(validate_read_done_timeout)
+            end;
+        false -> ok
     end,
 
     [slave:stop(N) || N <- Replicas],
@@ -526,8 +538,11 @@ diverged_replica(Config) ->
     [osiris:write(LeaderE3Pid, N, [<<N:64/integer>>])
      || N <- lists:seq(201, 300)],
     wait_for_written(lists:seq(201, 300)),
+    timer:sleep(1000),
 
+    print_counters(),
     ok = osiris:stop_cluster(ConfE3),
+
 
     %% validate replication etc takes place
     [Idx1, Idx2, Idx3] =
@@ -585,6 +600,7 @@ write_n(Pid, N, Next, BinSize, Written) ->
     write_n(Pid, N, Next + 1, BinSize, Written#{Next => ok}).
 
 wait_for_written(Written0) when is_list(Written0) ->
+    % ct:pal("wait_for_written ~w", [Written0]),
     wait_for_written(lists:foldl(fun(N, Acc) ->
                                          maps:put(N, ok, Acc)
                                  end, #{}, Written0));
@@ -592,7 +608,7 @@ wait_for_written(Written0) ->
     receive
         {osiris_written, _Name, Corrs} ->
             Written = maps:without(Corrs, Written0),
-            % ct:pal("written ~w", [length(Corrs)]),
+            % ct:pal("written ~w", [Corrs]),
             case maps:size(Written) of
                 0 ->
                     ok;
@@ -601,6 +617,7 @@ wait_for_written(Written0) ->
             end
     after 1000 * 60 ->
               flush(),
+              print_counters(),
               exit(osiris_written_timeout)
     end.
 
@@ -674,3 +691,7 @@ stop_profile(Config) ->
     lg_callgrind:profile_many(Name ++ ".gz.*", Name ++ ".out",#{}),
     ok.
 
+print_counters() ->
+    [begin
+         ct:pal("~w counters ~p", [N, rpc:call(N, osiris_counters, overview, [])])
+     end || N <- nodes()].

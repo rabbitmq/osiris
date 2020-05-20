@@ -254,7 +254,8 @@ tail_info(#?MODULE{mode = #write{tail_info = TailInfo}}) ->
     TailInfo.
 
 % -spec
-init_acceptor(EpochOffsets0, #{dir := Dir} = Conf) ->
+init_acceptor(EpochOffsets0, #{name := Name,
+                               dir := Dir} = Conf) ->
     %% truncate to first common last epoch offset
     %% * if the last local chunk offset has the same epoch but is lower
     %% than the last chunk offset then just attach at next offset.
@@ -266,7 +267,7 @@ init_acceptor(EpochOffsets0, #{dir := Dir} = Conf) ->
 
     %% then truncate to
     SegInfos = build_log_overview(Dir),
-    ok = truncate_to(EpochOffsets, SegInfos),
+    ok = truncate_to(Name, EpochOffsets, SegInfos),
     %% after truncation we can do normal init
     init(Conf).
 
@@ -298,18 +299,20 @@ delete_segment(#seg_info{file = File,
     ok = file:delete(Index),
     ok.
 
-truncate_to([], SegInfos) ->
+truncate_to(_Name, [], SegInfos) ->
     %% ?????  this means the entire log is out
     [begin
          ok = delete_segment(I)
      end || I <- SegInfos],
     ok;
-truncate_to([{E, ChId} | NextEOs], SegInfos) ->
+truncate_to(Name, [{E, ChId} | NextEOs], SegInfos) ->
     case find_segment_for_offset(ChId, SegInfos) of
         not_found ->
-            truncate_to(NextEOs, SegInfos);
+            truncate_to(Name, NextEOs, SegInfos);
         {found, #seg_info{file = File,
                           index = Idx}} ->
+            ?INFO("osiris_replica: ~s on node ~s truncating to chunk id ~b in epoch ~b",
+                  [Name, node(), ChId, E]),
             %% this is the inclusive case
             %% next offset needs to be a chunk offset
             %% if it is not found we know the offset requested isn't a chunk
@@ -338,7 +341,7 @@ truncate_to([{E, ChId} | NextEOs], SegInfos) ->
                             I#seg_info.first#chunk_info.id > ChId],
                     ok;
                 _ ->
-                    truncate_to(NextEOs, SegInfos)
+                    truncate_to(Name, NextEOs, SegInfos)
             end
     end.
 

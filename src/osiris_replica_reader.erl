@@ -131,6 +131,7 @@ handle_cast({more_data, _LastOffset},
                    socket = Sock,
                    committed_offset = Last,
                    counter = Cnt} = State0) ->
+    % ?DEBUG("MORE DATA ~b", [_LastOffset]),
     #state{log = Log} = State = do_sendfile(Sock, State0, Log0),
     NextOffs = osiris_log:next_offset(Log),
     ok = osiris_writer:register_data_listener(LeaderPid, NextOffs),

@@ -288,7 +288,7 @@ handle_cast(Msg, State) ->
 %%--------------------------------------------------------------------
 handle_info(force_gc, #?MODULE{cfg = #cfg{gc_interval = Interval},
                                counter = Cnt} = State) ->
-    garbage_collect(),
+    % garbage_collect(),
     counters:add(Cnt, ?C_FORCED_GCS, 1),
     erlang:send_after(Interval, self(), force_gc),
     {noreply, State};
@@ -317,6 +317,7 @@ handle_info({tcp, Socket, Bin},
     case Acks of
         [] -> ok;
         _ ->
+            % ?DEBUG("replica ~w acking ~w", [node(), lists:max(Acks)]),
             ok = osiris_writer:ack(LeaderPid, lists:max(Acks))
     end,
     {noreply, State#?MODULE{log = Log,
