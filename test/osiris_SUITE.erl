@@ -534,7 +534,7 @@ diverged_replica(Config) ->
     [begin
          {ok, D} = file:read_file(filename:join([PrivDir, N,
                                                  ?FUNCTION_NAME,
-                                                    "00000000000000000000.index"])),
+                                                 "00000000000000000000.index"])),
          D
      end || N <- Nodes],
     ?assertEqual(Idx1, Idx2),
@@ -544,7 +544,7 @@ diverged_replica(Config) ->
     [begin
          {ok, D} = file:read_file(filename:join([PrivDir, N,
                                                  ?FUNCTION_NAME,
-                                                    "00000000000000000000.segment"])),
+                                                 "00000000000000000000.segment"])),
          D
      end || N <- Nodes],
     ?assertEqual(Seg1, Seg2),

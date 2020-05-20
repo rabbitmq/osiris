@@ -83,8 +83,9 @@ init_data_reader(Pid, TailInfo) when node(Pid) == node() ->
 register_data_listener(Pid, Offset) ->
     ok = gen_batch_server:cast(Pid, {register_data_listener, self(), Offset}).
 
-ack(LeaderPid, Offsets) ->
-    gen_batch_server:cast(LeaderPid, {ack, node(), Offsets}).
+-spec ack(identifier(), osiris:offset()) -> ok.
+ack(LeaderPid, Offset) when is_integer(Offset) andalso Offset >= 0 ->
+    gen_batch_server:cast(LeaderPid, {ack, node(), Offset}).
 
 write(Pid, Sender, Corr, Data) ->
     gen_batch_server:cast(Pid, {write, Sender, Corr, Data}).

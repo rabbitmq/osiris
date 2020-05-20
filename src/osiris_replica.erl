@@ -143,7 +143,7 @@ init(#{leader_pid := LeaderPid,
         {_, LastChId} ->
             %% need to ack last chunk back to leader so that it can
             %% re-discover the committed offset
-            osiris_writer:ack(LeaderPid, [LastChId])
+            osiris_writer:ack(LeaderPid, LastChId)
     end,
     %% spawn reader process on leader node
     {ok, HostName} = inet:gethostname(),
@@ -214,7 +214,7 @@ accept(LSock, Process) ->
     %% TODO what if we have more than 1 connection?
     {ok, Sock} = gen_tcp:accept(LSock),
 
-    io:format("sock opts ~w", [inet:getopts(Sock, [buffer, recbuf])]),
+    ?DEBUG("~s: sock opts ~w", [?MODULE, inet:getopts(Sock, [buffer, recbuf])]),
     Process ! {socket, Sock},
     gen_tcp:controlling_process(Sock, Process),
     accept(LSock, Process).
@@ -317,7 +317,7 @@ handle_info({tcp, Socket, Bin},
     case Acks of
         [] -> ok;
         _ ->
-            ok = osiris_writer:ack(LeaderPid, lists:reverse(Acks))
+            ok = osiris_writer:ack(LeaderPid, lists:max(Acks))
     end,
     {noreply, State#?MODULE{log = Log,
                             parse_state = ParseState}};

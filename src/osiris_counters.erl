@@ -14,6 +14,7 @@
 -record(?MODULE, {cfg :: #cfg{}}).
 
 -opaque state() :: #?MODULE{}.
+-type name() :: term().
 
 -export_type([
               state/0
@@ -24,7 +25,7 @@ init() ->
     _ = ets:new(?MODULE, [set, named_table, public]),
     ok.
 
--spec new(term(),  [atom()]) -> counters:counters_ref().
+-spec new(name(),  [atom()]) -> counters:counters_ref().
 new(Name, Fields)
   when is_list(Fields) ->
     Size = length(Fields),
@@ -32,8 +33,7 @@ new(Name, Fields)
     ok = register_counter(Name, CRef, Fields),
     CRef.
 
--spec fetch(atom()) ->
-    undefined | counters:counters_ref().
+-spec fetch(name()) -> undefined | counters:counters_ref().
 fetch(Name) ->
     case ets:lookup(?MODULE, Name) of
         [{Name, Ref, _}] ->
@@ -48,7 +48,7 @@ delete(Name) ->
     ok.
 
 -spec overview() ->
-    #{atom() => #{atom() => non_neg_integer()}}.
+    #{name() => #{atom() => non_neg_integer()}}.
 overview() ->
     ets:foldl(
       fun({Name, Ref, Fields}, Acc) ->
