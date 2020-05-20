@@ -330,7 +330,6 @@ read_validate_single_node(Config) ->
 
 
 read_validate(Config) ->
-    ValidateRead = false,
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
     NumWriters = 2,
@@ -378,26 +377,23 @@ read_validate(Config) ->
     [begin
          ct:pal("~w counters ~p", [N, rpc:call(N, osiris_counters, overview, [])])
      end || N <- Replicas],
-    case ValidateRead of
-        true ->
-            {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
-            {_, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
 
-            %% test reading on slave
-            R = hd(ReplicaPids),
-            Self = self(),
-            _ = spawn(node(R),
-                      fun() ->
-                              {ok, RLog0} = osiris_writer:init_data_reader(R, {0, empty}),
-                              {_, _} = timer:tc(fun() -> validate_read(Num, RLog0) end),
-                              Self ! validate_read_done
-                      end),
-            receive
-                validate_read_done -> ok
-            after 30000 ->
-                      exit(validate_read_done_timeout)
-            end;
-        false -> ok
+    {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
+    {_, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
+
+    %% test reading on slave
+    R = hd(ReplicaPids),
+    Self = self(),
+    _ = spawn(node(R),
+              fun() ->
+                      {ok, RLog0} = osiris_writer:init_data_reader(R, {0, empty}),
+                      {_, _} = timer:tc(fun() -> validate_read(Num, RLog0) end),
+                      Self ! validate_read_done
+              end),
+    receive
+        validate_read_done -> ok
+    after 30000 ->
+              exit(validate_read_done_timeout)
     end,
 
     [slave:stop(N) || N <- Replicas],
