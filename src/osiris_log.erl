@@ -663,9 +663,13 @@ close(_State) ->
 
 delete_directory(Config) ->
     Dir = directory(Config),
-    {ok, Files} = file:list_dir(Dir),
-    [ok = file:delete(filename:join(Dir, F)) || F <- Files],
-    ok = file:del_dir(Dir).
+    case file:list_dir(Dir) of
+        {ok, Files} ->
+            [ok = file:delete(filename:join(Dir, F)) || F <- Files],
+            ok = file:del_dir(Dir);
+        {error, enoent} ->
+            ok
+    end.
 
 %% Internal
 
