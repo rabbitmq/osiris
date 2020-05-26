@@ -27,7 +27,8 @@
                 leader_pid :: pid(),
                 counter :: counters:counters_ref(),
                 counter_id :: term(),
-                committed_offset = -1 :: -1 | osiris:offset()}).
+                committed_offset = -1 :: -1 | osiris:offset(),
+                offset_listener :: undefined | osiris:offset()}).
 
 -define(COUNTER_FIELDS,
         [chunks_sent,
@@ -126,21 +127,28 @@ handle_call(_Request, _From, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_cast({more_data, _LastOffset},
-            #state{log = Log0,
-                   leader_pid = LeaderPid,
-                   socket = Sock,
-                   committed_offset = Last,
-                   counter = Cnt} = State0) ->
+            #state{leader_pid = LeaderPid
+                   } = State0) ->
     % ?DEBUG("MORE DATA ~b", [_LastOffset]),
-    #state{log = Log} = State = do_sendfile(Sock, State0, Log0),
+    #state{log = Log} = State = do_sendfile(State0),
     NextOffs = osiris_log:next_offset(Log),
     ok = osiris_writer:register_data_listener(LeaderPid, NextOffs),
-    ok = osiris:register_offset_listener(LeaderPid, Last + 1,
-                                         {?MODULE, formatter, []}),
-    ok = counters:add(Cnt, ?C_OFFSET_LISTENERS, 1),
-    {noreply, State};
+    {noreply, maybe_register_offset_listener(State)};
 handle_cast(stop, State) ->
     {stop, normal, State}.
+
+maybe_register_offset_listener(#state{leader_pid = LeaderPid,
+                                      committed_offset = COffs,
+                                      counter = Cnt,
+                                      offset_listener = undefined} = State) ->
+    ok = counters:add(Cnt, ?C_OFFSET_LISTENERS, 1),
+    ok = osiris:register_offset_listener(LeaderPid,
+                                         COffs + 1,
+                                         {?MODULE, formatter, []}),
+    State#state{offset_listener = COffs + 1};
+maybe_register_offset_listener(State) ->
+    State.
+
 
 
 %%--------------------------------------------------------------------
@@ -153,12 +161,9 @@ handle_cast(stop, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info({osiris_offset, _, _Offs},
-            #state{leader_pid = LeaderPid,
-                   committed_offset = Last} = State0) ->
-    State = maybe_send_committed_offset(State0),
-    ok = osiris:register_offset_listener(LeaderPid, Last + 1,
-                                         {?MODULE, formatter, []}),
+handle_info({osiris_offset, _, _Offs}, State0) ->
+    State1 = maybe_send_committed_offset(State0),
+    State = maybe_register_offset_listener(State1#state{offset_listener = undefined}),
     {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -193,14 +198,16 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-do_sendfile(Sock, #state{counter = Cnt} = State0, Log0) ->
+do_sendfile(#state{socket = Sock,
+                   counter = Cnt,
+                   log = Log0} = State0) ->
     case osiris_log:send_file(Sock, Log0) of
         {ok, Log} ->
             Offset = osiris_log:next_offset(Log) - 1,
             ok = counters:add(Cnt, ?C_CHUNKS_SENT, 1),
             ok = counters:put(Cnt, ?C_OFFSET, Offset),
-            State = maybe_send_committed_offset(State0),
-            do_sendfile(Sock, State, Log);
+            State = maybe_send_committed_offset(State0#state{log = Log}),
+            do_sendfile(State);
         {end_of_stream, Log} ->
             maybe_send_committed_offset(State0#state{log = Log})
     end.

@@ -943,7 +943,7 @@ write_chunk(Chunk, Epoch, NumRecords,
                      mode = #write{segment_size = SegSize,
                                    tail_info = {Next, _}} = Write} = State) ->
     NextOffset = Next + NumRecords,
-    Size = erlang:iolist_size(Chunk),
+    Size = iolist_size(Chunk),
     {ok, Cur} = file:position(Fd, cur),
     ok = file:write(Fd, Chunk),
     ok = file:write(IdxFd, <<Next:64/unsigned,
