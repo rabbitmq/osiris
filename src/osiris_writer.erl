@@ -72,7 +72,7 @@ delete(#{leader_node := Leader} = Config) ->
 start_link(Config) ->
     Mod = ?MODULE,
     Opts = [{reversed_batch, true}],
-    gen_batch_server:start_link({local, Mod}, Mod, Config, Opts).
+    gen_batch_server:start_link(undefined, Mod, Config, Opts).
     % gen_batch_server:start_link(?MODULE, Config).
 
 overview(Pid) when node(Pid) == node() ->
