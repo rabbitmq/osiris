@@ -317,10 +317,10 @@ read_validate_single_node(Config) ->
     {ok, #{leader_pid := Leader,
            replica_pids := []}} = osiris:start_cluster(Conf0),
     timer:sleep(500),
-    start_profile(Config, [osiris_writer, gen_batch_server,
-                           osiris_log, lists, file]),
+    % start_profile(Config, [osiris_writer, gen_batch_server,
+    %                        osiris_log, lists, file]),
     write_n(Leader, Num, #{}),
-    stop_profile(Config),
+    % stop_profile(Config),
     {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
 
     {Time, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
@@ -669,23 +669,23 @@ search_paths() ->
     lists:filter(fun (P) -> string:prefix(P, Ld) =:= nomatch end,
                  code:get_path()).
 
-start_profile(Config, Modules) ->
-    Dir = ?config(priv_dir, Config),
-    Case = ?config(test_case, Config),
-    GzFile = filename:join([Dir, "lg_" ++ atom_to_list(Case) ++ ".gz"]),
-    ct:pal("Profiling to ~p~n", [GzFile]),
+% start_profile(Config, Modules) ->
+%     Dir = ?config(priv_dir, Config),
+%     Case = ?config(test_case, Config),
+%     GzFile = filename:join([Dir, "lg_" ++ atom_to_list(Case) ++ ".gz"]),
+%     ct:pal("Profiling to ~p~n", [GzFile]),
 
-    lg:trace(Modules, lg_file_tracer,
-             GzFile, #{running => false, mode => profile}).
+%     lg:trace(Modules, lg_file_tracer,
+%              GzFile, #{running => false, mode => profile}).
 
-stop_profile(Config) ->
-    Case = ?config(test_case, Config),
-    ct:pal("Stopping profiling for ~p~n", [Case]),
-    lg:stop(),
-    Dir = ?config(priv_dir, Config),
-    Name = filename:join([Dir, "lg_" ++ atom_to_list(Case)]),
-    lg_callgrind:profile_many(Name ++ ".gz.*", Name ++ ".out",#{}),
-    ok.
+% stop_profile(Config) ->
+%     Case = ?config(test_case, Config),
+%     ct:pal("Stopping profiling for ~p~n", [Case]),
+%     lg:stop(),
+%     Dir = ?config(priv_dir, Config),
+%     Name = filename:join([Dir, "lg_" ++ atom_to_list(Case)]),
+%     lg_callgrind:profile_many(Name ++ ".gz.*", Name ++ ".out",#{}),
+%     ok.
 
 print_counters() ->
     [begin

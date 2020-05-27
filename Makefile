@@ -10,10 +10,11 @@ define PROJECT_ENV
 endef
 
 LOCAL_DEPS = sasl crypto
-dep_gen_batch_server = hex 0.8.2
+dep_gen_batch_server = hex 0.8.3
 DEPS = gen_batch_server
 
-TEST_DEPS=eunit_formatters looking_glass
+# TEST_DEPS=eunit_formatters looking_glass
+TEST_DEPS=eunit_formatters
 
 dep_looking_glass = git https://github.com/rabbitmq/looking-glass.git master
 # PLT_APPS += eunit syntax_tools erts kernel stdlib common_test inets ssh ssl meck looking_glass gen_batch_server inet_tcp_proxy
