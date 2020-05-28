@@ -36,7 +36,7 @@
 -define(LOG_HEADER_SIZE, 8).
 
 -define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
--define(INDEX_RECORD_SIZE_B, 20).
+-define(INDEX_RECORD_SIZE_B, 28).
 -define(MAGIC, 5).
 %% chunk format version
 -define(VERSION, 0).
@@ -210,15 +210,16 @@ write([], #?MODULE{mode = #write{}} = State) ->
 write(Entries, #?MODULE{cfg = #cfg{},
                         mode = #write{current_epoch = Epoch,
                                       tail_info = {Next, _}}} = State) ->
-    {ChunkData, NumRecords} = make_chunk(Entries, Epoch, Next),
-    write_chunk(ChunkData, Epoch, NumRecords, State).
+    Timestamp = erlang:system_time(millisecond),
+    {ChunkData, NumRecords} = make_chunk(Entries, Timestamp, Epoch, Next),
+    write_chunk(ChunkData, Timestamp, Epoch, NumRecords, State).
 
 -spec accept_chunk(iodata(), state()) -> state().
 accept_chunk([<<?MAGIC:4/unsigned,
                 ?VERSION:4/unsigned,
                 _NumEntries:16/unsigned,
                 NumRecords:32/unsigned,
-                _Timestamp:64/signed,
+                Timestamp:64/signed,
                 Epoch:64/unsigned,
                 Next:64/unsigned,
                 _Crc:32/integer,
@@ -226,7 +227,7 @@ accept_chunk([<<?MAGIC:4/unsigned,
                 _/binary>> | _] = Chunk,
              #?MODULE{cfg = #cfg{},
                       mode = #write{tail_info = {Next, _}}} = State) ->
-    write_chunk(Chunk, Epoch, NumRecords, State);
+    write_chunk(Chunk, Timestamp, Epoch, NumRecords, State);
 accept_chunk(Binary, State)
   when is_binary(Binary) ->
     accept_chunk([Binary], State);
@@ -282,6 +283,7 @@ chunk_id_index_scan0(Fd, ChunkId) ->
     {ok, IdxPos} = file:position(Fd, cur),
     case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
         {ok, <<ChunkId:64/unsigned,
+               _Timestamp:64/signed,
                Epoch:64/unsigned,
                FilePos:32/unsigned>>} ->
             ok = file:close(Fd),
@@ -712,6 +714,7 @@ scan_index(eof, IdxFd, _Fd, _) ->
     ok = file:close(IdxFd),
     eof;
 scan_index({ok, <<O:64/unsigned,
+                  _T:64/signed,
                   E:64/unsigned,
                   Pos:32/unsigned>>}, IdxFd, Fd, Offset) ->
     ok = file:close(IdxFd),
@@ -723,9 +726,11 @@ scan_index({ok, <<O:64/unsigned,
             {O + Num, eof}
     end;
 scan_index({ok, <<O:64/unsigned,
+                  _T:64/signed,
                   _E:64/unsigned,
                   Pos:32/unsigned,
                   ONext:64/unsigned,
+                  _:64/signed,
                   _:64/unsigned,
                   _:32/unsigned>>},
            IdxFd, Fd, Offset)  ->
@@ -785,6 +790,7 @@ build_log_overview0([IdxFile | IdxFiles], Acc0) ->
             0 = (Pos - ?IDX_HEADER_SIZE) rem ?INDEX_RECORD_SIZE_B,
             case file:read(IdxFd, ?INDEX_RECORD_SIZE_B) of
                 {ok, <<_Offset:64/unsigned,
+                       _Timestamp:64/signed,
                       _Epoch:64/unsigned,
                       LastChunkPos:32/unsigned>>} ->
                     ok = file:close(IdxFd),
@@ -898,15 +904,17 @@ last_offset_epoch(eof, Fd, Acc) ->
     ok = file:close(Fd),
     Acc;
 last_offset_epoch({ok, <<O:64/unsigned,
+                         _T:64/signed,
                          CurEpoch:64/unsigned,
                          _:32/unsigned>>},
-                   Fd, {CurEpoch, _LastOffs, Acc})  ->
+                  Fd, {CurEpoch, _LastOffs, Acc})  ->
     %% epoch is unchanged
     last_offset_epoch(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
                       {CurEpoch, O, Acc});
 last_offset_epoch({ok, <<O:64/unsigned,
-                    Epoch:64/unsigned,
-                    _:32/unsigned>>}, Fd, {CurEpoch, LastOffs, Acc})
+                         _T:64/signed,
+                         Epoch:64/unsigned,
+                         _:32/unsigned>>}, Fd, {CurEpoch, LastOffs, Acc})
   when Epoch > CurEpoch ->
     last_offset_epoch(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
                       {Epoch, O, [{CurEpoch, LastOffs} |  Acc]}).
@@ -917,7 +925,7 @@ segment_from_index_file(IdxFile) ->
     SegFile0 = filename:join([BaseDir, Basename]),
     SegFile0 ++ ".segment".
 
-make_chunk(Blobs, Epoch, Next) ->
+make_chunk(Blobs, Timestamp, Epoch, Next) ->
     {NumRecords, IoList} =
     lists:foldr(fun ({batch, NumRecords, CompType, B}, {Count, Acc}) ->
                         Data = [<<1:1, %% batch record type
@@ -933,7 +941,6 @@ make_chunk(Blobs, Epoch, Next) ->
                 end, {0, []}, Blobs),
     Bin = IoList,
     Size = erlang:iolist_size(Bin),
-    Timestamp = erlang:system_time(millisecond),
     {[<<?MAGIC:4/unsigned,
         ?VERSION:4/unsigned,
         (length(Blobs)):16/unsigned,
@@ -945,10 +952,10 @@ make_chunk(Blobs, Epoch, Next) ->
         Size:32/unsigned>>,
       Bin], NumRecords}.
 
-write_chunk(Chunk, Epoch, NumRecords,
+write_chunk(Chunk, Timestamp, Epoch, NumRecords,
             #?MODULE{fd = undefined} = State) ->
-    write_chunk(Chunk, Epoch, NumRecords, open_new_segment(State));
-write_chunk(Chunk, Epoch, NumRecords,
+    write_chunk(Chunk, Timestamp, Epoch, NumRecords, open_new_segment(State));
+write_chunk(Chunk, Timestamp, Epoch, NumRecords,
             #?MODULE{cfg = #cfg{max_segment_size = MaxSize},
                      fd = Fd,
                      index_fd = IdxFd,
@@ -959,6 +966,7 @@ write_chunk(Chunk, Epoch, NumRecords,
     {ok, Cur} = file:position(Fd, cur),
     ok = file:write(Fd, Chunk),
     ok = file:write(IdxFd, <<Next:64/unsigned,
+                             Timestamp:64/signed,
                              Epoch:64/unsigned,
                              Cur:32/unsigned>>),
     case file:position(Fd, cur) of
