@@ -6,7 +6,7 @@
 -define(MAGIC, 5).
 %% format version
 -define(VERSION, 0).
--define(HEADER_SIZE, 31).
+-define(HEADER_SIZE, 39).
 
 -define(SUP, osiris_server_sup).
 
@@ -377,6 +377,7 @@ parse_chunk(<<?MAGIC:4/unsigned,
               ?VERSION:4/unsigned,
               _NumEntries:16/unsigned,
               _NumRecords:32/unsigned,
+               _Timestamp:64/signed,
                 _Epoch:64/unsigned,
               FirstOffset:64/unsigned,
               _Crc:32/integer,
@@ -393,7 +394,8 @@ parse_chunk(<<?MAGIC:4/unsigned,
               ?VERSION:4/unsigned,
               _NumEntries:16/unsigned,
               _NumRecords:32/unsigned,
-                _Epoch:64/unsigned,
+              _Timestamp:64/signed,
+              _Epoch:64/unsigned,
               FirstOffset:64/unsigned,
               _Crc:32/integer,
               Size:32/unsigned,

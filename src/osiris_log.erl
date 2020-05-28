@@ -40,7 +40,7 @@
 -define(MAGIC, 5).
 %% chunk format version
 -define(VERSION, 0).
--define(HEADER_SIZE_B, 31).
+-define(HEADER_SIZE_B, 39).
 -define(FILE_OPTS_WRITE, [raw, binary, write, read]).
 
 %% Data format
@@ -51,6 +51,7 @@
 %%   ProtoVersion:4/unsigned,
 %%   NumEntries:16/unsigned, %% need some kind of limit on chunk sizes 64k is a good start
 %%   NumRecords:32/unsigned, %% total including all sub batch entries
+%%   Timestamp:64/signed, %% millisecond posix (ish) timestamp
 %%   Epoch:64/unsigned,
 %%   ChunkFirstOffset:64/unsigned,
 %%   ChunkCrc:32/integer, %% CRC for the records portion of the data
@@ -217,6 +218,7 @@ accept_chunk([<<?MAGIC:4/unsigned,
                 ?VERSION:4/unsigned,
                 _NumEntries:16/unsigned,
                 NumRecords:32/unsigned,
+                _Timestamp:64/signed,
                 Epoch:64/unsigned,
                 Next:64/unsigned,
                 _Crc:32/integer,
@@ -232,6 +234,7 @@ accept_chunk([<<?MAGIC:4/unsigned,
                 ?VERSION:4/unsigned,
                 _NumEntries:16/unsigned,
                 _NumRecords:32/unsigned,
+                _Timestamp:64/signed,
                 _Epoch:64/unsigned,
                 Next:64/unsigned,
                 _Crc:32/integer,
@@ -407,6 +410,7 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
                                        ?VERSION:4/unsigned,
                                        _NumEntries:16/unsigned,
                                        _NumRecords:32/unsigned,
+                                       _Timestamp:64/signed,
                                        PrevE:64/unsigned,
                                        PrevO:64/unsigned,
                                        _Crc:32/integer,
@@ -419,6 +423,7 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
                                        ?VERSION:4/unsigned,
                                        _NumEntries:16/unsigned,
                                        _NumRecords:32/unsigned,
+                                       _Timestamp:64/signed,
                                        OtherE:64/unsigned,
                                        PrevO:64/unsigned,
                                        _Crc:32/integer,
@@ -554,6 +559,7 @@ read_chunk(#?MODULE{cfg = #cfg{directory = Dir},
                        ?VERSION:4/unsigned,
                        _NumEntries:16/unsigned,
                        NumRecords:32/unsigned,
+                       _Timestamp:64/signed,
                        Epoch:64/unsigned,
                        Offs:64/unsigned,
                        _Crc:32/integer,
@@ -621,6 +627,7 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                        ?VERSION:4/unsigned,
                        _NumEntries:16/unsigned,
                        NumRecords:32/unsigned,
+                       _Timestamp:64/integer,
                        _Epoch:64/unsigned,
                        NextOffs:64/unsigned,
                        _Crc:32/integer,
@@ -679,6 +686,7 @@ header_info(Fd, Pos) ->
            ?VERSION:4/unsigned,
            _NumEntries:16/unsigned,
            Num:32/unsigned,
+           _Timestamp:64/signed,
            Epoch:64/unsigned,
            Offset:64/unsigned,
            _Crc:32/integer,
@@ -799,6 +807,7 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
                ?VERSION:4/unsigned,
                _NumEntries:16/unsigned,
                FirstNumRecords:32/unsigned,
+               _FirstTimestamp:64/signed,
                FirstEpoch:64/unsigned,
                FirstChId:64/unsigned,
                _/binary>>} = file:read(Fd, ?HEADER_SIZE_B),
@@ -807,6 +816,7 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
                ?VERSION:4/unsigned,
                _LastNumEntries:16/unsigned,
                LastNumRecords:32/unsigned,
+               _LastTimestamp:64/signed,
                LastEpoch:64/unsigned,
                LastChId:64/unsigned,
                _/binary>>} = file:read(Fd, ?HEADER_SIZE_B),
@@ -923,10 +933,12 @@ make_chunk(Blobs, Epoch, Next) ->
                 end, {0, []}, Blobs),
     Bin = IoList,
     Size = erlang:iolist_size(Bin),
+    Timestamp = erlang:system_time(millisecond),
     {[<<?MAGIC:4/unsigned,
         ?VERSION:4/unsigned,
         (length(Blobs)):16/unsigned,
         NumRecords:32/unsigned,
+        Timestamp:64/signed,
         Epoch:64/unsigned,
         Next:64/unsigned,
         0:32/integer,
