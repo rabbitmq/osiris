@@ -28,9 +28,11 @@
 
 -type offset() :: non_neg_integer().
 -type epoch() :: non_neg_integer().
+-type milliseconds() :: non_neg_integer().
 -type tail_info() :: {offset(), empty | {epoch(), offset()}}.
 -type offset_spec() :: first | last | next | {abs, offset()} | offset().
--type retention_spec() :: {max_bytes, non_neg_integer()}.
+-type retention_spec() :: {max_bytes, non_neg_integer()} |
+                          {max_age, milliseconds()}.
 
 -export_type([
               state/0,

@@ -7,6 +7,7 @@
          init/1,
          init_acceptor/2,
          write/2,
+         write/3,
          accept_chunk/2,
          next_offset/1,
          tail_info/1,
@@ -20,6 +21,8 @@
          read_chunk_parsed/1,
          committed_offset/1,
          get_current_epoch/1,
+         get_directory/1,
+         get_name/1,
          close/1,
          overview/1,
          evaluate_retention/2,
@@ -92,6 +95,7 @@
 
 %% holds static or rarely changing fields
 -record(cfg, {directory :: file:filename(),
+              name :: string(),
               max_segment_size = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer(),
               retention = [] :: [osiris:retention_spec()]
              }).
@@ -113,6 +117,7 @@
                   index_fd :: undefined | file:io_device()}).
 
 -record(chunk_info, {epoch :: epoch(),
+                     timestamp :: non_neg_integer(),
                      id :: offset(),
                      num :: non_neg_integer()}).
 
@@ -143,6 +148,7 @@ directory(#{name := Name} = Config) ->
 
 -spec init(config()) -> state().
 init(#{dir := Dir,
+       name := Name,
        epoch := Epoch} = Config) ->
     %% scan directory for segments if in write mode
     MaxSize = maps:get(max_segment_size, Config, ?DEFAULT_MAX_SEGMENT_SIZE_B),
@@ -156,6 +162,7 @@ init(#{dir := Dir,
         Err -> throw(Err)
     end,
     Cfg = #cfg{directory = Dir,
+               name = Name,
                max_segment_size = MaxSize,
                retention = Retention},
     case lists:reverse(build_log_overview(Dir)) of
@@ -202,17 +209,21 @@ init(#{dir := Dir,
                      index_fd = IdxFd}
     end.
 
-
 -spec write([iodata() | {batch, non_neg_integer(), 0, iodata()}], state()) ->
     state().
-write([], #?MODULE{mode = #write{}} = State) ->
+write(Entries, State) ->
+    Timestamp = erlang:system_time(millisecond),
+    write(Entries, Timestamp, State).
+
+-spec write([iodata() | {batch, non_neg_integer(), 0, iodata()}], 
+            integer(), state()) -> state().
+write([], _Now, #?MODULE{mode = #write{}} = State) ->
     State;
-write(Entries, #?MODULE{cfg = #cfg{},
+write(Entries, Now, #?MODULE{cfg = #cfg{},
                         mode = #write{current_epoch = Epoch,
                                       tail_info = {Next, _}}} = State) ->
-    Timestamp = erlang:system_time(millisecond),
-    {ChunkData, NumRecords} = make_chunk(Entries, Timestamp, Epoch, Next),
-    write_chunk(ChunkData, Timestamp, Epoch, NumRecords, State).
+    {ChunkData, NumRecords} = make_chunk(Entries, Now, Epoch, Next),
+    write_chunk(ChunkData, Now, Epoch, NumRecords, State).
 
 -spec accept_chunk(iodata(), state()) -> state().
 accept_chunk([<<?MAGIC:4/unsigned,
@@ -437,14 +448,16 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
             end
     end.
 
-init_data_reader_from_segment(#{dir := Dir} = Config,
+init_data_reader_from_segment(#{dir := Dir,
+                                name := Name} = Config,
                               #seg_info{file = StartSegment,
                                         index = IndexFile}, NextOffs) ->
     {ok, Fd} = file:open(StartSegment, [raw, binary, read]),
     %% TODO: next offset needs to be a chunk offset
     {_, FilePos} = scan_index(IndexFile, Fd, NextOffs),
     {ok, _Pos} = file:position(Fd, FilePos),
-    #?MODULE{cfg = #cfg{directory = Dir},
+    #?MODULE{cfg = #cfg{directory = Dir,
+                        name = Name},
              mode = #read{type = data,
                           offset_ref = maps:get(offset_ref, Config, undefined),
                           next_offset = NextOffs},
@@ -473,8 +486,7 @@ init_data_reader_from_segment(#{dir := Dir} = Config,
              empty | {From :: offset(), To :: offset()}}}.
 init_offset_reader({abs, Offs}, #{dir := Dir} = Conf) ->
     %% TODO: some unnecessary computation here
-    Range = range_from_segment_infos(
-              build_log_overview(Dir)),
+    Range = range_from_segment_infos(build_log_overview(Dir)),
     case Range of
         empty ->
             {error, {offset_out_of_range, Range}};
@@ -485,6 +497,7 @@ init_offset_reader({abs, Offs}, #{dir := Dir} = Conf) ->
             init_offset_reader(Offs, Conf)
     end;
 init_offset_reader(OffsetSpec, #{dir := Dir,
+                                 name := Name,
                                  offset_ref := OffsetRef} = Conf) ->
     SegInfo = build_log_overview(Dir),
     Range = range_from_segment_infos(SegInfo),
@@ -518,7 +531,8 @@ init_offset_reader(OffsetSpec, #{dir := Dir,
                                             IdxResult
                                     end,
                 {ok, _Pos} = file:position(Fd, FilePos),
-                {ok, #?MODULE{cfg = #cfg{directory = Dir},
+                {ok, #?MODULE{cfg = #cfg{directory = Dir,
+                                         name = Name},
                               mode = #read{type = offset,
                                            offset_ref = OffsetRef,
                                            next_offset = ChOffs},
@@ -540,6 +554,14 @@ committed_offset(#?MODULE{mode = #read{offset_ref = Ref}}) ->
 -spec get_current_epoch(state()) -> non_neg_integer().
 get_current_epoch(#?MODULE{mode = #write{current_epoch = Epoch}}) ->
     Epoch.
+
+-spec get_directory(state()) -> file:filename().
+get_directory(#?MODULE{cfg = #cfg{directory = Dir}}) ->
+    Dir.
+
+-spec get_name(state()) -> string().
+get_name(#?MODULE{cfg = #cfg{name = Name}}) ->
+    Name.
 
 -spec read_chunk(state()) ->
     {ok, {offset(), epoch(),
@@ -813,7 +835,7 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
                ?VERSION:4/unsigned,
                _NumEntries:16/unsigned,
                FirstNumRecords:32/unsigned,
-               _FirstTimestamp:64/signed,
+               FirstTs:64/signed,
                FirstEpoch:64/unsigned,
                FirstChId:64/unsigned,
                _/binary>>} = file:read(Fd, ?HEADER_SIZE_B),
@@ -822,7 +844,7 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
                ?VERSION:4/unsigned,
                _LastNumEntries:16/unsigned,
                LastNumRecords:32/unsigned,
-               _LastTimestamp:64/signed,
+               LastTs:64/signed,
                LastEpoch:64/unsigned,
                LastChId:64/unsigned,
                _/binary>>} = file:read(Fd, ?HEADER_SIZE_B),
@@ -832,9 +854,11 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
                    index = IdxFile,
                    size = Size,
                    first = #chunk_info{epoch = FirstEpoch,
+                                       timestamp = FirstTs,
                                        id = FirstChId,
                                        num = FirstNumRecords},
                    last = #chunk_info{epoch = LastEpoch,
+                                      timestamp = LastTs,
                                       id = LastChId,
                                       num = LastNumRecords}}
          | Acc0]
@@ -852,10 +876,39 @@ overview(Dir) ->
     OffsEpochs = last_offset_epochs(SegInfos),
     {Range, OffsEpochs}.
 
--spec evaluate_retention(file:filename(), retention_spec()) -> ok.
-evaluate_retention(Dir, {max_bytes, MaxSize}) ->
+-spec evaluate_retention(file:filename(), [retention_spec()]) -> ok.
+evaluate_retention(Dir, Specs) ->
     SegInfos = build_log_overview(Dir),
-    _RemSegs = eval_max_bytes(SegInfos, MaxSize),
+    ok = evaluate_retention0(SegInfos, Specs),
+    ok.
+
+evaluate_retention0(_Infos, []) ->
+    %% we should never hit empty infos as one should always be left
+    ok;
+evaluate_retention0(Infos, [{max_bytes, MaxSize} | Specs]) ->
+    RemSegs = eval_max_bytes(Infos, MaxSize),
+    evaluate_retention0(RemSegs, Specs);
+evaluate_retention0(Infos, [{max_age, Age} | Specs]) ->
+    RemSegs = eval_age(Infos, Age),
+    evaluate_retention0(RemSegs, Specs).
+
+eval_age([#seg_info{first = #chunk_info{timestamp = Ts},
+                    size =  Size} = Old
+          | Rem], Age) ->
+    Now = erlang:system_time(millisecond),
+    case Ts < Now - Age andalso
+         length(Rem) > 0 andalso
+         Size > ?LOG_HEADER_SIZE of
+        true ->
+            %% the oldest timestamp is older than retention
+            %% and there are other segments available
+            %% we can delete
+            ok = delete_segment(Old),
+            eval_age(Rem, Age);
+        false ->
+            ok
+    end;
+eval_age(_, _Age) ->
     ok.
 
 eval_max_bytes(SegInfos, MaxSize) ->
