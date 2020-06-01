@@ -496,6 +496,33 @@ init_offset_reader({abs, Offs}, #{dir := Dir} = Conf) ->
             %% it is in range, convert to standard offset
             init_offset_reader(Offs, Conf)
     end;
+init_offset_reader({timestamp, Ts}, #{dir := Dir} = Conf) ->
+    case build_log_overview(Dir) of
+        [] ->
+            init_offset_reader(next, Conf);
+        [#seg_info{first = #chunk_info{timestamp = Fst}} | _]
+          when is_integer(Fst) andalso Fst > Ts ->
+            %% timestamp is lower than the first timestamp available
+            init_offset_reader(first, Conf);
+        SegInfos ->
+            case lists:search(
+                   fun (#seg_info{first = #chunk_info{timestamp = F},
+                                  last = #chunk_info{timestamp = L}})
+                         when is_integer(F) andalso is_integer(L) ->
+                           Ts >= F andalso Ts =< L;
+                       (_) ->
+                           false
+                   end, SegInfos) of
+                {value, Info} ->
+                    %% segment was found, now we need to scan index to
+                    %% find nearest offset
+                    ChunkId = chunk_id_for_timestamp(Info, Ts),
+                    init_offset_reader(ChunkId, Conf);
+                false ->
+                    %% segment was not found, attach next
+                    init_offset_reader(next, Conf)
+            end
+    end;
 init_offset_reader(OffsetSpec, #{dir := Dir,
                                  name := Name,
                                  offset_ref := OffsetRef} = Conf) ->
@@ -1139,6 +1166,30 @@ throw_missing(Any) ->
 
 open(SegFile, Options) ->
     throw_missing(file:open(SegFile, Options)).
+
+chunk_id_for_timestamp(#seg_info{index = Idx}, Ts) ->
+    Fd = open_index_read(Idx),
+    %% scan index file for nearest timestamp
+    {ChunkId, _Timestamp, _Epoch, _FilePos} = timestamp_idx_scan(Fd, Ts),
+    ChunkId.
+
+timestamp_idx_scan(Fd, Ts) ->
+    case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
+        {ok, <<ChunkId:64/unsigned,
+               Timestamp:64/signed,
+               Epoch:64/unsigned,
+               FilePos:32/unsigned>>} ->
+            case Ts =< Timestamp of
+                true ->
+                    ok = file:close(Fd),
+                    {ChunkId, Timestamp, Epoch, FilePos};
+                false ->
+                    timestamp_idx_scan(Fd, Ts)
+            end;
+        eof ->
+            ok = file:close(Fd),
+            eof
+    end.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

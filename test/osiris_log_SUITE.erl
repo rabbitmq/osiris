@@ -33,6 +33,7 @@ all_tests() ->
      tail_info,
      init_offset_reader_empty,
      init_offset_reader,
+     init_offset_reader_timestamp,
      init_offset_reader_truncated,
      init_data_reader_empty_log,
      init_data_reader_truncated,
@@ -54,6 +55,7 @@ groups() ->
     ].
 
 init_per_suite(Config) ->
+    osiris:configure_logger(logger),
     Config.
 
 end_per_suite(_Config) ->
@@ -295,6 +297,35 @@ init_offset_reader(Config) ->
      osiris_log:init_offset_reader({abs, 4}, RConf),
     {error, {offset_out_of_range, {0, 3}}} =
      osiris_log:init_offset_reader({abs, 6}, RConf),
+    ok.
+
+init_offset_reader_timestamp(Config) ->
+    ok = logger:set_primary_config(level, all),
+    Now = now_ms(),
+    EpochChunks = [{1, Now - 10000, [<<"one">>]}, % 0
+                   {1, Now - 8000, [<<"two">>]},  % 1
+                   {1, Now - 5000, [<<"three">>, <<"four">>]} % 2
+                  ],
+    LDir = ?config(leader_dir, Config),
+    Conf = ?config(osiris_conf, Config),
+    LLog0  = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(LLog0),
+    RConf = Conf#{dir => LDir, offset_ref => ?FUNCTION_NAME},
+
+    {ok, L1} = osiris_log:init_offset_reader({timestamp, Now - 8000}, RConf),
+    %% next offset is expected to be offset 1
+    ?assertEqual(1, osiris_log:next_offset(L1)),
+    osiris_log:close(L1),
+
+    %% future case
+    {ok, L2} = osiris_log:init_offset_reader({timestamp, Now}, RConf),
+    ?assertEqual(4, osiris_log:next_offset(L2)),
+    osiris_log:close(L2),
+
+    %% past case
+    {ok, L3} = osiris_log:init_offset_reader({timestamp, Now - 10000}, RConf),
+    ?assertEqual(0, osiris_log:next_offset(L3)),
+    osiris_log:close(L3),
     ok.
 
 init_offset_reader_truncated(Config) ->

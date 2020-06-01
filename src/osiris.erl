@@ -30,7 +30,13 @@
 -type epoch() :: non_neg_integer().
 -type milliseconds() :: non_neg_integer().
 -type tail_info() :: {offset(), empty | {epoch(), offset()}}.
--type offset_spec() :: first | last | next | {abs, offset()} | offset().
+-type offset_spec() :: first |
+                       last |
+                       next |
+                       {abs, offset()} |
+                       offset() |
+                       {timestamp, milliseconds()}.
+
 -type retention_spec() :: {max_bytes, non_neg_integer()} |
                           {max_age, milliseconds()}.
 

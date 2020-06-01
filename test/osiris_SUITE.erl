@@ -308,7 +308,7 @@ replica_offset_listener(Config) ->
 
 read_validate_single_node(Config) ->
     _PrivDir = ?config(data_dir, Config),
-    Num = 100000,
+    Num = 10000,
     Name = ?config(cluster_name, Config),
     Conf0 = #{name => Name,
               epoch => 1,
@@ -319,10 +319,14 @@ read_validate_single_node(Config) ->
     timer:sleep(500),
     % start_profile(Config, [osiris_writer, gen_batch_server,
     %                        osiris_log, lists, file]),
+    ct:pal("writing ~b", [Num]),
     write_n(Leader, Num, #{}),
     % stop_profile(Config),
     {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
 
+    ct:pal("~w counters ~p", [node(), osiris_counters:overview()]),
+
+    ct:pal("validating....", []),
     {Time, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
     MsgSec = Num / ((Time / 1000) / 1000),
     ct:pal("validate read of ~b entries took ~wms ~w msg/s", [Num, Time div 1000, MsgSec]),
@@ -596,7 +600,7 @@ write_n(Pid, N, Next, BinSize, Written) ->
     write_n(Pid, N, Next + 1, BinSize, Written#{Next => ok}).
 
 wait_for_written(Written0) when is_list(Written0) ->
-    % ct:pal("wait_for_written ~w", [Written0]),
+    ct:pal("wait_for_written ~w", [length(Written0)]),
     wait_for_written(lists:foldl(fun(N, Acc) ->
                                          maps:put(N, ok, Acc)
                                  end, #{}, Written0));
