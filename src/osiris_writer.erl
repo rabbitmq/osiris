@@ -250,10 +250,12 @@ handle_commands([{cast, {ack, ReplicaNode, Offset}} | Rem],
     handle_commands(Rem, State0#?MODULE{replica_state = ReplicaState}, Acc);
 handle_commands([{call, From, get_reader_context} | Rem],
                 #?MODULE{cfg = #cfg{offset_ref = ORef,
+                                    name = Name,
                                     directory = Dir},
                          committed_offset = COffs} = State,
                 {Records, Replies, Corrs}) ->
     Reply = {reply, From, #{dir => Dir,
+                            name => Name,
                             committed_offset => max(0, COffs),
                             offset_ref => ORef}},
     handle_commands(Rem, State, {Records, [Reply | Replies], Corrs});

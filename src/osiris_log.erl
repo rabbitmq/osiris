@@ -7,6 +7,7 @@
          init/1,
          init_acceptor/2,
          write/2,
+         write/3,
          accept_chunk/2,
          next_offset/1,
          tail_info/1,
@@ -20,6 +21,8 @@
          read_chunk_parsed/1,
          committed_offset/1,
          get_current_epoch/1,
+         get_directory/1,
+         get_name/1,
          close/1,
          overview/1,
          evaluate_retention/2,
@@ -36,11 +39,11 @@
 -define(LOG_HEADER_SIZE, 8).
 
 -define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
--define(INDEX_RECORD_SIZE_B, 20).
+-define(INDEX_RECORD_SIZE_B, 28).
 -define(MAGIC, 5).
 %% chunk format version
 -define(VERSION, 0).
--define(HEADER_SIZE_B, 31).
+-define(HEADER_SIZE_B, 39).
 -define(FILE_OPTS_WRITE, [raw, binary, write, read]).
 
 %% Data format
@@ -51,6 +54,7 @@
 %%   ProtoVersion:4/unsigned,
 %%   NumEntries:16/unsigned, %% need some kind of limit on chunk sizes 64k is a good start
 %%   NumRecords:32/unsigned, %% total including all sub batch entries
+%%   Timestamp:64/signed, %% millisecond posix (ish) timestamp
 %%   Epoch:64/unsigned,
 %%   ChunkFirstOffset:64/unsigned,
 %%   ChunkCrc:32/integer, %% CRC for the records portion of the data
@@ -91,6 +95,7 @@
 
 %% holds static or rarely changing fields
 -record(cfg, {directory :: file:filename(),
+              name :: string(),
               max_segment_size = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer(),
               retention = [] :: [osiris:retention_spec()]
              }).
@@ -112,6 +117,7 @@
                   index_fd :: undefined | file:io_device()}).
 
 -record(chunk_info, {epoch :: epoch(),
+                     timestamp :: non_neg_integer(),
                      id :: offset(),
                      num :: non_neg_integer()}).
 
@@ -142,6 +148,7 @@ directory(#{name := Name} = Config) ->
 
 -spec init(config()) -> state().
 init(#{dir := Dir,
+       name := Name,
        epoch := Epoch} = Config) ->
     %% scan directory for segments if in write mode
     MaxSize = maps:get(max_segment_size, Config, ?DEFAULT_MAX_SEGMENT_SIZE_B),
@@ -155,6 +162,7 @@ init(#{dir := Dir,
         Err -> throw(Err)
     end,
     Cfg = #cfg{directory = Dir,
+               name = Name,
                max_segment_size = MaxSize,
                retention = Retention},
     case lists:reverse(build_log_overview(Dir)) of
@@ -201,22 +209,28 @@ init(#{dir := Dir,
                      index_fd = IdxFd}
     end.
 
-
 -spec write([iodata() | {batch, non_neg_integer(), 0, iodata()}], state()) ->
     state().
-write([], #?MODULE{mode = #write{}} = State) ->
+write(Entries, State) ->
+    Timestamp = erlang:system_time(millisecond),
+    write(Entries, Timestamp, State).
+
+-spec write([iodata() | {batch, non_neg_integer(), 0, iodata()}], 
+            integer(), state()) -> state().
+write([], _Now, #?MODULE{mode = #write{}} = State) ->
     State;
-write(Entries, #?MODULE{cfg = #cfg{},
+write(Entries, Now, #?MODULE{cfg = #cfg{},
                         mode = #write{current_epoch = Epoch,
                                       tail_info = {Next, _}}} = State) ->
-    {ChunkData, NumRecords} = make_chunk(Entries, Epoch, Next),
-    write_chunk(ChunkData, Epoch, NumRecords, State).
+    {ChunkData, NumRecords} = make_chunk(Entries, Now, Epoch, Next),
+    write_chunk(ChunkData, Now, Epoch, NumRecords, State).
 
 -spec accept_chunk(iodata(), state()) -> state().
 accept_chunk([<<?MAGIC:4/unsigned,
                 ?VERSION:4/unsigned,
                 _NumEntries:16/unsigned,
                 NumRecords:32/unsigned,
+                Timestamp:64/signed,
                 Epoch:64/unsigned,
                 Next:64/unsigned,
                 _Crc:32/integer,
@@ -224,7 +238,7 @@ accept_chunk([<<?MAGIC:4/unsigned,
                 _/binary>> | _] = Chunk,
              #?MODULE{cfg = #cfg{},
                       mode = #write{tail_info = {Next, _}}} = State) ->
-    write_chunk(Chunk, Epoch, NumRecords, State);
+    write_chunk(Chunk, Timestamp, Epoch, NumRecords, State);
 accept_chunk(Binary, State)
   when is_binary(Binary) ->
     accept_chunk([Binary], State);
@@ -232,6 +246,7 @@ accept_chunk([<<?MAGIC:4/unsigned,
                 ?VERSION:4/unsigned,
                 _NumEntries:16/unsigned,
                 _NumRecords:32/unsigned,
+                _Timestamp:64/signed,
                 _Epoch:64/unsigned,
                 Next:64/unsigned,
                 _Crc:32/integer,
@@ -279,6 +294,7 @@ chunk_id_index_scan0(Fd, ChunkId) ->
     {ok, IdxPos} = file:position(Fd, cur),
     case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
         {ok, <<ChunkId:64/unsigned,
+               _Timestamp:64/signed,
                Epoch:64/unsigned,
                FilePos:32/unsigned>>} ->
             ok = file:close(Fd),
@@ -407,6 +423,7 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
                                        ?VERSION:4/unsigned,
                                        _NumEntries:16/unsigned,
                                        _NumRecords:32/unsigned,
+                                       _Timestamp:64/signed,
                                        PrevE:64/unsigned,
                                        PrevO:64/unsigned,
                                        _Crc:32/integer,
@@ -419,6 +436,7 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
                                        ?VERSION:4/unsigned,
                                        _NumEntries:16/unsigned,
                                        _NumRecords:32/unsigned,
+                                       _Timestamp:64/signed,
                                        OtherE:64/unsigned,
                                        PrevO:64/unsigned,
                                        _Crc:32/integer,
@@ -430,14 +448,16 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
             end
     end.
 
-init_data_reader_from_segment(#{dir := Dir} = Config,
+init_data_reader_from_segment(#{dir := Dir,
+                                name := Name} = Config,
                               #seg_info{file = StartSegment,
                                         index = IndexFile}, NextOffs) ->
     {ok, Fd} = file:open(StartSegment, [raw, binary, read]),
     %% TODO: next offset needs to be a chunk offset
     {_, FilePos} = scan_index(IndexFile, Fd, NextOffs),
     {ok, _Pos} = file:position(Fd, FilePos),
-    #?MODULE{cfg = #cfg{directory = Dir},
+    #?MODULE{cfg = #cfg{directory = Dir,
+                        name = Name},
              mode = #read{type = data,
                           offset_ref = maps:get(offset_ref, Config, undefined),
                           next_offset = NextOffs},
@@ -466,8 +486,7 @@ init_data_reader_from_segment(#{dir := Dir} = Config,
              empty | {From :: offset(), To :: offset()}}}.
 init_offset_reader({abs, Offs}, #{dir := Dir} = Conf) ->
     %% TODO: some unnecessary computation here
-    Range = range_from_segment_infos(
-              build_log_overview(Dir)),
+    Range = range_from_segment_infos(build_log_overview(Dir)),
     case Range of
         empty ->
             {error, {offset_out_of_range, Range}};
@@ -477,7 +496,35 @@ init_offset_reader({abs, Offs}, #{dir := Dir} = Conf) ->
             %% it is in range, convert to standard offset
             init_offset_reader(Offs, Conf)
     end;
+init_offset_reader({timestamp, Ts}, #{dir := Dir} = Conf) ->
+    case build_log_overview(Dir) of
+        [] ->
+            init_offset_reader(next, Conf);
+        [#seg_info{first = #chunk_info{timestamp = Fst}} | _]
+          when is_integer(Fst) andalso Fst > Ts ->
+            %% timestamp is lower than the first timestamp available
+            init_offset_reader(first, Conf);
+        SegInfos ->
+            case lists:search(
+                   fun (#seg_info{first = #chunk_info{timestamp = F},
+                                  last = #chunk_info{timestamp = L}})
+                         when is_integer(F) andalso is_integer(L) ->
+                           Ts >= F andalso Ts =< L;
+                       (_) ->
+                           false
+                   end, SegInfos) of
+                {value, Info} ->
+                    %% segment was found, now we need to scan index to
+                    %% find nearest offset
+                    ChunkId = chunk_id_for_timestamp(Info, Ts),
+                    init_offset_reader(ChunkId, Conf);
+                false ->
+                    %% segment was not found, attach next
+                    init_offset_reader(next, Conf)
+            end
+    end;
 init_offset_reader(OffsetSpec, #{dir := Dir,
+                                 name := Name,
                                  offset_ref := OffsetRef} = Conf) ->
     SegInfo = build_log_overview(Dir),
     Range = range_from_segment_infos(SegInfo),
@@ -511,7 +558,8 @@ init_offset_reader(OffsetSpec, #{dir := Dir,
                                             IdxResult
                                     end,
                 {ok, _Pos} = file:position(Fd, FilePos),
-                {ok, #?MODULE{cfg = #cfg{directory = Dir},
+                {ok, #?MODULE{cfg = #cfg{directory = Dir,
+                                         name = Name},
                               mode = #read{type = offset,
                                            offset_ref = OffsetRef,
                                            next_offset = ChOffs},
@@ -534,6 +582,14 @@ committed_offset(#?MODULE{mode = #read{offset_ref = Ref}}) ->
 get_current_epoch(#?MODULE{mode = #write{current_epoch = Epoch}}) ->
     Epoch.
 
+-spec get_directory(state()) -> file:filename().
+get_directory(#?MODULE{cfg = #cfg{directory = Dir}}) ->
+    Dir.
+
+-spec get_name(state()) -> string().
+get_name(#?MODULE{cfg = #cfg{name = Name}}) ->
+    Name.
+
 -spec read_chunk(state()) ->
     {ok, {offset(), epoch(),
           HeaderData :: iodata(),
@@ -554,6 +610,7 @@ read_chunk(#?MODULE{cfg = #cfg{directory = Dir},
                        ?VERSION:4/unsigned,
                        _NumEntries:16/unsigned,
                        NumRecords:32/unsigned,
+                       _Timestamp:64/signed,
                        Epoch:64/unsigned,
                        Offs:64/unsigned,
                        _Crc:32/integer,
@@ -621,6 +678,7 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                        ?VERSION:4/unsigned,
                        _NumEntries:16/unsigned,
                        NumRecords:32/unsigned,
+                       _Timestamp:64/integer,
                        _Epoch:64/unsigned,
                        NextOffs:64/unsigned,
                        _Crc:32/integer,
@@ -679,6 +737,7 @@ header_info(Fd, Pos) ->
            ?VERSION:4/unsigned,
            _NumEntries:16/unsigned,
            Num:32/unsigned,
+           _Timestamp:64/signed,
            Epoch:64/unsigned,
            Offset:64/unsigned,
            _Crc:32/integer,
@@ -704,6 +763,7 @@ scan_index(eof, IdxFd, _Fd, _) ->
     ok = file:close(IdxFd),
     eof;
 scan_index({ok, <<O:64/unsigned,
+                  _T:64/signed,
                   E:64/unsigned,
                   Pos:32/unsigned>>}, IdxFd, Fd, Offset) ->
     ok = file:close(IdxFd),
@@ -715,9 +775,11 @@ scan_index({ok, <<O:64/unsigned,
             {O + Num, eof}
     end;
 scan_index({ok, <<O:64/unsigned,
+                  _T:64/signed,
                   _E:64/unsigned,
                   Pos:32/unsigned,
                   ONext:64/unsigned,
+                  _:64/signed,
                   _:64/unsigned,
                   _:32/unsigned>>},
            IdxFd, Fd, Offset)  ->
@@ -777,6 +839,7 @@ build_log_overview0([IdxFile | IdxFiles], Acc0) ->
             0 = (Pos - ?IDX_HEADER_SIZE) rem ?INDEX_RECORD_SIZE_B,
             case file:read(IdxFd, ?INDEX_RECORD_SIZE_B) of
                 {ok, <<_Offset:64/unsigned,
+                       _Timestamp:64/signed,
                       _Epoch:64/unsigned,
                       LastChunkPos:32/unsigned>>} ->
                     ok = file:close(IdxFd),
@@ -799,6 +862,7 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
                ?VERSION:4/unsigned,
                _NumEntries:16/unsigned,
                FirstNumRecords:32/unsigned,
+               FirstTs:64/signed,
                FirstEpoch:64/unsigned,
                FirstChId:64/unsigned,
                _/binary>>} = file:read(Fd, ?HEADER_SIZE_B),
@@ -807,6 +871,7 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
                ?VERSION:4/unsigned,
                _LastNumEntries:16/unsigned,
                LastNumRecords:32/unsigned,
+               LastTs:64/signed,
                LastEpoch:64/unsigned,
                LastChId:64/unsigned,
                _/binary>>} = file:read(Fd, ?HEADER_SIZE_B),
@@ -816,9 +881,11 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
                    index = IdxFile,
                    size = Size,
                    first = #chunk_info{epoch = FirstEpoch,
+                                       timestamp = FirstTs,
                                        id = FirstChId,
                                        num = FirstNumRecords},
                    last = #chunk_info{epoch = LastEpoch,
+                                      timestamp = LastTs,
                                       id = LastChId,
                                       num = LastNumRecords}}
          | Acc0]
@@ -836,10 +903,39 @@ overview(Dir) ->
     OffsEpochs = last_offset_epochs(SegInfos),
     {Range, OffsEpochs}.
 
--spec evaluate_retention(file:filename(), retention_spec()) -> ok.
-evaluate_retention(Dir, {max_bytes, MaxSize}) ->
+-spec evaluate_retention(file:filename(), [retention_spec()]) -> ok.
+evaluate_retention(Dir, Specs) ->
     SegInfos = build_log_overview(Dir),
-    _RemSegs = eval_max_bytes(SegInfos, MaxSize),
+    ok = evaluate_retention0(SegInfos, Specs),
+    ok.
+
+evaluate_retention0(_Infos, []) ->
+    %% we should never hit empty infos as one should always be left
+    ok;
+evaluate_retention0(Infos, [{max_bytes, MaxSize} | Specs]) ->
+    RemSegs = eval_max_bytes(Infos, MaxSize),
+    evaluate_retention0(RemSegs, Specs);
+evaluate_retention0(Infos, [{max_age, Age} | Specs]) ->
+    RemSegs = eval_age(Infos, Age),
+    evaluate_retention0(RemSegs, Specs).
+
+eval_age([#seg_info{first = #chunk_info{timestamp = Ts},
+                    size =  Size} = Old
+          | Rem], Age) ->
+    Now = erlang:system_time(millisecond),
+    case Ts < Now - Age andalso
+         length(Rem) > 0 andalso
+         Size > ?LOG_HEADER_SIZE of
+        true ->
+            %% the oldest timestamp is older than retention
+            %% and there are other segments available
+            %% we can delete
+            ok = delete_segment(Old),
+            eval_age(Rem, Age);
+        false ->
+            ok
+    end;
+eval_age(_, _Age) ->
     ok.
 
 eval_max_bytes(SegInfos, MaxSize) ->
@@ -888,15 +984,17 @@ last_offset_epoch(eof, Fd, Acc) ->
     ok = file:close(Fd),
     Acc;
 last_offset_epoch({ok, <<O:64/unsigned,
+                         _T:64/signed,
                          CurEpoch:64/unsigned,
                          _:32/unsigned>>},
-                   Fd, {CurEpoch, _LastOffs, Acc})  ->
+                  Fd, {CurEpoch, _LastOffs, Acc})  ->
     %% epoch is unchanged
     last_offset_epoch(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
                       {CurEpoch, O, Acc});
 last_offset_epoch({ok, <<O:64/unsigned,
-                    Epoch:64/unsigned,
-                    _:32/unsigned>>}, Fd, {CurEpoch, LastOffs, Acc})
+                         _T:64/signed,
+                         Epoch:64/unsigned,
+                         _:32/unsigned>>}, Fd, {CurEpoch, LastOffs, Acc})
   when Epoch > CurEpoch ->
     last_offset_epoch(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
                       {Epoch, O, [{CurEpoch, LastOffs} |  Acc]}).
@@ -907,7 +1005,7 @@ segment_from_index_file(IdxFile) ->
     SegFile0 = filename:join([BaseDir, Basename]),
     SegFile0 ++ ".segment".
 
-make_chunk(Blobs, Epoch, Next) ->
+make_chunk(Blobs, Timestamp, Epoch, Next) ->
     {NumRecords, IoList} =
     lists:foldr(fun ({batch, NumRecords, CompType, B}, {Count, Acc}) ->
                         Data = [<<1:1, %% batch record type
@@ -927,16 +1025,17 @@ make_chunk(Blobs, Epoch, Next) ->
         ?VERSION:4/unsigned,
         (length(Blobs)):16/unsigned,
         NumRecords:32/unsigned,
+        Timestamp:64/signed,
         Epoch:64/unsigned,
         Next:64/unsigned,
         0:32/integer,
         Size:32/unsigned>>,
       Bin], NumRecords}.
 
-write_chunk(Chunk, Epoch, NumRecords,
+write_chunk(Chunk, Timestamp, Epoch, NumRecords,
             #?MODULE{fd = undefined} = State) ->
-    write_chunk(Chunk, Epoch, NumRecords, open_new_segment(State));
-write_chunk(Chunk, Epoch, NumRecords,
+    write_chunk(Chunk, Timestamp, Epoch, NumRecords, open_new_segment(State));
+write_chunk(Chunk, Timestamp, Epoch, NumRecords,
             #?MODULE{cfg = #cfg{max_segment_size = MaxSize},
                      fd = Fd,
                      index_fd = IdxFd,
@@ -947,6 +1046,7 @@ write_chunk(Chunk, Epoch, NumRecords,
     {ok, Cur} = file:position(Fd, cur),
     ok = file:write(Fd, Chunk),
     ok = file:write(IdxFd, <<Next:64/unsigned,
+                             Timestamp:64/signed,
                              Epoch:64/unsigned,
                              Cur:32/unsigned>>),
     case file:position(Fd, cur) of
@@ -1066,6 +1166,30 @@ throw_missing(Any) ->
 
 open(SegFile, Options) ->
     throw_missing(file:open(SegFile, Options)).
+
+chunk_id_for_timestamp(#seg_info{index = Idx}, Ts) ->
+    Fd = open_index_read(Idx),
+    %% scan index file for nearest timestamp
+    {ChunkId, _Timestamp, _Epoch, _FilePos} = timestamp_idx_scan(Fd, Ts),
+    ChunkId.
+
+timestamp_idx_scan(Fd, Ts) ->
+    case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
+        {ok, <<ChunkId:64/unsigned,
+               Timestamp:64/signed,
+               Epoch:64/unsigned,
+               FilePos:32/unsigned>>} ->
+            case Ts =< Timestamp of
+                true ->
+                    ok = file:close(Fd),
+                    {ChunkId, Timestamp, Epoch, FilePos};
+                false ->
+                    timestamp_idx_scan(Fd, Ts)
+            end;
+        eof ->
+            ok = file:close(Fd),
+            eof
+    end.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

@@ -6,7 +6,7 @@
 -define(MAGIC, 5).
 %% format version
 -define(VERSION, 0).
--define(HEADER_SIZE, 31).
+-define(HEADER_SIZE, 39).
 
 -define(SUP, osiris_server_sup).
 
@@ -30,7 +30,7 @@
          code_change/3]).
 
 %% holds static or rarely changing fields
--record(cfg, {
+-record(cfg, {name :: string(),
               leader_pid :: pid(),
               directory :: file:filename(),
               port :: non_neg_integer(),
@@ -122,7 +122,8 @@ get_port(Server) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init(#{leader_pid := LeaderPid,
+init(#{name := Name,
+       leader_pid := LeaderPid,
        external_ref := ExtRef} = Config) ->
     {ok, {Min, Max}} = application:get_env(port_range),
     {Port, LSock} = open_tcp_port(Min, Max),
@@ -179,7 +180,8 @@ init(#{leader_pid := LeaderPid,
     atomics:put(ORef, 1, -1),
     EvtFmt = maps:get(event_formatter, Config, undefined),
     ?INFO("osiris_replica:init/1: next offset ~b", [NextOffset]),
-    {ok, #?MODULE{cfg = #cfg{leader_pid = LeaderPid,
+    {ok, #?MODULE{cfg = #cfg{name = Name,
+                             leader_pid = LeaderPid,
                              directory = Dir,
                              port = Port,
                              listening_socket = LSock,
@@ -237,9 +239,11 @@ handle_call(get_port, _From, #?MODULE{cfg = #cfg{port = Port}} = State) ->
     {reply, Port, State};
 handle_call(get_reader_context, _From,
             #?MODULE{cfg = #cfg{offset_ref = ORef,
+                                name = Name,
                                 directory = Dir},
                      committed_offset = COffs} = State) ->
     Reply = #{dir => Dir,
+              name => Name,
               committed_offset => COffs,
               offset_ref => ORef},
     {reply, Reply, State}.
@@ -377,6 +381,7 @@ parse_chunk(<<?MAGIC:4/unsigned,
               ?VERSION:4/unsigned,
               _NumEntries:16/unsigned,
               _NumRecords:32/unsigned,
+               _Timestamp:64/signed,
                 _Epoch:64/unsigned,
               FirstOffset:64/unsigned,
               _Crc:32/integer,
@@ -393,7 +398,8 @@ parse_chunk(<<?MAGIC:4/unsigned,
               ?VERSION:4/unsigned,
               _NumEntries:16/unsigned,
               _NumRecords:32/unsigned,
-                _Epoch:64/unsigned,
+              _Timestamp:64/signed,
+              _Epoch:64/unsigned,
               FirstOffset:64/unsigned,
               _Crc:32/integer,
               Size:32/unsigned,

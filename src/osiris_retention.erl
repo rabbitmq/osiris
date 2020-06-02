@@ -56,8 +56,7 @@ handle_call(_Request, _From, State) ->
 %%                                  {noreply, State, Timeout} |
 %%                                  {stop, Reason, State}
 handle_cast({eval, Dir, Specs}, State) ->
-    [ok = osiris_log:evaluate_retention(Dir, Spec)
-     || Spec <- Specs],
+    ok = osiris_log:evaluate_retention(Dir, Specs),
     {noreply, State}.
 
 %% @spec handle_info(Info, State) -> {noreply, State} |

@@ -2,7 +2,8 @@
 
 -export([validate_base64uri/1,
          to_base64uri/1,
-         id/1]).
+         id/1,
+         lists_find/2]).
 
 -define(BASE64_URI_CHARS,
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
@@ -33,4 +34,17 @@ to_base64uri(Str) when is_list(Str) ->
 
 -spec id(term()) -> term().
 id(X) -> X.
+
+-spec lists_find(fun ((term()) -> boolean()), list()) ->
+    {ok, term()} | not_found.
+lists_find(_Pred, []) ->
+    not_found;
+lists_find(Pred, [Item | Rem]) ->
+    case Pred(Item) of
+        true ->
+            {ok, Item};
+        false ->
+            lists_find(Pred, Rem)
+    end.
+
 
