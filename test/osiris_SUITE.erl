@@ -27,6 +27,7 @@ all_tests() ->
      read_validate_single_node,
      read_validate,
      single_node_offset_listener,
+     single_node_offset_listener2,
      cluster_offset_listener,
      replica_offset_listener,
      cluster_restart,
@@ -227,6 +228,31 @@ single_node_offset_listener(Config) ->
     receive
         {osiris_offset, _Name, 0} ->
             {ok, Log0} = osiris:init_reader(Leader, {abs, 0}),
+            {[{0, <<"mah-data">>}], Log} = osiris_log:read_chunk_parsed(Log0),
+            {end_of_stream, _} = osiris_log:read_chunk_parsed(Log),
+            ok
+    after 2000 ->
+              flush(),
+              exit(osiris_offset_timeout)
+    end,
+    flush(),
+    ok.
+
+single_node_offset_listener2(Config) ->
+    %% writes before registering
+    Name = ?config(cluster_name, Config),
+    Conf0 = #{name => Name,
+              epoch => 1,
+              leader_node => node(),
+              replica_nodes => []},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    {ok, Log0} = osiris:init_reader(Leader, next),
+    Next = osiris_log:next_offset(Log0),
+    ok = osiris:write(Leader, 42, <<"mah-data">>),
+    wait_for_written([42]),
+    osiris:register_offset_listener(Leader, Next),
+    receive
+        {osiris_offset, _Name, 0} ->
             {[{0, <<"mah-data">>}], Log} = osiris_log:read_chunk_parsed(Log0),
             {end_of_stream, _} = osiris_log:read_chunk_parsed(Log),
             ok

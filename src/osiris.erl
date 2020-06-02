@@ -1,5 +1,6 @@
 -module(osiris).
 
+-include("osiris.hrl").
 -export([
          write/3,
          init_reader/2,
@@ -112,6 +113,7 @@ write(Pid, Corr, Data) ->
 init_reader(Pid, OffsetSpec)
   when is_pid(Pid) andalso
        node(Pid) =:= node() ->
+    ?DEBUG("osiris: initialising reader. Spec: ~w", [OffsetSpec]),
     {ok, Ctx} = gen:call(Pid, '$gen_call', get_reader_context),
     osiris_log:init_offset_reader(OffsetSpec, Ctx).
 

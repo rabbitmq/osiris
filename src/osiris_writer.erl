@@ -182,13 +182,13 @@ handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt,
                             atomics:put(ORef, 1, COffs),
                             counters:put(Cnt, ?C_COMMITTED_OFFSET, COffs),
                             Pending = notify_writers(P, COffs, Cfg),
-                            notify_offset_listeners(
-                              State2#?MODULE{committed_offset = COffs,
-                                             pending_corrs = Pending});
+                            State2#?MODULE{committed_offset = COffs,
+                                           pending_corrs = Pending};
                         false ->
                             State2
                     end,
-            {ok, [garbage_collect | Replies], notify_data_listeners(State)};
+            {ok, [garbage_collect | Replies],
+             notify_offset_listeners(notify_data_listeners(State))};
         {stop, normal} ->
             {stop, normal}
     end.
@@ -211,8 +211,7 @@ update_pending(BatchOffs, Corrs,
     send_written_events(Cfg, Corrs),
     atomics:put(OffsRef, 1, BatchOffs),
     counters:put(Cnt, ?C_COMMITTED_OFFSET, BatchOffs),
-    State = State0#?MODULE{committed_offset = BatchOffs},
-    notify_offset_listeners(State);
+    State0#?MODULE{committed_offset = BatchOffs};
 update_pending(BatchOffs, Corrs,
                #?MODULE{cfg = #cfg{},
                         pending_corrs = Pending0} = State) ->
