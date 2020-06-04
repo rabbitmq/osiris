@@ -386,7 +386,7 @@ parse_chunk(<<?MAGIC:4/unsigned,
               FirstOffset:64/unsigned,
               _Crc:32/integer,
               Size:32/unsigned,
-              _:Size/binary,
+              _Data:Size/binary,
               Rem/binary>> = All, undefined, Acc) ->
     TotalSize = Size + ?HEADER_SIZE,
     <<Chunk:TotalSize/binary, _/binary>> = All,

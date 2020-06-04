@@ -233,11 +233,12 @@ accept_chunk([<<?MAGIC:4/unsigned,
                 Timestamp:64/signed,
                 Epoch:64/unsigned,
                 Next:64/unsigned,
-                _Crc:32/integer,
+                Crc:32/integer,
                 _DataSize:32/unsigned,
-                _/binary>> | _] = Chunk,
+                Data/binary>> | DataParts] = Chunk,
              #?MODULE{cfg = #cfg{},
                       mode = #write{tail_info = {Next, _}}} = State) ->
+    validate_crc(Next, Crc, [Data | DataParts]),
     write_chunk(Chunk, Timestamp, Epoch, NumRecords, State);
 accept_chunk(Binary, State)
   when is_binary(Binary) ->
@@ -613,9 +614,10 @@ read_chunk(#?MODULE{cfg = #cfg{directory = Dir},
                        _Timestamp:64/signed,
                        Epoch:64/unsigned,
                        Offs:64/unsigned,
-                       _Crc:32/integer,
+                       Crc:32/integer,
                        DataSize:32/unsigned>> = HeaderData} ->
                     {ok, BlobData} = file:read(Fd, DataSize),
+                    validate_crc(Offs, Crc, BlobData),
                     {ok, {Offs, Epoch, HeaderData, BlobData},
                      State#?MODULE{mode = incr_next_offset(NumRecords, Read)}};
                 {ok, _} ->
@@ -1021,6 +1023,7 @@ make_chunk(Blobs, Timestamp, Epoch, Next) ->
                 end, {0, []}, Blobs),
     Bin = IoList,
     Size = erlang:iolist_size(Bin),
+    Crc = erlang:crc32(Bin),
     {[<<?MAGIC:4/unsigned,
         ?VERSION:4/unsigned,
         (length(Blobs)):16/unsigned,
@@ -1028,7 +1031,7 @@ make_chunk(Blobs, Timestamp, Epoch, Next) ->
         Timestamp:64/signed,
         Epoch:64/unsigned,
         Next:64/unsigned,
-        0:32/integer,
+        Crc:32/integer,
         Size:32/unsigned>>,
       Bin], NumRecords}.
 
@@ -1191,6 +1194,14 @@ timestamp_idx_scan(Fd, Ts) ->
             eof
     end.
 
+validate_crc(ChunkId, Crc, IOData) ->
+    case erlang:crc32(IOData) of
+        Crc -> ok;
+        _ ->
+            ?ERROR("crc validation failure at chunk id ~b"
+                   "data size ~b:~b", [ChunkId, iolist_size(IOData)]),
+            exit({crc_validation_failure, {chunk_id, ChunkId}})
+    end.
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.

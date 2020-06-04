@@ -421,7 +421,9 @@ read_validate(Config) ->
                       Self ! validate_read_done
               end),
     receive
-        validate_read_done -> ok
+        validate_read_done ->
+            ct:pal("all reads validated", []),
+            ok
     after 30000 ->
               exit(validate_read_done_timeout)
     end,
