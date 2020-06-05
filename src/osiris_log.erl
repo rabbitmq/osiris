@@ -56,7 +56,7 @@
 %%   Timestamp:64/signed, %% millisecond posix (ish) timestamp
 %%   Epoch:64/unsigned,
 %%   ChunkFirstOffset:64/unsigned,
-%%   ChunkCrc:32/integer, %% adler32 checkusum for the records portion of the data
+%%   ChunkCrc:32/integer, %% crc32 checksum for the records portion of the data
 %%   DataLength:32/unsigned, %% length until end of chunk
 %%   [Entry]
 %%   ...>>
@@ -1022,7 +1022,7 @@ make_chunk(Blobs, Timestamp, Epoch, Next) ->
                 end, {0, []}, Blobs),
     Bin = IoList,
     Size = erlang:iolist_size(Bin),
-    Crc = erlang:adler32(Bin),
+    Crc = erlang:crc32(Bin),
     {[<<?MAGIC:4/unsigned,
         ?VERSION:4/unsigned,
         (length(Blobs)):16/unsigned,
@@ -1194,7 +1194,7 @@ timestamp_idx_scan(Fd, Ts) ->
     end.
 
 validate_crc(ChunkId, Crc, IOData) ->
-    case erlang:adler32(IOData) of
+    case erlang:crc32(IOData) of
         Crc -> ok;
         _ ->
             ?ERROR("crc validation failure at chunk id ~b"
