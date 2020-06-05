@@ -11,7 +11,6 @@
          accept_chunk/2,
          next_offset/1,
          tail_info/1,
-         % truncate/2,
          send_file/2,
          send_file/3,
 
@@ -57,7 +56,7 @@
 %%   Timestamp:64/signed, %% millisecond posix (ish) timestamp
 %%   Epoch:64/unsigned,
 %%   ChunkFirstOffset:64/unsigned,
-%%   ChunkCrc:32/integer, %% CRC for the records portion of the data
+%%   ChunkCrc:32/integer, %% adler32 checkusum for the records portion of the data
 %%   DataLength:32/unsigned, %% length until end of chunk
 %%   [Entry]
 %%   ...>>
@@ -328,7 +327,7 @@ truncate_to(Name, [{E, ChId} | NextEOs], SegInfos) ->
             truncate_to(Name, NextEOs, SegInfos);
         {found, #seg_info{file = File,
                           index = Idx}} ->
-            ?INFO("osiris_replica: ~s on node ~s truncating to chunk id ~b in epoch ~b",
+            ?INFO("osiris_log: ~s on node ~s truncating to chunk id ~b in epoch ~b",
                   [Name, node(), ChId, E]),
             %% this is the inclusive case
             %% next offset needs to be a chunk offset
@@ -1023,7 +1022,7 @@ make_chunk(Blobs, Timestamp, Epoch, Next) ->
                 end, {0, []}, Blobs),
     Bin = IoList,
     Size = erlang:iolist_size(Bin),
-    Crc = erlang:crc32(Bin),
+    Crc = erlang:adler32(Bin),
     {[<<?MAGIC:4/unsigned,
         ?VERSION:4/unsigned,
         (length(Blobs)):16/unsigned,
@@ -1195,7 +1194,7 @@ timestamp_idx_scan(Fd, Ts) ->
     end.
 
 validate_crc(ChunkId, Crc, IOData) ->
-    case erlang:crc32(IOData) of
+    case erlang:adler32(IOData) of
         Crc -> ok;
         _ ->
             ?ERROR("crc validation failure at chunk id ~b"
