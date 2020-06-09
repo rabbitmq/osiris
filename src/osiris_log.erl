@@ -922,7 +922,7 @@ evaluate_retention0(Infos, [{max_age, Age} | Specs]) ->
 
 eval_age([#seg_info{first = #chunk_info{timestamp = Ts},
                     size =  Size} = Old
-          | Rem], Age) ->
+          | Rem] = All, Age) ->
     Now = erlang:system_time(millisecond),
     case Ts < Now - Age andalso
          length(Rem) > 0 andalso
@@ -934,10 +934,10 @@ eval_age([#seg_info{first = #chunk_info{timestamp = Ts},
             ok = delete_segment(Old),
             eval_age(Rem, Age);
         false ->
-            ok
+            All
     end;
-eval_age(_, _Age) ->
-    ok.
+eval_age(All, _Age) ->
+    All.
 
 eval_max_bytes(SegInfos, MaxSize) ->
     TotalSize = lists:foldl(
