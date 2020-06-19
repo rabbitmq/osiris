@@ -126,7 +126,7 @@ RemoveAnyListeners(r) ==
     /\ rep_listener' = [rep_listener EXCEPT ![r] = [rr \in R |-> FALSE]]            
 
 \* -----------------------------------------
-\* REPLICA STAR/STOP AND COORD-REPLICA VISIBILITY
+\* REPLICA START/STOP AND COORD-REPLICA VISIBILITY
 \* ----------------------------------------- 
 
 \* a replica stopping or becoming unavailable during an election will cause the election
