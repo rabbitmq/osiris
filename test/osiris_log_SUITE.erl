@@ -570,9 +570,9 @@ evaluate_retention_max_bytes(Config) ->
     osiris_log:close(Log),
     %% this should delete at least one segment
     Spec = {max_bytes, 1500 * 100},
-    ok = osiris_log:evaluate_retention(LDir, [Spec]),
+    Range = osiris_log:evaluate_retention(LDir, [Spec]),
     %% idempotency check
-    ok = osiris_log:evaluate_retention(LDir, [Spec]),
+    Range = osiris_log:evaluate_retention(LDir, [Spec]),
     SegFiles = filelib:wildcard(filename:join(LDir, "*.segment")),
     ?assertEqual(1, length(SegFiles)),
     ok.
@@ -594,9 +594,9 @@ evaluate_retention_max_age(Config) ->
     %% this should delete at least one segment as all chunks should be older
     %% than the retention of 1000ms
     Spec = {max_age, 1000},
-    ok = osiris_log:evaluate_retention(LDir, [Spec]),
+    Range = osiris_log:evaluate_retention(LDir, [Spec]),
     %% idempotency
-    ok = osiris_log:evaluate_retention(LDir, [Spec]),
+    Range = osiris_log:evaluate_retention(LDir, [Spec]),
     SegFiles = filelib:wildcard(filename:join(LDir, "*.segment")),
     ?assertEqual(1, length(SegFiles)),
     ok.

@@ -22,6 +22,7 @@
          get_current_epoch/1,
          get_directory/1,
          get_name/1,
+         counters_ref/1,
          close/1,
          overview/1,
          evaluate_retention/2,
@@ -44,6 +45,16 @@
 -define(VERSION, 0).
 -define(HEADER_SIZE_B, 39).
 -define(FILE_OPTS_WRITE, [raw, binary, write, read]).
+
+-define(COUNTER_FIELDS,
+        [offset,
+         first_offset,
+         chunks
+         ]).
+
+-define(C_OFFSET, 1).
+-define(C_FIRST_OFFSET, 2).
+-define(C_CHUNKS, 3).
 
 %% Data format
 %% Write in "chunks" which are batches of blobs
@@ -86,7 +97,8 @@
 -type config() :: osiris:config() |
                   #{dir := file:filename(),
                     epoch => non_neg_integer(),
-                    max_segment_size => non_neg_integer()}.
+                    max_segment_size => non_neg_integer(),
+                    counter_spec => {Tag :: atom(), Fields :: [atom()]}}.
 
 -type record() :: {offset(), iodata()}.
 -type offset_spec() :: osiris:offset_spec().
@@ -96,7 +108,9 @@
 -record(cfg, {directory :: file:filename(),
               name :: string(),
               max_segment_size = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer(),
-              retention = [] :: [osiris:retention_spec()]
+              retention = [] :: [osiris:retention_spec()],
+              counter :: counters:counters_ref(),
+              counter_id :: term()
              }).
 
 
@@ -130,7 +144,7 @@
 
 -export_type([
               state/0,
-              % offset/0,
+              range/0,
               % record/0,
               config/0
               ]).
@@ -160,10 +174,14 @@ init(#{dir := Dir,
         {error, eexist} -> ok;
         Err -> throw(Err)
     end,
+
+    Cnt = make_counter(Config),
     Cfg = #cfg{directory = Dir,
                name = Name,
                max_segment_size = MaxSize,
-               retention = Retention},
+               retention = Retention,
+               counter = Cnt,
+               counter_id = counter_id(Config)},
     case lists:reverse(build_log_overview(Dir)) of
         [] ->
             open_new_segment(#?MODULE{cfg = Cfg,
@@ -182,6 +200,8 @@ init(#{dir := Dir,
                 _ -> ok
             end,
             TailInfo = {ChId + N, {E, ChId}},
+
+            counters:put(Cnt, ?C_OFFSET, ChId + N - 1),
             ?INFO("~s:~s/~b: next offset ~b",
                   [?MODULE, ?FUNCTION_NAME,
                    ?FUNCTION_ARITY, element(1, TailInfo)]),
@@ -219,8 +239,8 @@ write(Entries, State) ->
 write([], _Now, #?MODULE{mode = #write{}} = State) ->
     State;
 write(Entries, Now, #?MODULE{cfg = #cfg{},
-                        mode = #write{current_epoch = Epoch,
-                                      tail_info = {Next, _}}} = State) ->
+                             mode = #write{current_epoch = Epoch,
+                                           tail_info = {Next, _}}} = State) ->
     {ChunkData, NumRecords} = make_chunk(Entries, Now, Epoch, Next),
     write_chunk(ChunkData, Now, Epoch, NumRecords, State).
 
@@ -457,6 +477,7 @@ init_data_reader_from_segment(#{dir := Dir,
     {_, FilePos} = scan_index(IndexFile, Fd, NextOffs),
     {ok, _Pos} = file:position(Fd, FilePos),
     #?MODULE{cfg = #cfg{directory = Dir,
+                        counter = make_counter(Config),
                         name = Name},
              mode = #read{type = data,
                           offset_ref = maps:get(offset_ref, Config, undefined),
@@ -559,6 +580,7 @@ init_offset_reader(OffsetSpec, #{dir := Dir,
                                     end,
                 {ok, _Pos} = file:position(Fd, FilePos),
                 {ok, #?MODULE{cfg = #cfg{directory = Dir,
+                                         counter = make_counter(Conf),
                                          name = Name},
                               mode = #read{type = offset,
                                            offset_ref = OffsetRef,
@@ -589,6 +611,10 @@ get_directory(#?MODULE{cfg = #cfg{directory = Dir}}) ->
 -spec get_name(state()) -> string().
 get_name(#?MODULE{cfg = #cfg{name = Name}}) ->
     Name.
+
+-spec counters_ref(state()) -> counters:counters_ref().
+counters_ref(#?MODULE{cfg = #cfg{counter = C}}) ->
+    C.
 
 -spec read_chunk(state()) ->
     {ok, {offset(), epoch(),
@@ -716,9 +742,15 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
     end.
 
 
-close(_State) ->
-    %% close fd
-    ok.
+-spec close(state()) -> ok.
+close(#?MODULE{cfg = #cfg{counter_id = CntId},
+               fd = Fd}) ->
+    _ = file:close(Fd),
+    case CntId of
+        undefined -> ok;
+        _ ->
+            osiris_counters:delete(CntId)
+    end.
 
 delete_directory(Config) ->
     Dir = directory(Config),
@@ -904,15 +936,14 @@ overview(Dir) ->
     OffsEpochs = last_offset_epochs(SegInfos),
     {Range, OffsEpochs}.
 
--spec evaluate_retention(file:filename(), [retention_spec()]) -> ok.
+-spec evaluate_retention(file:filename(), [retention_spec()]) -> range().
 evaluate_retention(Dir, Specs) ->
     SegInfos = build_log_overview(Dir),
-    ok = evaluate_retention0(SegInfos, Specs),
-    ok.
+    range_from_segment_infos(evaluate_retention0(SegInfos, Specs)).
 
-evaluate_retention0(_Infos, []) ->
+evaluate_retention0(Infos, []) ->
     %% we should never hit empty infos as one should always be left
-    ok;
+    Infos;
 evaluate_retention0(Infos, [{max_bytes, MaxSize} | Specs]) ->
     RemSegs = eval_max_bytes(Infos, MaxSize),
     evaluate_retention0(RemSegs, Specs);
@@ -921,8 +952,8 @@ evaluate_retention0(Infos, [{max_age, Age} | Specs]) ->
     evaluate_retention0(RemSegs, Specs).
 
 eval_age([#seg_info{first = #chunk_info{timestamp = Ts},
-                    size =  Size} = Old
-          | Rem] = All, Age) ->
+                    size = Size} = Old
+          | Rem] = Infos, Age) ->
     Now = erlang:system_time(millisecond),
     case Ts < Now - Age andalso
          length(Rem) > 0 andalso
@@ -934,10 +965,10 @@ eval_age([#seg_info{first = #chunk_info{timestamp = Ts},
             ok = delete_segment(Old),
             eval_age(Rem, Age);
         false ->
-            All
+            Infos
     end;
-eval_age(All, _Age) ->
-    All.
+eval_age(Infos, _Age) ->
+    Infos.
 
 eval_max_bytes(SegInfos, MaxSize) ->
     TotalSize = lists:foldl(
@@ -1038,7 +1069,8 @@ write_chunk(Chunk, Timestamp, Epoch, NumRecords,
             #?MODULE{fd = undefined} = State) ->
     write_chunk(Chunk, Timestamp, Epoch, NumRecords, open_new_segment(State));
 write_chunk(Chunk, Timestamp, Epoch, NumRecords,
-            #?MODULE{cfg = #cfg{max_segment_size = MaxSize},
+            #?MODULE{cfg = #cfg{max_segment_size = MaxSize,
+                                counter = CntRef},
                      fd = Fd,
                      index_fd = IdxFd,
                      mode = #write{segment_size = SegSize,
@@ -1051,6 +1083,9 @@ write_chunk(Chunk, Timestamp, Epoch, NumRecords,
                              Timestamp:64/signed,
                              Epoch:64/unsigned,
                              Cur:32/unsigned>>),
+    %% update counters
+    counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
+    counters:add(CntRef, ?C_CHUNKS, 1),
     case file:position(Fd, cur) of
         {ok, After} when After >= MaxSize ->
             %% close the current file
@@ -1136,6 +1171,7 @@ make_file_name(N, Suff) ->
     lists:flatten(io_lib:format("~20..0B.~s", [N, Suff])).
 
 open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
+                                     counter = Cnt,
                                      retention = RetentionSpec},
                           fd = undefined,
                           index_fd = undefined,
@@ -1152,7 +1188,14 @@ open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
     {ok, _} = file:position(Fd, eof),
     {ok, _} = file:position(IdxFd, eof),
     %% ask to evaluate retention
-    ok = osiris_retention:eval(Dir, RetentionSpec),
+    ok = osiris_retention:eval(Dir, RetentionSpec,
+                               %% updates the first offset after retention has
+                               %% been evaluated
+                               fun({Fst, _}) when is_integer(Fst) ->
+                                       counters:put(Cnt, ?C_FIRST_OFFSET, Fst);
+                                  (_) ->
+                                       ok
+                               end),
     State#?MODULE{fd = Fd, index_fd = IdxFd}.
 
 open_index_read(File) ->
@@ -1201,6 +1244,20 @@ validate_crc(ChunkId, Crc, IOData) ->
                    "data size ~b:~b", [ChunkId, iolist_size(IOData)]),
             exit({crc_validation_failure, {chunk_id, ChunkId}})
     end.
+
+make_counter(#{counter_spec := {Name, Fields}}) ->
+    %% create a registered counter
+    osiris_counters:new(Name, ?COUNTER_FIELDS ++ Fields);
+make_counter(_) ->
+    %% if no spec is provided we create a local counter only
+    counters:new(?C_NUM_LOG_FIELDS, []).
+
+counter_id(#{counter_spec := {Name, _}}) ->
+    Name;
+counter_id(_) ->
+    undefined.
+
+
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
 -endif.

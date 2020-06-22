@@ -4,7 +4,7 @@
 
 %% API functions
 -export([start_link/0,
-         eval/2]).
+         eval/3]).
 
 %% gen_server callbacks
 -export([init/1,
@@ -24,11 +24,12 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
--spec eval(file:filename(), [osiris:retention_spec()]) -> ok.
-eval(_Dir, []) ->
+-spec eval(file:filename(), [osiris:retention_spec()],
+           fun ((osiris_log:range()) -> ok)) -> ok.
+eval(_Dir, [], _Fun) ->
     ok;
-eval(Dir, Specs) ->
-    gen_server:cast(?MODULE, {eval, Dir, Specs}).
+eval(Dir, Specs, Fun) ->
+    gen_server:cast(?MODULE, {eval, Dir, Specs, Fun}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -55,8 +56,9 @@ handle_call(_Request, _From, State) ->
 %% @spec handle_cast(Msg, State) -> {noreply, State} |
 %%                                  {noreply, State, Timeout} |
 %%                                  {stop, Reason, State}
-handle_cast({eval, Dir, Specs}, State) ->
-    ok = osiris_log:evaluate_retention(Dir, Specs),
+handle_cast({eval, Dir, Specs, Fun}, State) ->
+    Range = osiris_log:evaluate_retention(Dir, Specs),
+    _ = Fun(Range),
     {noreply, State}.
 
 %% @spec handle_info(Info, State) -> {noreply, State} |

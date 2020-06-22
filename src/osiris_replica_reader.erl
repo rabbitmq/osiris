@@ -179,8 +179,8 @@ handle_info(_Info, State) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
-terminate(_Reason, #state{counter_id = CntId}) ->
-    ok = osiris_counters:delete(CntId),
+terminate(_Reason, #state{log = Log}) ->
+    ok = osiris_log:close(Log),
     ok.
 
 %%--------------------------------------------------------------------

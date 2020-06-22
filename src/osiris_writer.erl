@@ -20,6 +20,12 @@
 
 -define(SUP, osiris_server_sup).
 
+-define(ADD_COUNTER_FIELDS,
+        [
+         committed_offset
+         ]).
+-define(C_COMMITTED_OFFSET, ?C_NUM_LOG_FIELDS + 1).
+
 %% primary osiris process
 %% batch writes incoming data
 %% notifies replicator and reader processes of the new max index
@@ -93,14 +99,6 @@ ack(LeaderPid, Offset) when is_integer(Offset) andalso Offset >= 0 ->
 write(Pid, Sender, Corr, Data) ->
     gen_batch_server:cast(Pid, {write, Sender, Corr, Data}).
 
--define(COUNTER_FIELDS,
-        [chunks_written,
-         offset,
-         committed_offset]).
--define(C_CHUNKS_WRITTEN, 1).
--define(C_OFFSET, 2).
--define(C_COMMITTED_OFFSET, 3).
-
 -spec init(osiris:config()) -> {ok, state()}.
 init(#{name := Name,
        external_ref := ExtRef,
@@ -110,8 +108,10 @@ init(#{name := Name,
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
     ORef = atomics:new(1, [{signed, true}]),
-    Log = osiris_log:init(Config#{dir => Dir}),
-    CntRef = osiris_counters:new({?MODULE, ExtRef}, ?COUNTER_FIELDS),
+    CntName = {?MODULE, ExtRef},
+    Log = osiris_log:init(Config#{dir => Dir,
+                                  counter_spec => {CntName, ?ADD_COUNTER_FIELDS}}),
+    CntRef = osiris_log:counters_ref(Log),
     %% should this not be be chunk id rather than last offset?
     LastOffs = osiris_log:next_offset(Log) -1,
     CommittedOffset = case osiris_log:tail_info(Log) of
@@ -124,7 +124,6 @@ init(#{name := Name,
                               -1
                       end,
     atomics:put(ORef, 1, CommittedOffset),
-    counters:put(CntRef, ?C_OFFSET, LastOffs),
     counters:put(CntRef, ?C_COMMITTED_OFFSET, CommittedOffset),
     EvtFmt = maps:get(event_formatter, Config, undefined),
     ?INFO("osiris_writer:init/1: name: ~s last offset: ~b committed chunk id: ~b",
@@ -157,10 +156,10 @@ handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt,
                              State1;
                          _ ->
                              Seg = osiris_log:write(Entries, Seg0),
-                             LastOffs = osiris_log:next_offset(Seg) - 1,
+                             % LastOffs = osiris_log:next_offset(Seg) - 1,
                              %% update written
-                             counters:add(Cnt, ?C_CHUNKS_WRITTEN, 1),
-                             counters:put(Cnt, ?C_OFFSET, LastOffs),
+                             % counters:add(Cnt, ?C_CHUNKS_WRITTEN, 1),
+                             % counters:put(Cnt, ?C_OFFSET, LastOffs),
                              update_pending(ThisBatchOffs, Corrs,
                                             State1#?MODULE{log = Seg})
                      end,
@@ -193,9 +192,10 @@ handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt,
             {stop, normal}
     end.
 
-terminate(_, #?MODULE{data_listeners = Listeners,
-                      cfg = #cfg{ext_reference = ExtRef}}) ->
-    ok = osiris_counters:delete({?MODULE, ExtRef}),
+terminate(_, #?MODULE{log = Log,
+                      data_listeners = Listeners,
+                      cfg = #cfg{}}) ->
+    ok = osiris_log:close(Log),
     [osiris_replica_reader:stop(Pid) || {Pid, _} <- Listeners],
     ok.
 

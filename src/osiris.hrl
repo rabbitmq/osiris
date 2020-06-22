@@ -18,3 +18,4 @@
                                                             line => ?LINE}),
        ok).
 
+-define(C_NUM_LOG_FIELDS, 3).

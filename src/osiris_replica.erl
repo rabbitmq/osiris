@@ -40,7 +40,8 @@
               external_ref :: term(),
               offset_ref :: atomics:atomics_ref(),
               event_formatter :: undefined | mfa(),
-              reader_monitor_ref :: reference()
+              reader_monitor_ref :: reference(),
+              counter :: counters:counters_ref()
              }).
 
 -type parse_state() :: undefined |
@@ -50,7 +51,6 @@
 -record(?MODULE, {cfg :: #cfg{},
                   parse_state :: parse_state(),
                   log :: osiris_log:state(),
-                  counter :: counters:counters_ref(),
                   committed_offset = -1 :: -1 | osiris:offset(),
                   offset_listeners = [] :: [{pid(), osiris:offset(),
                                              mfa() | undefined}]
@@ -62,15 +62,16 @@
               state/0
               ]).
 
--define(COUNTER_FIELDS,
-        [chunks_written,
-         offset,
+-define(ADD_COUNTER_FIELDS,
+        [
+         committed_offset,
          forced_gcs,
-         packets]).
--define(C_CHUNKS_WRITTEN, 1).
--define(C_OFFSET, 2).
--define(C_FORCED_GCS, 3).
--define(C_PACKETS, 4).
+         packets
+         ]).
+-define(C_COMMITTED_OFFSET, ?C_NUM_LOG_FIELDS + 1).
+-define(C_FORCED_GCS, ?C_NUM_LOG_FIELDS + 2).
+-define(C_PACKETS, ?C_NUM_LOG_FIELDS + 3).
+
 
 %%%===================================================================
 %%% API functions
@@ -129,14 +130,18 @@ init(#{name := Name,
     {Port, LSock} = open_tcp_port(Min, Max),
     Self = self(),
     spawn_link(fun() -> accept(LSock, Self) end),
-    CntRef = osiris_counters:new({?MODULE, ExtRef}, ?COUNTER_FIELDS),
+    CntName = {?MODULE, ExtRef},
     Node = node(LeaderPid),
 
     {ok, {_, LeaderEpochOffs}} = rpc:call(Node, osiris_writer,
                                           overview, [LeaderPid]),
 
     Dir = osiris_log:directory(Config),
-    Log = osiris_log:init_acceptor(LeaderEpochOffs, Config#{dir => Dir}),
+    Log = osiris_log:init_acceptor(LeaderEpochOffs,
+                                   Config#{dir => Dir,
+                                           counter_spec =>
+                                           {CntName, ?ADD_COUNTER_FIELDS}}),
+    CntRef = osiris_log:counters_ref(Log),
     {NextOffset, LastChunk} = TailInfo = osiris_log:tail_info(Log),
     case LastChunk of
         empty ->
@@ -189,14 +194,15 @@ init(#{name := Name,
                              external_ref = ExtRef,
                              offset_ref = ORef,
                              event_formatter = EvtFmt,
-                             reader_monitor_ref = monitor(process, RRPid)},
-                  log = Log,
-                  counter = CntRef}}.
+                             reader_monitor_ref = monitor(process, RRPid),
+                             counter = CntRef},
+                  log = Log}}.
 
 
 open_tcp_port(M, M) ->
     throw({error, all_busy});
 open_tcp_port(Min, Max) ->
+    %% TODO: make configurable
     RcvBuf = 408300 * 5,
     case gen_tcp:listen(Min, [binary,
                               {packet, raw},
@@ -259,11 +265,13 @@ handle_call(get_reader_context, _From,
 %% @end
 %%--------------------------------------------------------------------
 handle_cast({committed_offset, Offs},
-            #?MODULE{cfg = #cfg{offset_ref = ORef},
+            #?MODULE{cfg = #cfg{offset_ref = ORef,
+                                counter = Cnt},
                      committed_offset = Last} = State) ->
     case Offs > Last of
         true ->
             %% notify offset listeners
+            counters:put(Cnt, ?C_COMMITTED_OFFSET, Offs),
             ok = atomics:put(ORef, 1, Offs),
             {noreply,
              notify_offset_listeners(State#?MODULE{committed_offset = Offs})};
@@ -271,7 +279,7 @@ handle_cast({committed_offset, Offs},
             State
     end;
 handle_cast({register_offset_listener, Pid, EvtFormatter, Offset},
-                #?MODULE{offset_listeners = Listeners} = State0) ->
+            #?MODULE{offset_listeners = Listeners} = State0) ->
     State1 = State0#?MODULE{offset_listeners = [{Pid, Offset, EvtFormatter}
                                                 | Listeners]},
     State = notify_offset_listeners(State1),
@@ -290,8 +298,8 @@ handle_cast(Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_info(force_gc, #?MODULE{cfg = #cfg{gc_interval = Interval},
-                               counter = Cnt} = State) ->
+handle_info(force_gc, #?MODULE{cfg = #cfg{gc_interval = Interval,
+                                          counter = Cnt}} = State) ->
     garbage_collect(),
     counters:add(Cnt, ?C_FORCED_GCS, 1),
     erlang:send_after(Interval, self(), force_gc),
@@ -302,21 +310,19 @@ handle_info({socket, Socket}, #?MODULE{cfg = Cfg} = State) ->
     {noreply, State#?MODULE{cfg = Cfg#cfg{socket = Socket}}};
 handle_info({tcp, Socket, Bin},
             #?MODULE{cfg = #cfg{socket = Socket,
-                                leader_pid = LeaderPid},
+                                leader_pid = LeaderPid,
+                                counter = Cnt},
                      parse_state = ParseState0,
-                     log = Log0,
-                     counter = Cnt} = State) ->
+                     log = Log0
+                     } = State) ->
     ok = inet:setopts(Socket, [{active, 1}]),
     %% validate chunk
     {ParseState, OffsetChunks} = parse_chunk(Bin, ParseState0, []),
     {Acks, Log} = lists:foldl(
                         fun({FirstOffset, B}, {Aks, Acc0}) ->
                                 Acc = osiris_log:accept_chunk(B, Acc0),
-                                counters:add(Cnt, ?C_CHUNKS_WRITTEN, 1),
                                 {[FirstOffset | Aks], Acc}
                         end, {[], Log0}, OffsetChunks),
-    LastOffs = osiris_log:next_offset(Log) - 1,
-    counters:put(Cnt, ?C_OFFSET, LastOffs),
     counters:add(Cnt, ?C_PACKETS, 1),
     case Acks of
         [] -> ok;
@@ -356,8 +362,8 @@ handle_info({'DOWN', _Ref, process, Pid, Info}, State) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
-terminate(_Reason, #?MODULE{cfg = #cfg{external_ref = ExtRef}}) ->
-    ok = osiris_counters:delete({?MODULE, ExtRef}),
+terminate(_Reason, #?MODULE{log = Log}) ->
+    ok = osiris_log:close(Log),
     ok.
 
 %%--------------------------------------------------------------------
