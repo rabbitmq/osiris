@@ -22,9 +22,11 @@
 -export([formatter/1]).
 
 -record(state, {log :: osiris_log:state(),
+                name :: string(),
                 socket :: gen_tcp:socket(),
                 replica_pid :: pid(),
                 leader_pid :: pid(),
+                leader_monitor_ref :: reference(),
                 counter :: counters:counters_ref(),
                 counter_id :: term(),
                 committed_offset = -1 :: -1 | osiris:offset(),
@@ -73,6 +75,7 @@ stop(Pid) ->
 %%--------------------------------------------------------------------
 init(#{host := Host,
        port := Port,
+       name := Name,
        replica_pid := ReplicaPid,
        leader_pid := LeaderPid,
        start_offset := {StartOffset, _} = TailInfo,
@@ -81,8 +84,8 @@ init(#{host := Host,
     CntRef = osiris_counters:new(CntId, ?COUNTER_FIELDS),
     %% TODO: handle errors
     {ok, Log} = osiris_writer:init_data_reader(LeaderPid, TailInfo),
-    ?INFO("starting replica reader with ~w NextOffs ~b~n",
-          [Args, osiris_log:next_offset(Log)]),
+    ?INFO("starting replica reader ~s at offset ~b Args: ~p",
+          [Name, osiris_log:next_offset(Log), Args]),
     SndBuf = 146988 * 10,
     {ok, Sock} = gen_tcp:connect(Host, Port, [binary,
                                               {packet, 0},
@@ -90,10 +93,13 @@ init(#{host := Host,
                                               {sndbuf, SndBuf}]),
     %% register data listener with osiris_proc
     ok = osiris_writer:register_data_listener(LeaderPid, StartOffset),
+    MRef = monitor(process, LeaderPid),
     State = maybe_send_committed_offset(#state{log = Log,
+                                               name = Name,
                                                socket = Sock,
                                                replica_pid = ReplicaPid,
                                                leader_pid = LeaderPid,
+                                               leader_monitor_ref = MRef,
                                                counter = CntRef,
                                                counter_id = CntId}),
     {ok, State}.
@@ -165,7 +171,26 @@ handle_info({osiris_offset, _, _Offs}, State0) ->
     State1 = maybe_send_committed_offset(State0),
     State = maybe_register_offset_listener(State1#state{offset_listener = undefined}),
     {noreply, State};
-handle_info(_Info, State) ->
+handle_info({'DOWN', Ref, _, _, Info},
+            #state{name = Name,
+                   socket = Sock,
+                   leader_monitor_ref = Ref} = State) ->
+    %% leader is down, exit
+    ?ERROR("osiris_replica_reader: '~s' detected leader down with ~W - exiting...",
+           [Name, Info, 10]),
+    %% this should be enough to make the replica shut down
+    ok = gen_tcp:close(Sock),
+    {stop, Info, State};
+handle_info({tcp_closed, Socket},
+            #state{name = Name, socket = Socket} = State) ->
+    ?DEBUG("osiris_replica_reader: '~s' Socket closed. Exiting...", [Name]),
+    {stop, tcp_closed, State};
+handle_info({tcp_error, Socket, Error},
+            #state{name = Name, socket = Socket} = State) ->
+    ?DEBUG("osiris_replica_reader: '~s' Socket error ~p. Exiting...", [Name, Error]),
+    {stop, {tcp_error, Error}, State};
+handle_info(Info, #state{name = Name} = State) ->
+    ?DEBUG("osiris_replica_reader: '~s' unhandled message ~W", [Name, Info, 10]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------

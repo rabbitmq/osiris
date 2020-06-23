@@ -32,6 +32,7 @@ all_tests() ->
      replica_offset_listener,
      cluster_restart,
      cluster_delete,
+     cluster_failure,
      start_cluster_invalid_replicas,
      diverged_replica,
      retention
@@ -513,6 +514,44 @@ cluster_delete(Config) ->
     end,
 
     osiris:delete_cluster(Conf),
+    [slave:stop(N) || N <- Nodes],
+    ok.
+
+cluster_failure(Config) ->
+    %% when the leader exits the failure the replicas and replica readers
+    %% should also exit
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    [LeaderNode | Replicas] = Nodes = [start_slave(N, PrivDir) || N <- [s1, s2, s3]],
+    Conf0 = #{name => Name,
+              epoch => 1,
+              leader_node => LeaderNode,
+              replica_nodes => Replicas},
+    {ok, #{leader_pid := Leader,
+           replica_pids := [R1, R2]} = _Conf} = osiris:start_cluster(Conf0),
+
+    _PreRRs = supervisor:which_children({osiris_replica_reader_sup, node(Leader)}),
+    %% stop the leader
+    gen_batch_server:stop(Leader, bananas, 5000),
+
+    R1Ref = monitor(process, R1),
+    R2Ref = monitor(process, R2),
+    receive
+        {'DOWN', R1Ref, _, _, _} ->
+            ok
+    after 2000 ->
+              flush(),
+              exit(down_timeout_1)
+    end,
+    receive
+        {'DOWN', R2Ref, _, _, _} ->
+            ok
+    after 2000 ->
+              flush(),
+              exit(down_timeout_2)
+    end,
+    [] = supervisor:which_children({osiris_replica_reader_sup, node(Leader)}),
+
     [slave:stop(N) || N <- Nodes],
     ok.
 

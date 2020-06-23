@@ -40,7 +40,6 @@
               external_ref :: term(),
               offset_ref :: atomics:atomics_ref(),
               event_formatter :: undefined | mfa(),
-              reader_monitor_ref :: reference(),
               counter :: counters:counters_ref()
              }).
 
@@ -156,29 +155,30 @@ init(#{name := Name,
     {ok, Ip} = inet:getaddr(HostName, inet),
     ReplicaReaderConf = #{host => Ip,
                           port => Port,
+                          name => Name,
                           replica_pid => self(),
                           leader_pid => LeaderPid,
                           start_offset => TailInfo,
                           external_ref => ExtRef},
-    RRPid = case supervisor:start_child({osiris_replica_reader_sup, Node},
-                                        #{id => make_ref(),
-                                          start => {osiris_replica_reader,
-                                                    start_link,
-                                                    [ReplicaReaderConf]},
-                                          %% replica readers should never be
-                                          %% restarted by their sups
-                                          %% instead they need to be re-started
-                                          %% by their replica
-                                          restart => temporary,
-                                          shutdown => 5000,
-                                          type => worker,
-                                          modules => [osiris_replica_reader]})
-            of
-                {ok, Pid} ->
-                    Pid;
-                {ok, Pid, _} ->
-                    Pid
-            end,
+    _RRPid = case supervisor:start_child({osiris_replica_reader_sup, Node},
+                                         #{id => make_ref(),
+                                           start => {osiris_replica_reader,
+                                                     start_link,
+                                                     [ReplicaReaderConf]},
+                                           %% replica readers should never be
+                                           %% restarted by their sups
+                                           %% instead they need to be re-started
+                                           %% by their replica
+                                           restart => temporary,
+                                           shutdown => 5000,
+                                           type => worker,
+                                           modules => [osiris_replica_reader]})
+             of
+                 {ok, Pid} ->
+                     Pid;
+                 {ok, Pid, _} ->
+                     Pid
+             end,
     Interval = maps:get(replica_gc_interval, Config, 5000),
     erlang:send_after(Interval, self(), force_gc),
     ORef = atomics:new(1, [{signed, true}]),
@@ -194,7 +194,6 @@ init(#{name := Name,
                              external_ref = ExtRef,
                              offset_ref = ORef,
                              event_formatter = EvtFmt,
-                             reader_monitor_ref = monitor(process, RRPid),
                              counter = CntRef},
                   log = Log}}.
 
@@ -338,13 +337,15 @@ handle_info({tcp_passive, Socket},
     %% here
     {noreply, State};
 handle_info({tcp_closed, Socket},
-            #?MODULE{cfg = #cfg{socket = Socket}} = State) ->
-    ?DEBUG("Socket closed ~n", []),
-    {noreply, State};
+            #?MODULE{cfg = #cfg{name = Name,
+                                socket = Socket}} = State) ->
+    ?DEBUG("osiris_replica: ~s Socket closed. Exiting...", [Name]),
+    {stop, tcp_closed, State};
 handle_info({tcp_error, Socket, Error},
-            #?MODULE{cfg = #cfg{socket = Socket}} = State) ->
-    ?DEBUG("Socket error ~p~n", [Error]),
-    {noreply, State};
+            #?MODULE{cfg = #cfg{name = Name,
+                                socket = Socket}} = State) ->
+    ?DEBUG("osiris_replica: ~s Socket error ~p. Exiting...", [Name, Error]),
+    {stop, {tcp_error, Error}, State};
 handle_info({'DOWN', _Ref, process, Pid, Info}, State) ->
     ?DEBUG("osiris_replica:handle_info/2: DOWN received Pid ~w, Info: ~w",
            [Pid, Info]),

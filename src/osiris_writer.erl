@@ -150,16 +150,11 @@ handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt,
     %% filter write commands
     case handle_commands(Commands, State0, {[], [], #{}}) of
         {Entries, Replies, Corrs, State1} ->
-            %% incr chunk counter
             State2 = case Entries of
                          [] ->
                              State1;
                          _ ->
                              Seg = osiris_log:write(Entries, Seg0),
-                             % LastOffs = osiris_log:next_offset(Seg) - 1,
-                             %% update written
-                             % counters:add(Cnt, ?C_CHUNKS_WRITTEN, 1),
-                             % counters:put(Cnt, ?C_OFFSET, LastOffs),
                              update_pending(ThisBatchOffs, Corrs,
                                             State1#?MODULE{log = Seg})
                      end,
@@ -192,9 +187,11 @@ handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt,
             {stop, normal}
     end.
 
-terminate(_, #?MODULE{log = Log,
-                      data_listeners = Listeners,
-                      cfg = #cfg{}}) ->
+terminate(Reason, #?MODULE{log = Log,
+                           data_listeners = Listeners,
+                           cfg = #cfg{name = Name}}) ->
+    ?INFO("osiris_writer:terminate/2: name ~s reason: ~w",
+          [Name, Reason]),
     ok = osiris_log:close(Log),
     [osiris_replica_reader:stop(Pid) || {Pid, _} <- Listeners],
     ok.
