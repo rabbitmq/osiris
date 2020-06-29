@@ -345,6 +345,8 @@ truncate_to(Name, [{E, ChId} | NextEOs], SegInfos) ->
     case find_segment_for_offset(ChId, SegInfos) of
         not_found ->
             truncate_to(Name, NextEOs, SegInfos);
+        {end_of_log, _Info} ->
+            ok;
         {found, #seg_info{file = File,
                           index = Idx}} ->
             ?INFO("osiris_log: ~s on node ~s truncating to chunk id ~b in epoch ~b",

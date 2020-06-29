@@ -34,6 +34,7 @@ all_tests() ->
      cluster_delete,
      cluster_failure,
      start_cluster_invalid_replicas,
+     restart_replica,
      diverged_replica,
      retention
     ].
@@ -452,7 +453,7 @@ cluster_restart(Config) ->
     end,
 
     osiris:stop_cluster(Conf),
-    {ok, #{leader_pid := Leader1}} = osiris:start_cluster(Conf0#{epoch => 1}),
+    {ok, #{leader_pid := Leader1}} = osiris:start_cluster(Conf0#{epoch => 2}),
     %% give leader some time to discover the committed offset
     timer:sleep(1000),
 
@@ -564,6 +565,32 @@ start_cluster_invalid_replicas(Config) ->
               dir => ?config(priv_dir, Config)},
     {ok, #{leader_pid := _Leader,
            replica_pids := []}} = osiris:start_cluster(Conf0).
+
+restart_replica(Config) ->
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    Nodes = [s1, s2, s3],
+    [LeaderE1, Replica1, Replica2] =
+        [start_slave(N, PrivDir) || N <- Nodes],
+        InitConf = #{name => Name,
+                     external_ref => Name,
+                     epoch => 1,
+                     leader_node => LeaderE1,
+                     replica_nodes => [Replica1, Replica2]},
+    {ok, #{leader_pid := LeaderE1Pid,
+           replica_pids := [R1Pid, _]} = Conf} = osiris:start_cluster(InitConf),
+    %% write some records in e1
+    Msgs = lists:seq(1, 1),
+    [osiris:write(LeaderE1Pid, N, [<<N:64/integer>>]) || N <- Msgs],
+    wait_for_written(Msgs),
+    timer:sleep(100),
+    ok = rpc:call(node(R1Pid), gen_server, stop, [R1Pid]),
+    [osiris:write(LeaderE1Pid, N, [<<N:64/integer>>]) || N <- Msgs],
+    wait_for_written(Msgs),
+    {ok, _Replica1b} = osiris_replica:start(node(R1Pid), Conf),
+    [osiris:write(LeaderE1Pid, N, [<<N:64/integer>>]) || N <- Msgs],
+    wait_for_written(Msgs),
+    ok.
 
 diverged_replica(Config) ->
     PrivDir = ?config(data_dir, Config),
