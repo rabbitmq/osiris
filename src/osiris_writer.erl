@@ -65,9 +65,15 @@ start(Config = #{name := Name,
 
 stop(#{name := Name,
        leader_node := Leader}) ->
-    _ = supervisor:terminate_child({?SUP, Leader}, Name),
-    _ = supervisor:delete_child({?SUP, Leader}, Name),
-    ok.
+    try
+        _ = supervisor:terminate_child({?SUP, Leader}, Name),
+        _ = supervisor:delete_child({?SUP, Leader}, Name),
+        ok
+    catch
+        _:{noproc, _} ->
+            %% Whole supervisor or app is already down - i.e. stop_app
+            ok
+    end.
 
 delete(#{leader_node := Leader} = Config) ->
     stop(Config),

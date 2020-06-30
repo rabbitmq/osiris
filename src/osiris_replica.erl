@@ -86,9 +86,15 @@ start(Node, Config = #{name := Name}) when is_list(Name) ->
                              modules => [?MODULE]}) .
 
 stop(Node, #{name := Name}) ->
-    _ = supervisor:terminate_child({?SUP, Node}, Name),
-    _ = supervisor:delete_child({?SUP, Node}, Name),
-    ok.
+    try
+        _ = supervisor:terminate_child({?SUP, Node}, Name),
+        _ = supervisor:delete_child({?SUP, Node}, Name),
+        ok
+    catch
+        _:{noproc, _} ->
+            %% Whole supervisor or app is already down - i.e. stop_app
+            ok
+    end.
 
 delete(Node, Config) ->
     stop(Node, Config),
