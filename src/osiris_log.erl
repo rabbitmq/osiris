@@ -176,6 +176,10 @@ init(#{dir := Dir,
     end,
 
     Cnt = make_counter(Config),
+    %% initialise offset counter to -1 as 0 is the first offset in the log and
+    %% it hasn't necessarily been written yet, for an empty log the first offset
+    %% is initialised to 0 however and will be updated after each retention run.
+    counters:put(Cnt, ?C_OFFSET, -1),
     Cfg = #cfg{directory = Dir,
                name = Name,
                max_segment_size = MaxSize,
@@ -189,6 +193,7 @@ init(#{dir := Dir,
                                                     current_epoch = Epoch}});
         [#seg_info{file = Filename,
                    index = IdxFilename,
+                   first = #chunk_info{id = FstChId},
                    last = #chunk_info{epoch = E,
                                       id = ChId,
                                       num = N}} | _] ->
@@ -201,6 +206,7 @@ init(#{dir := Dir,
             end,
             TailInfo = {ChId + N, {E, ChId}},
 
+            counters:put(Cnt, ?C_FIRST_OFFSET, FstChId),
             counters:put(Cnt, ?C_OFFSET, ChId + N - 1),
             ?INFO("~s:~s/~b: next offset ~b",
                   [?MODULE, ?FUNCTION_NAME,
@@ -217,6 +223,7 @@ init(#{dir := Dir,
         [#seg_info{file = Filename,
                    index = IdxFilename,
                    last = undefined} | _] ->
+            %% the empty log case
             {ok, Fd} = open(Filename, ?FILE_OPTS_WRITE),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, _} = file:position(Fd, eof),
