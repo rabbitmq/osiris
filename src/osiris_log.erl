@@ -1213,8 +1213,11 @@ open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
 
 open_index_read(File) ->
     {ok, Fd} = open(File, [read, raw, binary, read_ahead]),
-    %% assertion that index header is correct
-    {ok, ?IDX_HEADER} = file:read(Fd, ?IDX_HEADER_SIZE),
+    %% We can't use the assertion that index header is correct because of a
+    %% race condition between opening the file and writing the header
+    %% It seems to happen when retention policies are applied
+    %% {ok, ?IDX_HEADER} = file:read(Fd, ?IDX_HEADER_SIZE)
+    _ = file:read(Fd, ?IDX_HEADER_SIZE),
     Fd.
 
 throw_missing({error, enoent}) ->
