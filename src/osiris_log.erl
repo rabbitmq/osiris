@@ -92,7 +92,7 @@
 
 -type offset() :: osiris:offset().
 -type epoch() :: osiris:epoch().
--type range() :: {From :: offset(), To :: offset()}.
+-type range() :: empty | {From :: offset(), To :: offset()}.
 
 -type config() :: osiris:config() |
                   #{dir := file:filename(),
@@ -946,10 +946,14 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
 
 -spec overview(term()) -> {range(), [{offset(), epoch()}]}.
 overview(Dir) ->
-    SegInfos = build_log_overview(Dir),
-    Range = range_from_segment_infos(SegInfos),
-    OffsEpochs = last_offset_epochs(SegInfos),
-    {Range, OffsEpochs}.
+    case build_log_overview(Dir) of
+        [] ->
+            {empty, []};
+        SegInfos ->
+            Range = range_from_segment_infos(SegInfos),
+            OffsEpochs = last_offset_epochs(SegInfos),
+            {Range, OffsEpochs}
+    end.
 
 -spec evaluate_retention(file:filename(), [retention_spec()]) -> range().
 evaluate_retention(Dir, Specs) ->

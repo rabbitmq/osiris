@@ -558,6 +558,8 @@ overview(Config) ->
     Log0 = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(Log0),
     {{0, 4}, [{1, 1}, {2, 4}]} = osiris_log:overview(LDir),
+    %% non existant dir should return empty
+    {empty, []} = osiris_log:overview("/tmp/blahblah"),
     ok.
 
 evaluate_retention_max_bytes(Config) ->
