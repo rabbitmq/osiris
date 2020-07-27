@@ -827,6 +827,7 @@ scan_index({ok, <<O:64/unsigned,
            IdxFd, Fd, Offset)  ->
      case Offset >= O andalso Offset < ONext of
          true ->
+             ok = file:close(IdxFd),
              {O, Pos};
          false ->
              {ok, _} = file:position(IdxFd, {cur, -?INDEX_RECORD_SIZE_B}),
@@ -882,8 +883,8 @@ build_log_overview0([IdxFile | IdxFiles], Acc0) ->
             case file:read(IdxFd, ?INDEX_RECORD_SIZE_B) of
                 {ok, <<_Offset:64/unsigned,
                        _Timestamp:64/signed,
-                      _Epoch:64/unsigned,
-                      LastChunkPos:32/unsigned>>} ->
+                       _Epoch:64/unsigned,
+                       LastChunkPos:32/unsigned>>} ->
                     ok = file:close(IdxFd),
                     SegFile = segment_from_index_file(IdxFile),
                     Acc = build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0),
@@ -902,6 +903,7 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
         {ok, ?LOG_HEADER_SIZE} = file:position(Fd, ?LOG_HEADER_SIZE),
         case file:read(Fd, ?HEADER_SIZE_B) of
             eof ->
+                _ = file:close(Fd),
                 Acc0;
             {ok, <<?MAGIC:4/unsigned,
                    ?VERSION:4/unsigned,
