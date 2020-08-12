@@ -11,6 +11,8 @@
          register_data_listener/2,
          ack/2,
          write/4,
+         write_tracking/3,
+         read_tracking/2,
          init/1,
          handle_batch/2,
          terminate/2,
@@ -105,6 +107,12 @@ ack(LeaderPid, Offset) when is_integer(Offset) andalso Offset >= 0 ->
 write(Pid, Sender, Corr, Data) ->
     gen_batch_server:cast(Pid, {write, Sender, Corr, Data}).
 
+write_tracking(Pid, TrackingId, Offset) ->
+    gen_batch_server:cast(Pid, {write_tracking, TrackingId, Offset}).
+
+read_tracking(Pid, TrackingId) ->
+    gen_batch_server:call(Pid, {read_tracking, TrackingId}).
+
 -spec init(osiris:config()) -> {ok, state()}.
 init(#{name := Name,
        external_ref := ExtRef,
@@ -154,8 +162,8 @@ handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt,
 
     ThisBatchOffs = osiris_log:next_offset(Seg0),
     %% filter write commands
-    case handle_commands(Commands, State0, {[], [], #{}}) of
-        {Entries, Replies, Corrs, State1} ->
+    case handle_commands(Commands, State0, {[], [], #{}, #{}}) of
+        {Entries, Replies, Corrs, Trk, State1} ->
             State2 = case Entries of
                          [] ->
                              State1;
@@ -164,28 +172,36 @@ handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt,
                              update_pending(ThisBatchOffs, Corrs,
                                             State1#?MODULE{log = Seg})
                      end,
+            State3 = case maps:size(Trk) == 0 of
+                         true ->
+                             State2;
+                         false ->
+                             %% need to write a tracking chunk
+                             Log = osiris_log:write_tracking(Trk, delta, State2#?MODULE.log),
+                             State2#?MODULE{log = Log}
+                     end,
 
-            LastChId = case osiris_log:tail_info(State2#?MODULE.log) of
+            LastChId = case osiris_log:tail_info(State3#?MODULE.log) of
                            {_, {_, BatchOffs}} ->
                                BatchOffs;
                            _ ->
                                -1
                        end,
             COffs = agreed_commit([LastChId |
-                                   maps:values(State2#?MODULE.replica_state)]),
+                                   maps:values(State3#?MODULE.replica_state)]),
 
             %% if committed offset has incresed - update
             State = case COffs > COffs0 of
                         true ->
-                            P = State2#?MODULE.pending_corrs,
+                            P = State3#?MODULE.pending_corrs,
                             % ?DEBUG("new committed offset ~b ~w", [COffs, P]),
                             atomics:put(ORef, 1, COffs),
                             counters:put(Cnt, ?C_COMMITTED_OFFSET, COffs),
                             Pending = notify_writers(P, COffs, Cfg),
-                            State2#?MODULE{committed_offset = COffs,
+                            State3#?MODULE{committed_offset = COffs,
                                            pending_corrs = Pending};
                         false ->
-                            State2
+                            State3
                     end,
             {ok, [garbage_collect | Replies],
              notify_offset_listeners(notify_data_listeners(State))};
@@ -226,13 +242,23 @@ update_pending(BatchOffs, Corrs,
                           queue:in({BatchOffs, Corrs}, Pending0)}
     end.
 
-handle_commands([], State, {Records, Replies, Corrs}) ->
-    {Records, lists:reverse(Replies), Corrs, State};
+handle_commands([], State, {Records, Replies, Corrs, Trk}) ->
+    {Records, lists:reverse(Replies), Corrs, Trk, State};
 handle_commands([{cast, {write, Pid, Corr, R}} | Rem], State,
-                {Records, Replies, Corrs0}) ->
+                {Records, Replies, Corrs0, Trk}) ->
     Corrs = maps:update_with(Pid, fun (C) -> [Corr |  C] end,
                              [Corr], Corrs0),
-    handle_commands(Rem, State, {[R | Records], Replies, Corrs});
+    handle_commands(Rem, State, {[R | Records], Replies, Corrs, Trk});
+handle_commands([{cast, {write_tracking, TrackingId, Offset}} | Rem], State,
+                {Records, Replies, Corrs, Trk0}) ->
+    Trk = Trk0#{TrackingId => Offset},
+    handle_commands(Rem, State, {Records, Replies, Corrs, Trk});
+handle_commands([{call, From, {read_tracking, TrackingId}} | Rem], State,
+                {Records, Replies0, Corrs, Trk}) ->
+    %% need to merge pending tracking entreis before read
+    Tracking = osiris_log:tracking(State#?MODULE.log),
+    Replies = [{reply, From, maps:get(TrackingId, Tracking, undefined)} | Replies0],
+    handle_commands(Rem, State, {Records, Replies, Corrs, Trk});
 handle_commands([{cast, {register_data_listener, Pid, Offset}} | Rem],
                 #?MODULE{data_listeners = Listeners} = State0, Acc) ->
     State = State0#?MODULE{data_listeners = [{Pid, Offset} | Listeners]},
@@ -255,12 +281,12 @@ handle_commands([{call, From, get_reader_context} | Rem],
                                     name = Name,
                                     directory = Dir},
                          committed_offset = COffs} = State,
-                {Records, Replies, Corrs}) ->
+                {Records, Replies, Corrs, Trk}) ->
     Reply = {reply, From, #{dir => Dir,
                             name => Name,
                             committed_offset => max(0, COffs),
                             offset_ref => ORef}},
-    handle_commands(Rem, State, {Records, [Reply | Replies], Corrs});
+    handle_commands(Rem, State, {Records, [Reply | Replies], Corrs, Trk});
 handle_commands([osiris_stop | _Rem], _State, _Acc) ->
     {stop, normal};
 handle_commands([_Unk | Rem], State, Acc) ->
