@@ -1173,13 +1173,6 @@ make_chunk(Blobs, ChType, Timestamp, Epoch, Next) ->
                                   (iolist_size(B)):31/unsigned>>, B],
                         {Count+1, [Data | Acc]}
                 end, {0, []}, Blobs),
-    % TData = maps:fold(
-    %           fun (Id, Offs, Acc) ->
-    %                   [<<(byte_size(Id)):8/unsigned,
-    %                      Id/binary,
-    %                      Offs:64/unsigned>> | Acc]
-    %           end, [], Tracking),
-    % TSize = iolist_size(TData),
     Size = iolist_size(EData),
     %% checksum is over entry data only
     Crc = erlang:crc32(EData),
@@ -1425,6 +1418,10 @@ part(Len, [B | L]) when Len > 0->
     end.
 
 recover_tracking(File) ->
+    %% TODO: if the first chunk in the segment isn't a tracking snapshot and
+    %% there are prior segments we could scan at least two segments increasing
+    %% the chance of encountering a snapshot and thus ensure we don't miss any
+    %% tracking entries
     {ok, Fd} = file:open(File, [read, binary, raw]),
     {ok, ?LOG_HEADER_SIZE} = file:position(Fd, ?LOG_HEADER_SIZE),
     recover_tracking(Fd, #{}).
