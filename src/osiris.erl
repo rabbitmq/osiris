@@ -3,6 +3,8 @@
 -include("osiris.hrl").
 -export([
          write/3,
+         write_tracking/3,
+         read_tracking/2,
          init_reader/2,
          register_offset_listener/2,
          register_offset_listener/3,
@@ -90,6 +92,14 @@ start_replica(Replica, Config) ->
 
 write(Pid, Corr, Data) ->
     osiris_writer:write(Pid, self(), Corr, Data).
+
+-spec write_tracking(pid(), binary(), offset()) -> ok.
+write_tracking(Pid, TrackingId, Offset) ->
+    osiris_writer:write_tracking(Pid, TrackingId, Offset).
+
+-spec read_tracking(pid(), binary()) -> offset() | undefined.
+read_tracking(Pid, TrackingId) ->
+    osiris_writer:read_tracking(Pid, TrackingId).
 
 %% @doc Initialise a new offset reader
 %% @param Pid the pid of a writer or replica process

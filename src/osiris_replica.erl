@@ -3,11 +3,6 @@
 
 -include("osiris.hrl").
 
--define(MAGIC, 5).
-%% format version
--define(VERSION, 0).
--define(HEADER_SIZE, 39).
-
 -define(SUP, osiris_server_sup).
 
 %% osiris replica, spaws remote reader, TCP listener
@@ -318,8 +313,7 @@ handle_info({tcp, Socket, Bin},
                                 leader_pid = LeaderPid,
                                 counter = Cnt},
                      parse_state = ParseState0,
-                     log = Log0
-                     } = State) ->
+                     log = Log0} = State) ->
     ok = inet:setopts(Socket, [{active, 1}]),
     %% validate chunk
     {ParseState, OffsetChunks} = parse_chunk(Bin, ParseState0, []),
@@ -392,6 +386,7 @@ parse_chunk(<<>>, ParseState, Acc) ->
     {ParseState, lists:reverse(Acc)};
 parse_chunk(<<?MAGIC:4/unsigned,
               ?VERSION:4/unsigned,
+              _ChType:8/unsigned,
               _NumEntries:16/unsigned,
               _NumRecords:32/unsigned,
                _Timestamp:64/signed,
@@ -401,14 +396,15 @@ parse_chunk(<<?MAGIC:4/unsigned,
               Size:32/unsigned,
               _Data:Size/binary,
               Rem/binary>> = All, undefined, Acc) ->
-    TotalSize = Size + ?HEADER_SIZE,
+    TotalSize = Size + ?HEADER_SIZE_B,
     <<Chunk:TotalSize/binary, _/binary>> = All,
     parse_chunk(Rem, undefined, [{FirstOffset, Chunk} | Acc]);
 parse_chunk(Bin, undefined, Acc)
-  when byte_size(Bin) =< ?HEADER_SIZE ->
+  when byte_size(Bin) =< ?HEADER_SIZE_B ->
     {Bin, lists:reverse(Acc)};
 parse_chunk(<<?MAGIC:4/unsigned,
               ?VERSION:4/unsigned,
+              _ChType:8/unsigned,
               _NumEntries:16/unsigned,
               _NumRecords:32/unsigned,
               _Timestamp:64/signed,

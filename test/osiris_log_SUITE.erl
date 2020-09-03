@@ -8,6 +8,8 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
+-include("src/osiris.hrl").
+
 %%%===================================================================
 %%% Common Test callbacks
 %%%===================================================================
@@ -43,10 +45,13 @@ all_tests() ->
      init_epoch_offsets_multi_segment2,
      % truncate,
      % truncate_multi_segment,
+     accept_chunk,
      accept_chunk_truncates_tail,
      overview,
      evaluate_retention_max_bytes,
-     evaluate_retention_max_age
+     evaluate_retention_max_age,
+     offset_tracking,
+     offset_tracking_snapshot
     ].
 
 groups() ->
@@ -120,13 +125,14 @@ init_with_lower_epoch(Config) ->
     _ = osiris_log:close(
           osiris_log:init(Conf#{epoch => 2})),
     %% lower is not ok
-    ?assertException(exit, invalid_epoch,
+    ?assertException(exit, {invalid_epoch, _, _},
                      osiris_log:init(Conf#{epoch => 0})),
     ok.
 
 write_batch(Config) ->
     Conf = ?config(osiris_conf, Config),
     S0 = osiris_log:init(Conf),
+    ?assertEqual(0, osiris_log:next_offset(S0)),
     S1 = osiris_log:write([<<"hi">>], S0),
     ?assertEqual(1, osiris_log:next_offset(S1)),
     ok.
@@ -160,10 +166,13 @@ subbatch(Config) ->
 read_chunk_parsed(Config) ->
     Conf = ?config(osiris_conf, Config),
     S0 = osiris_log:init(Conf),
-    _S1 = osiris_log:write([<<"hi">>], S0),
     {ok, R0} = osiris_log:init_data_reader({0, empty}, Conf),
+    ct:pal("before"),
+    {end_of_stream, R1} = osiris_log:read_chunk_parsed(R0),
+    ct:pal("empty"),
+    _S1 = osiris_log:write([<<"hi">>], S0),
     ?assertMatch({[{0, <<"hi">>}], _},
-                 osiris_log:read_chunk_parsed(R0)),
+                 osiris_log:read_chunk_parsed(R1)),
     ok.
 
 read_chunk_parsed_multiple_chunks(Config) ->
@@ -194,8 +203,10 @@ write_multi_log(Config) ->
     Segments = filelib:wildcard(filename:join(?config(dir, Config), "*.segment")),
     ?assertEqual(2, length(Segments)),
 
+    OffRef = atomics:new(1, []),
+    atomics:put(OffRef, 1, 1011), %% takes a single offset tracking data into account
     %% ensure all records can be read
-    {ok, R0} = osiris_log:init_data_reader({0, empty}, Conf),
+    {ok, R0} = osiris_log:init_offset_reader(first, Conf#{offset_ref => OffRef}),
 
     R1 = lists:foldl(
                 fun (_, Acc0) ->
@@ -206,7 +217,7 @@ write_multi_log(Config) ->
                         ?assertEqual(10, length(Records)),
                         Acc
                 end, R0, lists:seq(1, 101)),
-    ?assertEqual(1010, osiris_log:next_offset(R1)),
+    ?assertEqual(1011, osiris_log:next_offset(R1)),
     ok.
 
 tail_info_empty(Config) ->
@@ -351,17 +362,18 @@ init_offset_reader_truncated(Config) ->
 
     {ok, L2} = osiris_log:init_offset_reader(last, RConf),
     %% the last batch offset should be 949 given 50 records per batch
-    ?assertEqual(950, osiris_log:next_offset(L2)),
+    %% + 1 offset for the tracking snapshot
+    ?assertEqual(951, osiris_log:next_offset(L2)),
     osiris_log:close(L2),
 
     {ok, L3} = osiris_log:init_offset_reader(next, RConf),
-    %% the last offset should be 999
-    ?assertEqual(1000, osiris_log:next_offset(L3)),
+    %% the last offset should be 999 + 1
+    ?assertEqual(1001, osiris_log:next_offset(L3)),
     osiris_log:close(L3),
 
     {ok, L4} = osiris_log:init_offset_reader(1001, RConf),
     %% higher = next
-    ?assertEqual(1000, osiris_log:next_offset(L4)),
+    ?assertEqual(1001, osiris_log:next_offset(L4)),
     osiris_log:close(L4),
 
     {ok, L5} = osiris_log:init_offset_reader(5, RConf),
@@ -495,23 +507,34 @@ init_epoch_offsets_multi_segment2(Config) ->
     osiris_log:close(Log0),
     ok.
 
-% truncate(Config) ->
-%     EpochChunks = [{1, [<<"one">>]},
-%                    {1, [<<"two">>]},
-%                    {1, [<<"three">>, <<"four">>]}
-%                   ],
-%     LDir = ?config(leader_dir, Config),
-%     Log0  = seed_log(LDir, EpochChunks, Config),
-%     {4, {1, 2}} = osiris_log:tail_info(Log0),
-%     Log1 = osiris_log:truncate(last_chunk, Log0),
-%     {2, {1, 1}} = osiris_log:tail_info(Log1),
-%     Log2 = osiris_log:truncate(last_chunk, Log1),
-%     {1, {1, 0}} = osiris_log:tail_info(Log2),
-%     Log3 = osiris_log:truncate(last_chunk, Log2),
-%     {0, empty} = osiris_log:tail_info(Log3),
-%     Log = osiris_log:write([<<"on2e">>], Log3),
-%     ok = osiris_log:close(Log),
-%     ok.
+accept_chunk(Config) ->
+    ok = logger:set_primary_config(level, all),
+    Conf = ?config(osiris_conf, Config),
+    LConf = Conf#{dir => ?config(leader_dir, Config)},
+    FConf = Conf#{dir => ?config(follower1_dir, Config)},
+    L0 = osiris_log:init(LConf),
+    %% write an entry with just tracking
+    L1 = osiris_log:write_tracking(#{<<"id1">> => 1}, delta, L0),
+    timer:sleep(100),
+    L2 = osiris_log:write([<<"hi">>], L1),
+
+    F0 = osiris_log:init(FConf),
+
+    {ok, R0} = osiris_log:init_data_reader(osiris_log:tail_info(F0), LConf),
+    {Chunk1, R1} = read_chunk(R0),
+    ct:pal("Chunk1 ~w", [Chunk1]),
+    F1 = osiris_log:accept_chunk(Chunk1, F0),
+    {Chunk2, R2} = read_chunk(R1),
+    F2 = osiris_log:accept_chunk(Chunk2, F1),
+
+    osiris_log:close(L2),
+    osiris_log:close(R2),
+    osiris_log:close(F2),
+    ok.
+
+read_chunk(S0) ->
+    {ok, {_, _, _, Hd, Ch}, S1} = osiris_log:read_chunk(S0),
+    {[Hd, Ch], S1}.
 
 
 accept_chunk_truncates_tail(Config) ->
@@ -540,12 +563,11 @@ accept_chunk_truncates_tail(Config) ->
                                                   epoch => 2}),
     {ok, RLog0} = osiris_log:init_data_reader(osiris_log:tail_info(ALog0),
                                               Conf#{dir => LDir}),
-    {ok, {_, _, Hd, Ch}, _RLog} = osiris_log:read_chunk(RLog0),
+    {ok, {_, _, _, Hd, Ch}, _RLog} = osiris_log:read_chunk(RLog0),
     ALog = osiris_log:accept_chunk([Hd, Ch], ALog0),
     osiris_log:close(ALog),
     % validate equal
     ?assertMatch({LO, EOffs}, osiris_log:overview(FDir)),
-
     ok.
 
 overview(Config) ->
@@ -589,7 +611,7 @@ evaluate_retention_max_age(Config) ->
                    end || _ <- lists:seq(1, 20)],
     LDir = ?config(dir, Config),
     %% this should create at least two segments
-    Log  = seed_log(Conf#{max_segment_size => 1000 * 1000} , EpochChunks, Config),
+    Log = seed_log(Conf#{max_segment_size => 1000 * 1000}, EpochChunks, Config),
     osiris_log:close(Log),
     SegFilesPre = filelib:wildcard(filename:join(LDir, "*.segment")),
     ?assertEqual(2, length(SegFilesPre)),
@@ -603,23 +625,61 @@ evaluate_retention_max_age(Config) ->
     ?assertEqual(1, length(SegFiles)),
     ok.
 
+offset_tracking(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf),
+    ?assertEqual(0, osiris_log:next_offset(S0)),
+    S1 = osiris_log:write_tracking(#{<<"id1">> => 0}, delta,
+                                   osiris_log:write([<<"hi">>], S0)),
+    ?assertEqual(2, osiris_log:next_offset(S1)),
+    ?assertMatch(#{<<"id1">> := 0}, osiris_log:tracking(S1)),
+    S2 = osiris_log:write_tracking(#{<<"id1">> => 1}, delta, S1),
+    %% test recovery
+    osiris_log:close(S2),
+    S3 = osiris_log:init(Conf),
+    ?assertMatch(#{<<"id1">> := 1}, osiris_log:tracking(S3)),
+    osiris_log:close(S3),
+    ok.
+
+offset_tracking_snapshot(Config) ->
+    Conf0 = ?config(osiris_conf, Config),
+    Conf = Conf0#{max_segment_size => 1000 * 1000},
+    Data = crypto:strong_rand_bytes(1500),
+    %% all chunks are at least 2000ms old
+    Ts = now_ms() - 2000,
+    EpochChunks = [begin
+                       {1, Ts, [Data || _ <- lists:seq(1, 50)]}
+                   end || _ <- lists:seq(1, 20)],
+    S0 = osiris_log:init(Conf),
+    %% write a tracking entry
+    S1 = osiris_log:write_tracking(#{<<"id1">> => 1}, delta, S0),
+    %% this should create at least two semments
+    S2 = seed_log(S1, EpochChunks, Config),
+    osiris_log:close(S2),
+    S3 = osiris_log:init(Conf),
+    ?assertMatch(#{<<"id1">> := 1}, osiris_log:tracking(S3)),
+    osiris_log:close(S3),
+    ok.
+
 %% Utility
 
 
-seed_log(Conf, EpochChunks, _Config) when is_map(Conf) ->
+seed_log(Conf, EpochChunks, Config) when is_map(Conf) ->
     Log0 = osiris_log:init(Conf),
+    seed_log(Log0, EpochChunks, Config);
+seed_log(Dir, EpochChunks, Config) when is_list(Dir) ->
+    seed_log(#{dir => Dir,
+               epoch => 1,
+               max_segment_size => 1000 * 1000,
+               name => ?config(test_case, Config)},
+             EpochChunks, Config);
+seed_log(Log, EpochChunks, _Config) ->
     lists:foldl(
       fun ({Epoch, Records}, Acc0) ->
               write_chunk(Epoch, now_ms(), Records, Acc0);
           ({Epoch, Ts, Records}, Acc0) ->
               write_chunk(Epoch, Ts, Records, Acc0)
-      end, Log0, EpochChunks);
-seed_log(Dir, EpochChunks, Config) ->
-    seed_log(#{dir => Dir,
-               epoch => 1,
-               max_segment_size => 1000 * 1000,
-               name => ?config(test_case, Config)},
-             EpochChunks, Config).
+      end, Log, EpochChunks).
 
 write_chunk(Epoch, Now, Records, Log0) ->
     case osiris_log:get_current_epoch(Log0) of
