@@ -1,3 +1,10 @@
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
+%%
+%% Copyright (c) 2007-2020 VMware, Inc. or its affiliates.  All rights reserved.
+%%
+
 -module(osiris_log).
 
 -include_lib("kernel/include/file.hrl").
@@ -359,7 +366,7 @@ init_acceptor(EpochOffsets0, #{name := Name,
     %% than the last chunk offset then just attach at next offset.
     %% * if it is higher - truncate to last epoch offset
     %% * if it has a higher epoch than last provided - truncate to last offset
-    %% of previous 
+    %% of previous
     %% sort them so that the highest epochs go first
     EpochOffsets = lists:reverse(lists:sort(EpochOffsets0)),
 
