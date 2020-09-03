@@ -786,16 +786,17 @@ send_file(Sock, State) ->
                 fun((non_neg_integer()) -> non_neg_integer())) ->
     {ok, state()} | {end_of_stream, state()}.
 send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
-                         mode = #read{next_offset = NextOffs} = Read,
+                         mode = #read{type = RType,
+                                      next_offset = NextOffs} = Read,
                          current_file = CurFile,
-                         fd = Fd} = State, Callback) ->
+                         fd = Fd} = State0, Callback) ->
     case can_read_next_offset(Read) of
         true ->
             {ok, Pos} = file:position(Fd, cur),
             case file:read(Fd, ?HEADER_SIZE_B) of
                 {ok, <<?MAGIC:4/unsigned,
                        ?VERSION:4/unsigned,
-                       _Chtype:8/unsigned,
+                       ChType:8/unsigned,
                        _NumEntries:16/unsigned,
                        NumRecords:32/unsigned,
                        _Timestamp:64/integer,
@@ -808,17 +809,27 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                     %% and return the number of bytes to sendfile
                     %% this allow users of this api to send all the data
                     %% or just header and entry data
-                    ToSend = Callback(DataSize + ?HEADER_SIZE_B),
-                    ok = sendfile(Fd, Sock, Pos, ToSend),
+                    ToSend = DataSize + ?HEADER_SIZE_B,
                     FilePos = Pos + ToSend,
                     %% sendfile doesn't increment the file descriptor position
-                    {ok, FilePos} = file:position(Fd, FilePos),
-                    {ok, State#?MODULE{mode = incr_next_offset(NumRecords, Read)}};
+                    {ok, _} = file:position(Fd, FilePos),
+                    State = State0#?MODULE{mode = incr_next_offset(NumRecords, Read)},
+                    %% only sendfile if either the reader is a data reader
+                    %% or the chunk is a user type (for offset readers)
+                    case ChType == ?CHNK_USER orelse RType == data of
+                        true ->
+                            _ = Callback(ToSend),
+                            ok = sendfile(Fd, Sock, Pos, ToSend),
+                            {ok, State};
+                        false ->
+                            %% skip chunk and recurse
+                            send_file(Sock, State, Callback)
+                    end;
                 {ok, B} when byte_size(B) < ?HEADER_SIZE_B ->
                     %% partial data available
                     %% reset and wait for update
                     {ok, Pos} = file:position(Fd, Pos),
-                    {end_of_stream, State};
+                    {end_of_stream, State0};
                 eof ->
                     %% open next segment file and start there if it exists
                     SegFile = make_file_name(NextOffs, "segment"),
@@ -827,7 +838,7 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                             %% the new filename is the same as the old one
                             %% this should only really happen for an empty
                             %% log but would cause an infinite loop if it does
-                            {end_of_stream, State};
+                            {end_of_stream, State0};
                         false ->
                             case file:open(filename:join(Dir, SegFile),
                                            [raw, binary, read]) of
@@ -835,16 +846,16 @@ send_file(Sock, #?MODULE{cfg = #cfg{directory = Dir},
                                     {ok, _} = file:position(Fd2, ?LOG_HEADER_SIZE),
                                     ok = file:close(Fd),
                                     send_file(Sock,
-                                              State#?MODULE{fd = Fd2,
-                                                            current_file = SegFile},
+                                              State0#?MODULE{fd = Fd2,
+                                                             current_file = SegFile},
                                               Callback);
                                 {error, enoent} ->
-                                    {end_of_stream, State}
+                                    {end_of_stream, State0}
                             end
                     end
             end;
         false ->
-            {end_of_stream, State}
+            {end_of_stream, State0}
     end.
 
 
