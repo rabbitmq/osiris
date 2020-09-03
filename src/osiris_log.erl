@@ -283,6 +283,13 @@ write(Entries, Now, #?MODULE{mode = #write{}} = State)
             integer(), state()) -> state().
 write(Entries, ChType, Now,
       #?MODULE{cfg = #cfg{},
+               fd = undefined,
+               mode = #write{}} = State0) ->
+    %% we need to open a new segment here to ensure tracking chunk
+    %% is made before the one that triggers the new segment to be created
+    write(Entries, ChType, Now, open_new_segment(State0));
+write(Entries, ChType, Now,
+      #?MODULE{cfg = #cfg{},
                mode = #write{current_epoch = Epoch,
                              tail_info = {Next, _}} = _Write0} = State0)
   when is_integer(Now) andalso is_integer(ChType) ->
@@ -326,9 +333,14 @@ accept_chunk([<<?MAGIC:4/unsigned,
                 DataSize:32/unsigned,
                 Data/binary>> | DataParts] = Chunk,
              #?MODULE{cfg = #cfg{},
-                      mode = #write{tail_info = {Next, _}}} = State) ->
+                      mode = #write{tail_info = {Next, _}}} = State0) ->
     validate_crc(Next, Crc, part(DataSize, [Data | DataParts])),
-    write_chunk(Chunk, Timestamp, Epoch, NumRecords, State);
+    case write_chunk(Chunk, Timestamp, Epoch, NumRecords, State0) of
+        full ->
+            accept_chunk(Chunk, open_new_segment(State0));
+        State ->
+            State
+    end;
 accept_chunk(Binary, State)
   when is_binary(Binary) ->
     accept_chunk([Binary], State);
@@ -706,7 +718,7 @@ tracking(#?MODULE{mode = #write{tracking = Tracking}}) ->
     {error, {invalid_chunk_header, term()}}.
 read_chunk(#?MODULE{cfg = #cfg{directory = Dir},
                     mode = #read{last_offset = _Last,
-                                 next_offset = Next} = Read,
+                                 next_offset = Offs} = Read,
                     current_file = CurFile,
                     fd = Fd} = State) ->
     %% reads the next chunk of entries, parsed
@@ -736,7 +748,7 @@ read_chunk(#?MODULE{cfg = #cfg{directory = Dir},
                     {end_of_stream, State};
                 eof ->
                     %% open next segment file and start there if it exists
-                    SegFile = make_file_name(Next, "segment"),
+                    SegFile = make_file_name(Offs, "segment"),
                     case SegFile == CurFile of
                         true ->
                             %% the new filename is the same as the old one
@@ -1206,9 +1218,9 @@ make_chunk(Blobs, ChType, Timestamp, Epoch, Next) ->
         Size:32/unsigned>>,
         EData], NumRecords}.
 
-write_chunk(Chunk, Timestamp, Epoch, NumRecords,
-            #?MODULE{fd = undefined} = State) ->
-    write_chunk(Chunk, Timestamp, Epoch, NumRecords, open_new_segment(State));
+write_chunk(_Chunk, _Timestamp, _Epoch, _NumRecords,
+            #?MODULE{fd = undefined} = _State) ->
+    full;
 write_chunk(Chunk, Timestamp, Epoch, NumRecords,
             #?MODULE{cfg = #cfg{max_segment_size = MaxSize,
                                 counter = CntRef},
@@ -1329,13 +1341,9 @@ open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
     %% we always move to the end of the file
     {ok, _} = file:position(Fd, eof),
     {ok, _} = file:position(IdxFd, eof),
-    %% if there is tracking data and we need to write a chunk
-    %% with all entries, a snapshot of the tracking state
-    %% if you like = no entry will be written if the Tracking map is empty
-    % Now = erlang:system_time(millisecond),
 
-    %% TODO filter tracking ids lower than first offset
     FstOffs = counters:get(Cnt, ?C_FIRST_OFFSET),
+    %% filter tracking ids lower than first offset
     Tracking = maps:filter(fun (_K, O) -> O >= FstOffs end, Tracking0),
 
     State1 = State0#?MODULE{current_file = Filename,

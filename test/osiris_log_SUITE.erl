@@ -58,7 +58,8 @@ all_tests() ->
      evaluate_retention_max_bytes,
      evaluate_retention_max_age,
      offset_tracking,
-     offset_tracking_snapshot
+     offset_tracking_snapshot,
+     offset_tracking_empty
     ].
 
 groups() ->
@@ -666,6 +667,18 @@ offset_tracking_snapshot(Config) ->
     S3 = osiris_log:init(Conf),
     ?assertMatch(#{<<"id1">> := 1}, osiris_log:tracking(S3)),
     osiris_log:close(S3),
+    ok.
+
+
+offset_tracking_empty(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf),
+    ?assertEqual(0, osiris_log:next_offset(S0)),
+    S1 = osiris_log:write_tracking(#{}, snapshot, S0),
+    ?assertEqual(1, osiris_log:next_offset(S1)),
+    S2 = osiris_log:write([<<"hi">>], S1),
+    ?assertEqual(2, osiris_log:next_offset(S2)),
+    osiris_log:close(S2),
     ok.
 
 %% Utility
