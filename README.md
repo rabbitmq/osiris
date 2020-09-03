@@ -2,7 +2,7 @@
 
 # Osiris
 
-Osiris is a foundation of the log-based streaming subsystem for RabbitMQ. 
+Osiris is a foundation of the log-based streaming subsystem for RabbitMQ.
 
 ## Project Maturity
 
@@ -17,5 +17,5 @@ and [TLA+ spec](./tla) to learn about the protocol.
 
 (c) 2020, VMware Inc or its affiliates.
 
-Double licensed under the ASL2 and MPL1.1.
+Double licensed under the ASL2 and MPL2.0.
 See [LICENSE](./LICENSE) for details.
