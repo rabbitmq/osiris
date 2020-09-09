@@ -66,7 +66,7 @@
 start(Config = #{name := Name,
                  leader_node := Leader}) ->
     supervisor:start_child({?SUP, Leader},
-                           #{id => Name,
+                           #{id => child_name(Name),
                              start => {?MODULE, start_link, [Config]},
                              restart => temporary,
                              shutdown => 5000,
@@ -74,9 +74,10 @@ start(Config = #{name := Name,
 
 stop(#{name := Name,
        leader_node := Leader}) ->
+    CName = child_name(Name),
     try
-        _ = supervisor:terminate_child({?SUP, Leader}, Name),
-        _ = supervisor:delete_child({?SUP, Leader}, Name),
+        _ = supervisor:terminate_child({?SUP, Leader}, CName),
+        _ = supervisor:delete_child({?SUP, Leader}, CName),
         ok
     catch
         _:{noproc, _} ->
@@ -84,9 +85,21 @@ stop(#{name := Name,
             ok
     end.
 
-delete(#{leader_node := Leader} = Config) ->
-    stop(Config),
-    rpc:call(Leader, osiris_log, delete_directory, [Config]).
+delete(#{leader_node := Leader,
+         name := Name} = Config) ->
+    try
+        case supervisor:get_childspec({?SUP, Leader}, child_name(Name)) of
+            {ok, _} ->
+                stop(Config),
+                rpc:call(Leader, osiris_log, delete_directory, [Config]);
+            {error, not_found} ->
+                ok
+        end
+    catch
+        _:{noproc, _} ->
+            %% Whole supervisor or app is already down - i.e. stop_app
+            ok
+    end.
 
 -spec start_link(Config :: map()) ->
     {ok, pid()} | {error, {already_started, pid()}}.
@@ -363,3 +376,6 @@ agreed_commit(Indexes) ->
     SortedIdxs = lists:sort(fun erlang:'>'/2, Indexes),
     Nth = (length(SortedIdxs) div 2) + 1,
     lists:nth(Nth, SortedIdxs).
+
+child_name(Name) ->
+    lists:flatten(io_lib:format("~s_writer", [Name])).

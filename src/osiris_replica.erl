@@ -80,7 +80,7 @@
 
 start(Node, Config = #{name := Name}) when is_list(Name) ->
     supervisor:start_child({?SUP, Node},
-                           #{id => Name,
+                           #{id => child_name(Name),
                              start => {?MODULE, start_link, [Config]},
                              restart => temporary,
                              shutdown => 5000,
@@ -88,9 +88,10 @@ start(Node, Config = #{name := Name}) when is_list(Name) ->
                              modules => [?MODULE]}) .
 
 stop(Node, #{name := Name}) ->
+    CName = child_name(Name),
     try
-        _ = supervisor:terminate_child({?SUP, Node}, Name),
-        _ = supervisor:delete_child({?SUP, Node}, Name),
+        _ = supervisor:terminate_child({?SUP, Node}, CName),
+        _ = supervisor:delete_child({?SUP, Node}, CName),
         ok
     catch
         _:{noproc, _} ->
@@ -98,9 +99,20 @@ stop(Node, #{name := Name}) ->
             ok
     end.
 
-delete(Node, Config) ->
-    stop(Node, Config),
-    rpc:call(Node, osiris_log, delete_directory, [Config]).
+delete(Node, Config = #{name := Name}) ->
+    try
+        case supervisor:get_childspec({?SUP, Node}, child_name(Name)) of
+            {ok, _} ->
+                stop(Node, Config),
+                rpc:call(Node, osiris_log, delete_directory, [Config]);
+            {error, not_found} ->
+                ok
+        end
+    catch
+        _:{noproc, _} ->
+            %% Whole supervisor or app is already down - i.e. stop_app
+            ok
+    end.
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -452,6 +464,8 @@ notify_offset_listeners(#?MODULE{cfg = #cfg{external_ref = Ref,
     State#?MODULE{offset_listeners = L}.
 
 %% INTERNAL
+child_name(Name) ->
+    lists:flatten(io_lib:format("~s_replica", [Name])).
 
 wrap_osiris_event(undefined, Evt) ->
     Evt;
