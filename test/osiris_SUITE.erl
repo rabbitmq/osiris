@@ -45,6 +45,7 @@ all_tests() ->
      diverged_replica,
      retention,
      tracking,
+     tracking_many,
      tracking_retention
     ].
 
@@ -717,6 +718,32 @@ tracking(Config) ->
     timer:sleep(100),
     ?assertEqual(1, osiris:read_tracking(Leader, TrackId)),
 
+    ok.
+
+tracking_many(Config) ->
+    Name = ?config(cluster_name, Config),
+    Conf0 = #{name => Name,
+              epoch => 1,
+              leader_node => node(),
+              replica_nodes => [],
+              dir => ?config(priv_dir, Config)},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    ok = osiris:write(Leader, 42, <<"mah-data">>),
+    receive
+        {osiris_written, _Name, [42]} ->
+            ok
+    after 2000 ->
+              flush(),
+              exit(osiris_written_timeout)
+    end,
+    TrackId = <<"tracking-id-1">>,
+    ?assertEqual(undefined, osiris:read_tracking(Leader, TrackId)),
+    ok = osiris:write_tracking(Leader, TrackId, 0),
+    ok = osiris:write_tracking(Leader, TrackId, 1),
+    ok = osiris:write_tracking(Leader, TrackId, 2),
+    ok = osiris:write_tracking(Leader, TrackId, 3),
+    timer:sleep(250),
+    ?assertEqual(3, osiris:read_tracking(Leader, TrackId)),
     ok.
 
 tracking_retention(Config) ->

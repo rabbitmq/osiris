@@ -197,7 +197,8 @@ handle_batch(Commands, #?MODULE{cfg = #cfg{counter = Cnt,
                              State2;
                          false ->
                              %% need to write a tracking chunk
-                             Log = osiris_log:write_tracking(Trk, delta, State2#?MODULE.log),
+                             Log = osiris_log:write_tracking(Trk, delta,
+                                                             State2#?MODULE.log),
                              State2#?MODULE{log = Log}
                      end,
 
@@ -271,7 +272,14 @@ handle_commands([{cast, {write, Pid, Corr, R}} | Rem], State,
     handle_commands(Rem, State, {[R | Records], Replies, Corrs, Trk});
 handle_commands([{cast, {write_tracking, TrackingId, Offset}} | Rem], State,
                 {Records, Replies, Corrs, Trk0}) ->
-    Trk = Trk0#{TrackingId => Offset},
+    %% only add the tracking id if there isn't already a key in there as the
+    %% batch is reversed!
+    Trk = case maps:is_key(TrackingId, Trk0) of
+              false ->
+                  Trk0#{TrackingId => Offset};
+              true ->
+                  Trk0
+          end,
     handle_commands(Rem, State, {Records, Replies, Corrs, Trk});
 handle_commands([{call, From, {read_tracking, TrackingId}} | Rem], State,
                 {Records, Replies0, Corrs, Trk}) ->
