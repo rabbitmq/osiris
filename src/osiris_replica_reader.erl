@@ -191,7 +191,7 @@ handle_info({'DOWN', Ref, _, _, Info},
 handle_info({tcp_closed, Socket},
             #state{name = Name, socket = Socket} = State) ->
     ?DEBUG("osiris_replica_reader: '~s' Socket closed. Exiting...", [Name]),
-    {stop, tcp_closed, State};
+    {stop, normal, State};
 handle_info({tcp_error, Socket, Error},
             #state{name = Name, socket = Socket} = State) ->
     ?DEBUG("osiris_replica_reader: '~s' Socket error ~p. Exiting...", [Name, Error]),
