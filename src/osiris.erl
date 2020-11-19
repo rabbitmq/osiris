@@ -52,6 +52,8 @@
                           {max_age, milliseconds()}.
 
 -type writer_id() :: binary().
+-type data() :: iodata() |
+                {batch, non_neg_integer(), 0, iodata()}.
 
 -export_type([
               state/0,
@@ -62,7 +64,8 @@
               offset_spec/0,
               retention_spec/0,
               milliseconds/0,
-              writer_id/0
+              writer_id/0,
+              data/0
               ]).
 
 -spec start_cluster(config()) ->
@@ -105,7 +108,7 @@ start_replica(Replica, Config) ->
 -spec write(Pid :: pid(),
             WriterId :: binary() | undefined,
             CorrOrSeq :: non_neg_integer() | term(),
-            Data :: iodata()) -> ok.
+            Data :: data()) -> ok.
 write(Pid, WriterId, Corr, Data) ->
     osiris_writer:write(Pid, self(), WriterId, Corr, Data).
 

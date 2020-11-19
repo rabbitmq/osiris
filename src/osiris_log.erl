@@ -284,19 +284,18 @@ init(#{dir := Dir,
                      index_fd = IdxFd}
     end.
 
--spec write([iodata() | {batch, non_neg_integer(), 0, iodata()}], state()) ->
+-spec write([osiris:data()], state()) ->
     state().
 write(Entries, State) when is_list(Entries) ->
     Timestamp = erlang:system_time(millisecond),
     write(Entries, ?CHNK_USER, Timestamp, #{}, State).
 
--spec write([iodata() | {batch, non_neg_integer(), 0, iodata()}],
-            integer(), state()) -> state().
+-spec write([osiris:data()], integer(), state()) -> state().
 write(Entries, Now, #?MODULE{mode = #write{}} = State)
   when is_integer(Now) ->
     write(Entries, ?CHNK_USER, Now, #{}, State).
 
--spec write([iodata() | {batch, non_neg_integer(), 0, iodata()}],
+-spec write([osiris:data()],
             chunk_type(), osiris:milliseconds(),
             #{osiris:writer_id() := non_neg_integer()},
             state()) -> state().

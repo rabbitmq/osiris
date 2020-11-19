@@ -128,7 +128,7 @@ ack(LeaderPid, Offset) when is_integer(Offset) andalso Offset >= 0 ->
             Sender :: pid(),
             WriterId :: binary() | undefined,
             CorrOrSeq :: non_neg_integer() | term(),
-            Data :: iodata()) -> ok.
+            Data :: osiris:data()) -> ok.
 write(Pid, Sender, WriterId, Corr, Data)
   when is_pid(Pid) andalso
        is_pid(Sender) ->

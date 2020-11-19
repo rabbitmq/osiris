@@ -83,7 +83,7 @@ do_publish0(Conf, 0) ->
     end;
 do_publish0(#{leader := Leader} = Conf, InFlight) ->
     Ref = make_ref(),
-    ok = osiris:write(Leader, Ref, <<"datadata">>),
+    ok = osiris:write(Leader, undefined, Ref, <<"datadata">>),
     do_publish0(Conf, InFlight - 1).
 
 start_metrics_gatherer(Node) ->
