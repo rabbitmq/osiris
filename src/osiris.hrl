@@ -29,7 +29,7 @@
 -define(MAGIC, 5).
 %% chunk format version
 -define(VERSION, 0).
--define(HEADER_SIZE_B, 40).
+-define(HEADER_SIZE_B, 44).
 -define(FILE_OPTS_WRITE, [raw, binary, write, read]).
 
 
@@ -37,4 +37,5 @@
 -define(CHNK_USER, 0).
 -define(CHNK_TRK_DELTA, 1).
 -define(CHNK_TRK_SNAPSHOT, 2).
+-define(CHNK_WRT_SNAPSHOT, 3).
 
