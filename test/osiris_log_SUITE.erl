@@ -38,6 +38,7 @@ all_tests() ->
      subbatch,
      read_chunk_parsed,
      read_chunk_parsed_multiple_chunks,
+     read_header,
      write_multi_log,
      tail_info_empty,
      tail_info,
@@ -129,7 +130,7 @@ init_recover_with_writers(Config) ->
     ?assertEqual(1, osiris_log:next_offset(S1)),
     ok = osiris_log:close(S1),
     S2 = osiris_log:init(?config(osiris_conf, Config)),
-    ?assertMatch(#{<<"wid1">> := {Now, 1}}, osiris_log:writers(S2)),
+    ?assertMatch(#{<<"wid1">> := {0, Now, 1}}, osiris_log:writers(S2)),
     ?assertEqual(1, osiris_log:next_offset(S2)),
     ok.
 
@@ -212,6 +213,25 @@ read_chunk_parsed_multiple_chunks(Config) ->
     {ok, R2} = osiris_log:init_data_reader({2, {1, 0}}, Conf),
     ?assertMatch({[{2, <<"hi-again">>}], _},
                  osiris_log:read_chunk_parsed(R2)),
+    ok.
+
+read_header(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    W0 = osiris_log:init(Conf),
+    OffRef = atomics:new(1, []),
+    {ok, R0} = osiris_log:init_offset_reader(first,
+                                             Conf#{offset_ref => OffRef}),
+    {end_of_stream, R1} = osiris_log:read_header(R0),
+    _W1 = osiris_log:write([<<"hi">>, <<"ho">>], W0),
+    atomics:put(OffRef, 1, 1),
+    ?assertMatch({ok, #{chunk_id := 0,
+                        epoch := 1,
+                        type := 0,
+                        num_records := 2,
+                        num_entries := 2,
+                        timestamp := _,
+                        data_size := _,
+                        trailer_size := 0}, _}, osiris_log:read_header(R1)),
     ok.
 
 write_multi_log(Config) ->
@@ -543,7 +563,7 @@ accept_chunk(Config) ->
     Now = 12345,
     Writers = #{<<"w1">> => 1},
     L2 = osiris_log:write([<<"hi">>], ?CHNK_USER, Now, Writers, L1),
-    ?assertMatch(#{<<"w1">> := {Now, 1}}, osiris_log:writers(L2)),
+    ?assertMatch(#{<<"w1">> := {_, Now, 1}}, osiris_log:writers(L2)),
 
     F0 = osiris_log:init(FConf),
 
@@ -559,7 +579,7 @@ accept_chunk(Config) ->
     osiris_log:close(F2),
     FL0 = osiris_log:init(FConf),
     ?assertMatch(#{<<"id1">> := 1}, osiris_log:tracking(FL0)),
-    ?assertMatch(#{<<"w1">> := {Now, 1}}, osiris_log:writers(FL0)),
+    ?assertMatch(#{<<"w1">> := {_, Now, 1}}, osiris_log:writers(FL0)),
     osiris_log:close(FL0),
     ok.
 
@@ -685,7 +705,7 @@ offset_tracking_snapshot(Config) ->
     S00 = osiris_log:init(Conf),
     S0 = osiris_log:write([<<"hi">>], ?CHNK_USER, Now,
                           #{<<"wid1">> => 2}, S00),
-    ?assertMatch(#{<<"wid1">> := {Now, 2}}, osiris_log:writers(S0)),
+    ?assertMatch(#{<<"wid1">> := {_, Now, 2}}, osiris_log:writers(S0)),
     %% write a tracking entry
     S1 = osiris_log:write_tracking(#{<<"id1">> => 1}, delta, S0),
     %% this should create at least two segments
@@ -693,7 +713,7 @@ offset_tracking_snapshot(Config) ->
     osiris_log:close(S2),
     S3 = osiris_log:init(Conf),
     ?assertMatch(#{<<"id1">> := 1}, osiris_log:tracking(S3)),
-    ?assertMatch(#{<<"wid1">> := {Now, 2}}, osiris_log:writers(S3)),
+    ?assertMatch(#{<<"wid1">> := {_, Now, 2}}, osiris_log:writers(S3)),
     osiris_log:close(S3),
     ok.
 

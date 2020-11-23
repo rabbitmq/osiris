@@ -25,6 +25,7 @@
 
          init_data_reader/2,
          init_offset_reader/2,
+         read_header/1,
          read_chunk/1,
          read_chunk_parsed/1,
          committed_offset/1,
@@ -131,6 +132,17 @@
 -type record() :: {offset(), iodata()}.
 -type offset_spec() :: osiris:offset_spec().
 -type retention_spec() :: osiris:retention_spec().
+-type header_map() :: #{chunk_id => offset(),
+                        epoch => epoch(),
+                        type => chunk_type(),
+                        crc => integer(),
+                        num_records => non_neg_integer(),
+                        num_entries => non_neg_integer(),
+                        timestamp => osiris:milliseconds(),
+                        data_size => non_neg_integer(),
+                        trailer_size => non_neg_integer(),
+                        header_data => binary()}.
+
 
 %% holds static or rarely changing fields
 -record(cfg, {directory :: file:filename(),
@@ -158,7 +170,8 @@
                 %% the current offset tracking state
                 tracking = #{} :: #{tracking_id() => offset()},
                 writers = #{} :: #{osiris:writer_id() =>
-                                   {osiris:milliseconds(), non_neg_integer()}}
+                                   {offset(), osiris:milliseconds(),
+                                    non_neg_integer()}}
                }).
 
 -record(?MODULE, {cfg :: #cfg{},
@@ -354,7 +367,7 @@ write_wrt_snapshot(Writers,
                    #?MODULE{cfg = #cfg{},
                             mode = #write{} = W0} = State0) ->
     WData = maps:fold(
-                fun (W, {T, S}, Acc) ->
+                fun (W, {_O, T, S}, Acc) ->
                         [<<(byte_size(W)):8/unsigned,
                            W/binary,
                            T:64/unsigned,
@@ -764,9 +777,34 @@ tracking(#?MODULE{mode = #write{tracking = Tracking}}) ->
     Tracking.
 
 -spec writers(state()) ->
-    #{osiris:writer_id() => {osiris:milliseconds(), non_neg_integer()}}.
+    #{osiris:writer_id() => {offset(), osiris:milliseconds(), non_neg_integer()}}.
 writers(#?MODULE{mode = #write{writers = Writers}}) ->
     Writers.
+
+-spec read_header(state()) ->
+    {ok, header_map(), state()} |
+    {end_of_stream, state()} |
+    {error, {invalid_chunk_header, term()}}.
+read_header(#?MODULE{cfg = #cfg{},
+                     mode = #read{} = Read,
+                     fd = Fd} = State) ->
+    %% reads the next chunk of entries, parsed
+    %% NB: this may return records before the requested index,
+    %% that is fine - the reading process can do the appropriate filtering
+    case read_header0(State) of
+        {ok, #{num_records := NumRecords,
+               data_size := DataSize,
+               trailer_size := TrailerSize} = Header} ->
+            %% skip data portion
+            {ok, _} = file:position(Fd, {cur, DataSize + TrailerSize}),
+            {ok, Header,
+             State#?MODULE{mode = incr_next_offset(NumRecords, Read)}};
+        {end_of_stream, _} = EOF ->
+            EOF;
+        {error, _} = Err ->
+            Err
+    end.
+
 
 -spec read_chunk(state()) ->
     {ok, {chunk_type(),
@@ -778,66 +816,30 @@ writers(#?MODULE{mode = #write{writers = Writers}}) ->
          }, state()} |
     {end_of_stream, state()} |
     {error, {invalid_chunk_header, term()}}.
-read_chunk(#?MODULE{cfg = #cfg{directory = Dir},
+read_chunk(#?MODULE{cfg = #cfg{},
                     mode = #read{last_offset = _Last,
                                  next_offset = Offs} = Read,
-                    current_file = CurFile,
                     fd = Fd} = State) ->
     %% reads the next chunk of entries, parsed
     %% NB: this may return records before the requested index,
     %% that is fine - the reading process can do the appropriate filtering
-    case can_read_next_offset(Read) of
-        true ->
-            case file:read(Fd, ?HEADER_SIZE_B) of
-                {ok, <<?MAGIC:4/unsigned,
-                       ?VERSION:4/unsigned,
-                       ChType:8/unsigned,
-                       _NumEntries:16/unsigned,
-                       NumRecords:32/unsigned,
-                       _Timestamp:64/signed,
-                       Epoch:64/unsigned,
-                       Offs:64/unsigned,
-                       Crc:32/integer,
-                       DataSize:32/unsigned,
-                       TrailerSize:32/unsigned>> = HeaderData} ->
-                    {ok, BlobData} = file:read(Fd, DataSize),
-                    %% position after trailer
-                    %% TODO: should we return trailer as well?
-                    {ok, TrailerData} = file:read(Fd, TrailerSize),
-                    validate_crc(Offs, Crc, BlobData),
-                    %% tracking data
-                    {ok, {ChType, Offs, Epoch, HeaderData, BlobData, TrailerData},
-                     State#?MODULE{mode = incr_next_offset(NumRecords, Read)}};
-                {ok, _} ->
-                    %% set the position back for the next read
-                    {ok, _} = file:position(Fd, {cur, -?HEADER_SIZE_B}),
-                    {end_of_stream, State};
-                eof ->
-                    %% open next segment file and start there if it exists
-                    SegFile = make_file_name(Offs, "segment"),
-                    case SegFile == CurFile of
-                        true ->
-                            %% the new filename is the same as the old one
-                            %% this should only really happen for an empty
-                            %% log but would cause an infinite loop if it does
-                            {end_of_stream, State};
-                        false ->
-                            case file:open(filename:join(Dir, SegFile),
-                                           [raw, binary, read]) of
-                                {ok, Fd2}  ->
-                                    ok = file:close(Fd),
-                                    {ok, _} = file:position(Fd2, ?LOG_HEADER_SIZE),
-                                    read_chunk(State#?MODULE{current_file = SegFile,
-                                                             fd = Fd2});
-                                {error, enoent} ->
-                                    {end_of_stream, State}
-                            end
-                    end;
-                Invalid ->
-                    {error, {invalid_chunk_header, Invalid}}
-            end;
-        false ->
-            {end_of_stream, State}
+    case read_header0(State) of
+        {ok, #{type := ChType,
+               chunk_id := ChId,
+               epoch := Epoch,
+               crc := Crc,
+               num_records := NumRecords,
+               header_data := HeaderData,
+               data_size := DataSize,
+               trailer_size := TrailerSize}} ->
+            {ok, BlobData} = file:read(Fd, DataSize),
+            %% position after trailer
+            {ok, TrailerData} = file:read(Fd, TrailerSize),
+            validate_crc(Offs, Crc, BlobData),
+            {ok, {ChType, ChId, Epoch, HeaderData, BlobData, TrailerData},
+             State#?MODULE{mode = incr_next_offset(NumRecords, Read)}};
+        Other ->
+            Other
     end.
 
 -spec read_chunk_parsed(state()) ->
@@ -1332,7 +1334,7 @@ write_chunk(Chunk, NewWriters, Timestamp, Epoch, NumRecords,
     counters:add(CntRef, ?C_CHUNKS, 1),
     Writers = maps:fold(
                 fun(K, V, Acc) ->
-                    maps:put(K, {Timestamp, V}, Acc)
+                    maps:put(K, {Next, Timestamp, V}, Acc)
                 end, Writers0, NewWriters),
     case file:position(Fd, cur) of
         {ok, After} when After >= MaxSize ->
@@ -1562,7 +1564,7 @@ recover_tracking(Fd, Trk, Wrt) ->
                _NumRecords:32/unsigned,
                Timestamp:64/signed,
                _Epoch:64/unsigned,
-               _Next:64/unsigned,
+               ChunkId:64/unsigned,
                _Crc:32/integer,
                Size:32/unsigned,
                TSize:32/unsigned>>} ->
@@ -1582,11 +1584,11 @@ recover_tracking(Fd, Trk, Wrt) ->
                 ?CHNK_WRT_SNAPSHOT ->
                     {ok, <<0:1, S:31, Data:S/binary>>} = file:read(Fd, Size),
                     {ok, _} = file:read(Fd, TSize),
-                    recover_tracking(Fd, Trk, parse_writers_snapshot(Data, #{}));
+                    recover_tracking(Fd, Trk, parse_writers_snapshot(Data, ChunkId, #{}));
                 ?CHNK_USER ->
                     {ok, _} = file:position(Fd, {cur, Size}),
                     {ok, TData} = file:read(Fd, TSize),
-                    recover_tracking(Fd, Trk, parse_writers(TData, Timestamp, Wrt))
+                    recover_tracking(Fd, Trk, parse_writers(TData, ChunkId, Timestamp, Wrt))
             end;
         eof ->
             file:close(Fd),
@@ -1601,22 +1603,22 @@ parse_tracking(<<Size:8/unsigned,
                  Rem/binary>>, Acc) ->
     parse_tracking(Rem, Acc#{Id => Offs}).
 
-parse_writers(<<>>, _, Acc) ->
+parse_writers(<<>>, _, _, Acc) ->
     Acc;
 parse_writers(<<Size:8/unsigned,
                 Id:Size/binary,
                 Seq:64/unsigned,
-                Rem/binary>>, Ts, Acc) ->
-    parse_writers(Rem, Ts, Acc#{Id => {Ts, Seq}}).
+                Rem/binary>>, ChunkId, Ts, Acc) ->
+    parse_writers(Rem, ChunkId, Ts, Acc#{Id => {ChunkId, Ts, Seq}}).
 
-parse_writers_snapshot(<<>>, Acc) ->
+parse_writers_snapshot(<<>>, _ChId, Acc) ->
     Acc;
 parse_writers_snapshot(<<Size:8/unsigned,
                          Id:Size/binary,
                          Ts:64/unsigned,
                          Seq:64/unsigned,
-                         Rem/binary>>, Acc) ->
-    parse_writers_snapshot(Rem, Acc#{Id => {Ts, Seq}}).
+                         Rem/binary>>, ChunkId, Acc) ->
+    parse_writers_snapshot(Rem, ChunkId, Acc#{Id => {ChunkId, Ts, Seq}}).
 
 trim_writers(Max, Writers)
   when map_size(Writers) =< Max ->
@@ -1624,17 +1626,80 @@ trim_writers(Max, Writers)
 trim_writers(Max, Writers) ->
     %% remove oldest
     {ToRemove, _} = maps:fold(
-                      fun (K, {Ts, _}, {_, PrevTs} = Prev) ->
+                      fun (K, {_ChId, Ts, _}, {_, PrevTs} = Prev) ->
                               case Ts < PrevTs of
                                   true ->
                                       {K, Ts};
                                   false ->
                                       Prev
                               end;
-                          (K, {Ts, _}, undefined) ->
+                          (K, {_ChId, Ts, _}, undefined) ->
                               {K, Ts}
                       end, undefined, Writers),
     trim_writers(Max, maps:remove(ToRemove, Writers)).
+
+read_header0(#?MODULE{cfg = #cfg{directory = Dir},
+                      mode = #read{next_offset = NextChId} = Read,
+                      current_file = CurFile,
+                      fd = Fd} = State) ->
+    %% reads the next header if permitted
+    case can_read_next_offset(Read) of
+        true ->
+            case file:read(Fd, ?HEADER_SIZE_B) of
+                {ok, <<?MAGIC:4/unsigned,
+                       ?VERSION:4/unsigned,
+                       ChType:8/unsigned,
+                       NumEntries:16/unsigned,
+                       NumRecords:32/unsigned,
+                       Timestamp:64/signed,
+                       Epoch:64/unsigned,
+                       NextChId:64/unsigned,
+                       Crc:32/integer,
+                       DataSize:32/unsigned,
+                       TrailerSize:32/unsigned>> = HeaderData} ->
+                    {ok, #{chunk_id => NextChId,
+                           epoch => Epoch,
+                           type => ChType,
+                           crc => Crc,
+                           num_records => NumRecords,
+                           num_entries => NumEntries,
+                           timestamp => Timestamp,
+                           data_size => DataSize,
+                           trailer_size => TrailerSize,
+                           header_data => HeaderData}};
+                {ok, _} ->
+                    %% set the position back for the next read
+                    %% TODO: should it be an exception if the next chunk is not
+                    %% the expected next chunk id??
+                    {ok, _} = file:position(Fd, {cur, -?HEADER_SIZE_B}),
+                    {end_of_stream, State};
+                eof ->
+                    %% open next segment file and start there if it exists
+                    SegFile = make_file_name(NextChId, "segment"),
+                    case SegFile == CurFile of
+                        true ->
+                            %% the new filename is the same as the old one
+                            %% this should only really happen for an empty
+                            %% log but would cause an infinite loop if it does
+                            {end_of_stream, State};
+                        false ->
+                            case file:open(filename:join(Dir, SegFile),
+                                           [raw, binary, read]) of
+                                {ok, Fd2}  ->
+                                    ok = file:close(Fd),
+                                    {ok, _} = file:position(Fd2, ?LOG_HEADER_SIZE),
+                                    read_chunk(State#?MODULE{current_file = SegFile,
+                                                             fd = Fd2});
+                                {error, enoent} ->
+                                    {end_of_stream, State}
+                            end
+                    end;
+                Invalid ->
+                    {error, {invalid_chunk_header, Invalid}}
+            end;
+        false ->
+            {end_of_stream, State}
+    end.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").

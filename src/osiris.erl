@@ -127,7 +127,7 @@ fetch_writer_seq(Pid, WriterId) when is_pid(Pid) andalso is_binary(WriterId) ->
                                 fun(W) ->
                                         case maps:get(WriterId, W, undefined) of
                                             undefined -> undefined;
-                                            {_, Seq} ->
+                                            {_, _, Seq} ->
                                                 Seq
                                         end
                                 end).
