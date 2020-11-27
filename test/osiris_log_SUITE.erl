@@ -32,11 +32,13 @@ all_tests() ->
      init_empty,
      init_twice,
      init_recover,
+     init_recover_with_writers,
      init_with_lower_epoch,
      write_batch,
      subbatch,
      read_chunk_parsed,
      read_chunk_parsed_multiple_chunks,
+     read_header,
      write_multi_log,
      tail_info_empty,
      tail_info,
@@ -114,10 +116,21 @@ init_twice(Config) ->
 init_recover(Config) ->
     S0 = osiris_log:init(?config(osiris_conf, Config)),
     S1 = osiris_log:write([<<"hi">>], S0),
-    % ?assertEqual([{0, <<"hi">>}], S2S1 = osiris_log:write([<<"hi">>]. S0),
     ?assertEqual(1, osiris_log:next_offset(S1)),
     ok = osiris_log:close(S1),
     S2 = osiris_log:init(?config(osiris_conf, Config)),
+    ?assertEqual(1, osiris_log:next_offset(S2)),
+    ok.
+
+init_recover_with_writers(Config) ->
+    S0 = osiris_log:init(?config(osiris_conf, Config)),
+    Now = erlang:system_time(millisecond),
+    Writers = #{<<"wid1">> => 1},
+    S1 = osiris_log:write([<<"hi">>], ?CHNK_USER, Now, Writers, S0),
+    ?assertEqual(1, osiris_log:next_offset(S1)),
+    ok = osiris_log:close(S1),
+    S2 = osiris_log:init(?config(osiris_conf, Config)),
+    ?assertMatch(#{<<"wid1">> := {0, Now, 1}}, osiris_log:writers(S2)),
     ?assertEqual(1, osiris_log:next_offset(S2)),
     ok.
 
@@ -154,7 +167,8 @@ subbatch(Config) ->
               ],
     CompType = 0, %% no compression
     Batch = {batch, 2, CompType, IOData},
-    S1 = osiris_log:write([Batch, <<"simple">>], S0),
+    %% osiris_writer passes entries in reverse order
+    S1 = osiris_log:write(lists:reverse([Batch, <<"simple">>]), S0),
     ?assertEqual(3, osiris_log:next_offset(S1)),
     OffRef = atomics:new(1, []),
     atomics:put(OffRef, 1, -1), %% the initial value
@@ -186,7 +200,9 @@ read_chunk_parsed(Config) ->
 read_chunk_parsed_multiple_chunks(Config) ->
     Conf = ?config(osiris_conf, Config),
     S0 = osiris_log:init(Conf),
-    S1 = osiris_log:write([<<"hi">>, <<"hi-there">>], S0),
+    Entries = [<<"hi">>, <<"hi-there">>],
+    %% osiris_writer passes entries in reversed order
+    S1 = osiris_log:write(lists:reverse(Entries), S0),
     _S2 = osiris_log:write([<<"hi-again">>], S1),
     {ok, R0} = osiris_log:init_data_reader({0, empty}, Conf),
     {[{0, <<"hi">>}, {1, <<"hi-there">>}], R1} =
@@ -197,6 +213,37 @@ read_chunk_parsed_multiple_chunks(Config) ->
     {ok, R2} = osiris_log:init_data_reader({2, {1, 0}}, Conf),
     ?assertMatch({[{2, <<"hi-again">>}], _},
                  osiris_log:read_chunk_parsed(R2)),
+    ok.
+
+read_header(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    W0 = osiris_log:init(Conf),
+    OffRef = atomics:new(1, []),
+    {ok, R0} = osiris_log:init_offset_reader(first,
+                                             Conf#{offset_ref => OffRef}),
+    {end_of_stream, R1} = osiris_log:read_header(R0),
+    W1 = osiris_log:write([<<"hi">>, <<"ho">>], W0),
+    _W = osiris_log:write([<<"hum">>], W1),
+    atomics:put(OffRef, 1, 3),
+    {ok, H1, R2} = osiris_log:read_header(R1),
+    ?assertMatch(#{chunk_id := 0,
+                   epoch := 1,
+                   type := 0,
+                   num_records := 2,
+                   num_entries := 2,
+                   timestamp := _,
+                   data_size := _,
+                   trailer_size := 0}, H1),
+    {ok, H2, R3} = osiris_log:read_header(R2),
+    ?assertMatch(#{chunk_id := 2,
+                   epoch := 1,
+                   type := 0,
+                   num_records := 1,
+                   num_entries := 1,
+                   timestamp := _,
+                   data_size := _,
+                   trailer_size := 0}, H2),
+    {end_of_stream, _R} = osiris_log:read_header(R3),
     ok.
 
 write_multi_log(Config) ->
@@ -524,13 +571,17 @@ accept_chunk(Config) ->
     %% write an entry with just tracking
     L1 = osiris_log:write_tracking(#{<<"id1">> => 1}, delta, L0),
     timer:sleep(100),
-    L2 = osiris_log:write([<<"hi">>], L1),
+
+    Now = 12345,
+    Writers = #{<<"w1">> => 1},
+    L2 = osiris_log:write([<<"hi">>], ?CHNK_USER, Now, Writers, L1),
+    ?assertMatch(#{<<"w1">> := {_, Now, 1}}, osiris_log:writers(L2)),
 
     F0 = osiris_log:init(FConf),
 
     {ok, R0} = osiris_log:init_data_reader(osiris_log:tail_info(F0), LConf),
     {Chunk1, R1} = read_chunk(R0),
-    ct:pal("Chunk1 ~w", [Chunk1]),
+    % ct:pal("Chunk1 ~w", [Chunk1]),
     F1 = osiris_log:accept_chunk(Chunk1, F0),
     {Chunk2, R2} = read_chunk(R1),
     F2 = osiris_log:accept_chunk(Chunk2, F1),
@@ -538,11 +589,15 @@ accept_chunk(Config) ->
     osiris_log:close(L2),
     osiris_log:close(R2),
     osiris_log:close(F2),
+    FL0 = osiris_log:init(FConf),
+    ?assertMatch(#{<<"id1">> := 1}, osiris_log:tracking(FL0)),
+    ?assertMatch(#{<<"w1">> := {_, Now, 1}}, osiris_log:writers(FL0)),
+    osiris_log:close(FL0),
     ok.
 
 read_chunk(S0) ->
-    {ok, {_, _, _, Hd, Ch}, S1} = osiris_log:read_chunk(S0),
-    {[Hd, Ch], S1}.
+    {ok, {_, _, _, Hd, Ch, Tr}, S1} = osiris_log:read_chunk(S0),
+    {[Hd, Ch, Tr], S1}.
 
 
 accept_chunk_truncates_tail(Config) ->
@@ -571,8 +626,8 @@ accept_chunk_truncates_tail(Config) ->
                                                   epoch => 2}),
     {ok, RLog0} = osiris_log:init_data_reader(osiris_log:tail_info(ALog0),
                                               Conf#{dir => LDir}),
-    {ok, {_, _, _, Hd, Ch}, _RLog} = osiris_log:read_chunk(RLog0),
-    ALog = osiris_log:accept_chunk([Hd, Ch], ALog0),
+    {ok, {_, _, _, Hd, Ch, Tr}, _RLog} = osiris_log:read_chunk(RLog0),
+    ALog = osiris_log:accept_chunk([Hd, Ch, Tr], ALog0),
     osiris_log:close(ALog),
     % validate equal
     ?assertMatch({LO, EOffs}, osiris_log:overview(FDir)),
@@ -658,14 +713,19 @@ offset_tracking_snapshot(Config) ->
     EpochChunks = [begin
                        {1, Ts, [Data || _ <- lists:seq(1, 50)]}
                    end || _ <- lists:seq(1, 20)],
-    S0 = osiris_log:init(Conf),
+    Now = erlang:system_time(millisecond),
+    S00 = osiris_log:init(Conf),
+    S0 = osiris_log:write([<<"hi">>], ?CHNK_USER, Now,
+                          #{<<"wid1">> => 2}, S00),
+    ?assertMatch(#{<<"wid1">> := {_, Now, 2}}, osiris_log:writers(S0)),
     %% write a tracking entry
     S1 = osiris_log:write_tracking(#{<<"id1">> => 1}, delta, S0),
-    %% this should create at least two semments
+    %% this should create at least two segments
     S2 = seed_log(S1, EpochChunks, Config),
     osiris_log:close(S2),
     S3 = osiris_log:init(Conf),
     ?assertMatch(#{<<"id1">> := 1}, osiris_log:tracking(S3)),
+    ?assertMatch(#{<<"wid1">> := {_, Now, 2}}, osiris_log:writers(S3)),
     osiris_log:close(S3),
     ok.
 

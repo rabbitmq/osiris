@@ -408,14 +408,16 @@ parse_chunk(<<?MAGIC:4/unsigned,
               _ChType:8/unsigned,
               _NumEntries:16/unsigned,
               _NumRecords:32/unsigned,
-               _Timestamp:64/signed,
-                _Epoch:64/unsigned,
+              _Timestamp:64/signed,
+              _Epoch:64/unsigned,
               FirstOffset:64/unsigned,
               _Crc:32/integer,
               Size:32/unsigned,
+              TSize:32/unsigned,
               _Data:Size/binary,
+              _TData:TSize/binary,
               Rem/binary>> = All, undefined, Acc) ->
-    TotalSize = Size + ?HEADER_SIZE_B,
+    TotalSize = Size + TSize + ?HEADER_SIZE_B,
     <<Chunk:TotalSize/binary, _/binary>> = All,
     parse_chunk(Rem, undefined, [{FirstOffset, Chunk} | Acc]);
 parse_chunk(Bin, undefined, Acc)
@@ -431,8 +433,10 @@ parse_chunk(<<?MAGIC:4/unsigned,
               FirstOffset:64/unsigned,
               _Crc:32/integer,
               Size:32/unsigned,
+              TSize:32/unsigned,
               Partial/binary>> = All, undefined, Acc) ->
-    {{FirstOffset, [All], Size - byte_size(Partial)}, lists:reverse(Acc)};
+    {{FirstOffset, [All], (Size + TSize) - byte_size(Partial)},
+     lists:reverse(Acc)};
 parse_chunk(Bin, PartialHeaderBin, Acc)
   when is_binary(PartialHeaderBin) ->
     %% slight inneficiency but partial headers should be relatively

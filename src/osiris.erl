@@ -9,9 +9,10 @@
 
 -include("osiris.hrl").
 -export([
-         write/3,
+         write/4,
          write_tracking/3,
          read_tracking/2,
+         fetch_writer_seq/2,
          init_reader/2,
          register_offset_listener/2,
          register_offset_listener/3,
@@ -50,6 +51,10 @@
 -type retention_spec() :: {max_bytes, non_neg_integer()} |
                           {max_age, milliseconds()}.
 
+-type writer_id() :: binary().
+-type data() :: iodata() |
+                {batch, non_neg_integer(), 0, iodata()}.
+
 -export_type([
               state/0,
               config/0,
@@ -57,7 +62,10 @@
               epoch/0,
               tail_info/0,
               offset_spec/0,
-              retention_spec/0
+              retention_spec/0,
+              milliseconds/0,
+              writer_id/0,
+              data/0
               ]).
 
 -spec start_cluster(config()) ->
@@ -97,8 +105,12 @@ start_writer(Config) ->
 start_replica(Replica, Config) ->
     osiris_replica:start(Replica, Config).
 
-write(Pid, Corr, Data) ->
-    osiris_writer:write(Pid, self(), Corr, Data).
+-spec write(Pid :: pid(),
+            WriterId :: binary() | undefined,
+            CorrOrSeq :: non_neg_integer() | term(),
+            Data :: data()) -> ok.
+write(Pid, WriterId, Corr, Data) ->
+    osiris_writer:write(Pid, self(), WriterId, Corr, Data).
 
 -spec write_tracking(pid(), binary(), offset()) -> ok.
 write_tracking(Pid, TrackingId, Offset) ->
@@ -107,6 +119,18 @@ write_tracking(Pid, TrackingId, Offset) ->
 -spec read_tracking(pid(), binary()) -> offset() | undefined.
 read_tracking(Pid, TrackingId) ->
     osiris_writer:read_tracking(Pid, TrackingId).
+
+-spec fetch_writer_seq(pid(), binary()) ->
+    non_neg_integer() | undefined.
+fetch_writer_seq(Pid, WriterId) when is_pid(Pid) andalso is_binary(WriterId) ->
+    osiris_writer:query_writers(Pid,
+                                fun(W) ->
+                                        case maps:get(WriterId, W, undefined) of
+                                            undefined -> undefined;
+                                            {_, _, Seq} ->
+                                                Seq
+                                        end
+                                end).
 
 %% @doc Initialise a new offset reader
 %% @param Pid the pid of a writer or replica process
