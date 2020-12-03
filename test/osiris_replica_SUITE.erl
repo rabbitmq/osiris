@@ -9,8 +9,7 @@
 
 -compile(export_all).
 
--export([
-         ]).
+-export([]).
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
@@ -20,20 +19,13 @@
 %%%===================================================================
 
 all() ->
-    [
-     {group, tests}
-    ].
-
+    [{group, tests}].
 
 all_tests() ->
-    [
-        dummy
-    ].
+    [dummy].
 
 groups() ->
-    [
-     {tests, [], all_tests()}
-    ].
+    [{tests, [], all_tests()}].
 
 init_per_suite(Config) ->
     Config.
