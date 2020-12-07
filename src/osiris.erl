@@ -9,9 +9,19 @@
 
 -include("osiris.hrl").
 
--export([write/4, write_tracking/3, read_tracking/2, fetch_writer_seq/2, init_reader/2,
-         register_offset_listener/2, register_offset_listener/3, start_cluster/1, stop_cluster/1,
-         start_writer/1, start_replica/2, delete_cluster/1, configure_logger/1]).
+-export([write/4,
+         write_tracking/3,
+         read_tracking/2,
+         fetch_writer_seq/2,
+         init_reader/2,
+         register_offset_listener/2,
+         register_offset_listener/3,
+         start_cluster/1,
+         stop_cluster/1,
+         start_writer/1,
+         start_replica/2,
+         delete_cluster/1,
+         configure_logger/1]).
 
 %% holds static or rarely changing fields
 -record(cfg, {}).
@@ -37,8 +47,16 @@
 -type writer_id() :: binary().
 -type data() :: iodata() | {batch, non_neg_integer(), 0, iodata()}.
 
--export_type([state/0, config/0, offset/0, epoch/0, tail_info/0, offset_spec/0,
-              retention_spec/0, milliseconds/0, writer_id/0, data/0]).
+-export_type([state/0,
+              config/0,
+              offset/0,
+              epoch/0,
+              tail_info/0,
+              offset_spec/0,
+              retention_spec/0,
+              milliseconds/0,
+              writer_id/0,
+              data/0]).
 
 -spec start_cluster(config()) ->
                        {ok, config()} | {error, term()} | {error, term(), config()}.

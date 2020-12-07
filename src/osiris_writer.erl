@@ -12,9 +12,22 @@
 
 -include("osiris.hrl").
 
--export([start_link/1, start/1, overview/1, init_data_reader/2, register_data_listener/2,
-         ack/2, write/5, write_tracking/3, read_tracking/2, query_writers/2, init/1,
-         handle_batch/2, terminate/2, format_status/1, stop/1, delete/1]).
+-export([start_link/1,
+         start/1,
+         overview/1,
+         init_data_reader/2,
+         register_data_listener/2,
+         ack/2,
+         write/5,
+         write_tracking/3,
+         read_tracking/2,
+         query_writers/2,
+         init/1,
+         handle_batch/2,
+         terminate/2,
+         format_status/1,
+         stop/1,
+         delete/1]).
 
 -define(SUP, osiris_server_sup).
 -define(ADD_COUNTER_FIELDS, [committed_offset]).

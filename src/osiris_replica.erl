@@ -17,11 +17,18 @@
 %% replicates and confirms latest offset back to primary
 
 %% API functions
--export([start/2, start_link/1, stop/2, delete/2]).
+-export([start/2,
+         start_link/1,
+         stop/2,
+         delete/2]).
 %% Test
 -export([get_port/1]).
 %% gen_server callbacks
--export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2,
+-export([init/1,
+         handle_call/3,
+         handle_cast/2,
+         handle_info/2,
+         terminate/2,
          code_change/3]).
 
 %% holds static or rarely changing fields

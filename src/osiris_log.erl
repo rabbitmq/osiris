@@ -11,11 +11,33 @@
 
 -include("osiris.hrl").
 
--export([init/1, init_acceptor/2, write/2, write/3, write/5, write_tracking/3,
-         accept_chunk/2, next_offset/1, tail_info/1, send_file/2, send_file/3, init_data_reader/2,
-         init_offset_reader/2, read_header/1, read_chunk/1, read_chunk_parsed/1,
-         committed_offset/1, get_current_epoch/1, get_directory/1, get_name/1, counters_ref/1,
-         tracking/1, writers/1, close/1, overview/1, evaluate_retention/2, directory/1,
+-export([init/1,
+         init_acceptor/2,
+         write/2,
+         write/3,
+         write/5,
+         write_tracking/3,
+         accept_chunk/2,
+         next_offset/1,
+         tail_info/1,
+         send_file/2,
+         send_file/3,
+         init_data_reader/2,
+         init_offset_reader/2,
+         read_header/1,
+         read_chunk/1,
+         read_chunk_parsed/1,
+         committed_offset/1,
+         get_current_epoch/1,
+         get_directory/1,
+         get_name/1,
+         counters_ref/1,
+         tracking/1,
+         writers/1,
+         close/1,
+         overview/1,
+         evaluate_retention/2,
+         directory/1,
          delete_directory/1]).
 
 -define(IDX_VERSION, 1).
@@ -154,7 +176,9 @@
 
 -opaque state() :: #?MODULE{}.
 
--export_type([state/0, range/0, config/0]).
+-export_type([state/0,
+              range/0,
+              config/0]).
 
               % record/0,
 

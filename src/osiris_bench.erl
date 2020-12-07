@@ -9,7 +9,11 @@
 
 -include("osiris.hrl").
 
--export([run/1, stop/1, do_metrics/1, do_publish/1, test/1]).
+-export([run/1,
+         stop/1,
+         do_metrics/1,
+         do_publish/1,
+         test/1]).
 
 -define(METRICS_INT_S, 10).
 

@@ -7,7 +7,11 @@
 
 -module(osiris_counters).
 
--export([init/0, new/2, fetch/1, overview/0, delete/1]).
+-export([init/0,
+         new/2,
+         fetch/1,
+         overview/0,
+         delete/1]).
 
 %% holds static or rarely changing fields
 -record(cfg, {}).

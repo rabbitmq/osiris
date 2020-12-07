@@ -7,7 +7,10 @@
 
 -module(osiris_util).
 
--export([validate_base64uri/1, to_base64uri/1, id/1, lists_find/2]).
+-export([validate_base64uri/1,
+         to_base64uri/1,
+         id/1,
+         lists_find/2]).
 
 -define(BASE64_URI_CHARS,
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-=").
