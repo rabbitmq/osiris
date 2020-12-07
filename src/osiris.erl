@@ -8,8 +8,8 @@
 -module(osiris).
 
 -include("osiris.hrl").
--export([
-         write/4,
+
+-export([write/4,
          write_tracking/3,
          read_tracking/2,
          fetch_writer_seq/2,
@@ -21,42 +21,33 @@
          start_writer/1,
          start_replica/2,
          delete_cluster/1,
-         configure_logger/1
-         ]).
+         configure_logger/1]).
 
 %% holds static or rarely changing fields
 -record(cfg, {}).
-
 -record(?MODULE, {cfg :: #cfg{}}).
 
--type config() :: #{name := string(),
-                    reference => term(),
-                    event_formatter => {module(), atom(), list()},
-                    retention => [osiris:retention_spec()],
-                    atom() => term()}.
--opaque state() :: #?MODULE{}.
--type mfarg() :: {module(), atom(), list()}.
+-type config() ::
+    #{name := string(),
+      reference => term(),
+      event_formatter => {module(), atom(), list()},
+      retention => [osiris:retention_spec()],
+      atom() => term()}.
 
+-opaque state() :: #?MODULE{}.
+
+-type mfarg() :: {module(), atom(), list()}.
 -type offset() :: non_neg_integer().
 -type epoch() :: non_neg_integer().
 -type milliseconds() :: non_neg_integer().
 -type tail_info() :: {offset(), empty | {epoch(), offset()}}.
--type offset_spec() :: first |
-                       last |
-                       next |
-                       {abs, offset()} |
-                       offset() |
-                       {timestamp, milliseconds()}.
-
--type retention_spec() :: {max_bytes, non_neg_integer()} |
-                          {max_age, milliseconds()}.
-
+-type offset_spec() ::
+    first | last | next | {abs, offset()} | offset() | {timestamp, milliseconds()}.
+-type retention_spec() :: {max_bytes, non_neg_integer()} | {max_age, milliseconds()}.
 -type writer_id() :: binary().
--type data() :: iodata() |
-                {batch, non_neg_integer(), 0, iodata()}.
+-type data() :: iodata() | {batch, non_neg_integer(), 0, iodata()}.
 
--export_type([
-              state/0,
+-export_type([state/0,
               config/0,
               offset/0,
               epoch/0,
@@ -65,11 +56,10 @@
               retention_spec/0,
               milliseconds/0,
               writer_id/0,
-              data/0
-              ]).
+              data/0]).
 
 -spec start_cluster(config()) ->
-    {ok, config()} | {error, term()} | {error, term(), config()}.
+                       {ok, config()} | {error, term()} | {error, term(), config()}.
 start_cluster(Config00 = #{name := Name}) ->
     true = osiris_util:validate_base64uri(Name),
     Config0 = Config00#{external_ref => maps:get(reference, Config00, Name)},
@@ -79,24 +69,22 @@ start_cluster(Config00 = #{name := Name}) ->
             case start_replicas(Config) of
                 {ok, ReplicaPids} ->
                     {ok, Config#{replica_pids => ReplicaPids}}
-                % {error, Reason, ReplicaPids} ->
-                %     %% Let the user decide what to do if cluster is only partially started
-                %     {error, Reason, Config#{replica_pids => ReplicaPids}}
             end;
+        % {error, Reason, ReplicaPids} ->
+        %     %% Let the user decide what to do if cluster is only partially started
+        %     {error, Reason, Config#{replica_pids => ReplicaPids}}
         Error ->
             Error
     end.
 
 stop_cluster(Config) ->
     ok = osiris_writer:stop(Config),
-    [ok = osiris_replica:stop(N, Config)
-     || N <- maps:get(replica_nodes, Config)],
+    [ok = osiris_replica:stop(N, Config) || N <- maps:get(replica_nodes, Config)],
     ok.
 
 -spec delete_cluster(config()) -> ok.
 delete_cluster(Config) ->
-    [ok = osiris_replica:delete(R, Config)
-     || R <- maps:get(replica_nodes, Config)],
+    [ok = osiris_replica:delete(R, Config) || R <- maps:get(replica_nodes, Config)],
     ok = osiris_writer:delete(Config).
 
 start_writer(Config) ->
@@ -108,7 +96,8 @@ start_replica(Replica, Config) ->
 -spec write(Pid :: pid(),
             WriterId :: binary() | undefined,
             CorrOrSeq :: non_neg_integer() | term(),
-            Data :: data()) -> ok.
+            Data :: data()) ->
+               ok.
 write(Pid, WriterId, Corr, Data) ->
     osiris_writer:write(Pid, self(), WriterId, Corr, Data).
 
@@ -120,16 +109,14 @@ write_tracking(Pid, TrackingId, Offset) ->
 read_tracking(Pid, TrackingId) ->
     osiris_writer:read_tracking(Pid, TrackingId).
 
--spec fetch_writer_seq(pid(), binary()) ->
-    non_neg_integer() | undefined.
+-spec fetch_writer_seq(pid(), binary()) -> non_neg_integer() | undefined.
 fetch_writer_seq(Pid, WriterId) when is_pid(Pid) andalso is_binary(WriterId) ->
     osiris_writer:query_writers(Pid,
                                 fun(W) ->
-                                        case maps:get(WriterId, W, undefined) of
-                                            undefined -> undefined;
-                                            {_, _, Seq} ->
-                                                Seq
-                                        end
+                                   case maps:get(WriterId, W, undefined) of
+                                       undefined -> undefined;
+                                       {_, _, Seq} -> Seq
+                                   end
                                 end).
 
 %% @doc Initialise a new offset reader
@@ -148,12 +135,10 @@ fetch_writer_seq(Pid, WriterId) when is_pid(Pid) andalso is_binary(WriterId) ->
 %% `{offset_out_of_range, empty | {From :: offset(), To :: offset()}}'
 %% @end
 -spec init_reader(pid(), offset_spec()) ->
-    {ok, osiris_log:state()} |
-    {error, {offset_out_of_range, empty | {offset(), offset()}}} |
-    {error, {invalid_last_offset_epoch, offset(), offset()}}.
-init_reader(Pid, OffsetSpec)
-  when is_pid(Pid) andalso
-       node(Pid) =:= node() ->
+                     {ok, osiris_log:state()} |
+                     {error, {offset_out_of_range, empty | {offset(), offset()}}} |
+                     {error, {invalid_last_offset_epoch, offset(), offset()}}.
+init_reader(Pid, OffsetSpec) when is_pid(Pid) andalso node(Pid) =:= node() ->
     ?DEBUG("osiris: initialising reader. Spec: ~w", [OffsetSpec]),
     {ok, Ctx} = gen:call(Pid, '$gen_call', get_reader_context),
     osiris_log:init_offset_reader(OffsetSpec, Ctx).
@@ -168,11 +153,12 @@ register_offset_listener(Pid, Offset) ->
 %% @end
 -spec register_offset_listener(pid(), offset(), mfarg() | undefined) -> ok.
 register_offset_listener(Pid, Offset, EvtFormatter) ->
-    Msg = {'$gen_cast', {register_offset_listener, self(),
-                         EvtFormatter, Offset}},
-    try erlang:send(Pid, Msg)
+    Msg = {'$gen_cast', {register_offset_listener, self(), EvtFormatter, Offset}},
+    try
+        erlang:send(Pid, Msg)
     catch
-        error:_ -> ok
+        error:_ ->
+            ok
     end,
     ok.
 
@@ -189,8 +175,7 @@ start_replicas(Config, [Node | Nodes], ReplicaPids) ->
             {ok, Pid, _} ->
                 start_replicas(Config, Nodes, [Pid | ReplicaPids]);
             {error, Reason} ->
-                error_logger:info_msg("osiris:start_replicas failed to start"
-                                      " replica on ~w, reason: ~w",
+                error_logger:info_msg("osiris:start_replicas failed to start replica on ~w, reason: ~w",
                                       [Node, Reason]),
                 %% coordinator might try to start this replica in the future
                 start_replicas(Config, Nodes, ReplicaPids)
@@ -206,5 +191,7 @@ configure_logger(Module) ->
     persistent_term:put('$osiris_logger', Module).
 
 -ifdef(TEST).
+
 -include_lib("eunit/include/eunit.hrl").
+
 -endif.

@@ -12,7 +12,6 @@
 %% API functions
 -export([start_link/0,
          eval/3]).
-
 %% gen_server callbacks
 -export([init/1,
          handle_call/3,
@@ -31,8 +30,8 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
--spec eval(file:filename(), [osiris:retention_spec()],
-           fun ((osiris_log:range()) -> ok)) -> ok.
+-spec eval(file:filename(), [osiris:retention_spec()], fun((osiris_log:range()) -> ok)) ->
+              ok.
 eval(_Dir, [], _Fun) ->
     ok;
 eval(Dir, Specs, Fun) ->
