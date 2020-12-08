@@ -92,11 +92,7 @@ init(#{host := Host,
           [Name, osiris_log:next_offset(Log), Args]),
     SndBuf = 146988 * 10,
     {ok, Sock} =
-        gen_tcp:connect(Host, Port,
-                        [binary,
-                         {packet, 0},
-                         {nodelay, true},
-                         {sndbuf, SndBuf}]),
+        gen_tcp:connect(Host, Port, [binary, {packet, 0}, {nodelay, true}, {sndbuf, SndBuf}]),
     %% register data listener with osiris_proc
     ok = osiris_writer:register_data_listener(LeaderPid, StartOffset),
     MRef = monitor(process, LeaderPid),
@@ -139,8 +135,7 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast({more_data, _LastOffset},
-            #state{leader_pid = LeaderPid} = State0) ->
+handle_cast({more_data, _LastOffset}, #state{leader_pid = LeaderPid} = State0) ->
     % ?DEBUG("MORE DATA ~b", [_LastOffset]),
     #state{log = Log} = State = do_sendfile(State0),
     NextOffs = osiris_log:next_offset(Log),
@@ -155,9 +150,7 @@ maybe_register_offset_listener(#state{leader_pid = LeaderPid,
                                       offset_listener = undefined} =
                                    State) ->
     ok = counters:add(Cnt, ?C_OFFSET_LISTENERS, 1),
-    ok =
-        osiris:register_offset_listener(LeaderPid, COffs + 1,
-                                        {?MODULE, formatter, []}),
+    ok = osiris:register_offset_listener(LeaderPid, COffs + 1, {?MODULE, formatter, []}),
     State#state{offset_listener = COffs + 1};
 maybe_register_offset_listener(State) ->
     State.
@@ -174,9 +167,7 @@ maybe_register_offset_listener(State) ->
 %%--------------------------------------------------------------------
 handle_info({osiris_offset, _, _Offs}, State0) ->
     State1 = maybe_send_committed_offset(State0),
-    State =
-        maybe_register_offset_listener(State1#state{offset_listener =
-                                                        undefined}),
+    State = maybe_register_offset_listener(State1#state{offset_listener = undefined}),
     {noreply, State};
 handle_info({'DOWN', Ref, _, _, Info},
             #state{name = Name,
@@ -184,26 +175,20 @@ handle_info({'DOWN', Ref, _, _, Info},
                    leader_monitor_ref = Ref} =
                 State) ->
     %% leader is down, exit
-    ?ERROR("osiris_replica_reader: '~s' detected leader down "
-           "with ~W - exiting...",
+    ?ERROR("osiris_replica_reader: '~s' detected leader down with ~W - "
+           "exiting...",
            [Name, Info, 10]),
     %% this should be enough to make the replica shut down
     ok = gen_tcp:close(Sock),
     {stop, Info, State};
-handle_info({tcp_closed, Socket},
-            #state{name = Name, socket = Socket} = State) ->
-    ?DEBUG("osiris_replica_reader: '~s' Socket closed. Exiting...",
-           [Name]),
+handle_info({tcp_closed, Socket}, #state{name = Name, socket = Socket} = State) ->
+    ?DEBUG("osiris_replica_reader: '~s' Socket closed. Exiting...", [Name]),
     {stop, normal, State};
-handle_info({tcp_error, Socket, Error},
-            #state{name = Name, socket = Socket} = State) ->
-    ?DEBUG("osiris_replica_reader: '~s' Socket error ~p. "
-           "Exiting...",
-           [Name, Error]),
+handle_info({tcp_error, Socket, Error}, #state{name = Name, socket = Socket} = State) ->
+    ?DEBUG("osiris_replica_reader: '~s' Socket error ~p. Exiting...", [Name, Error]),
     {stop, {tcp_error, Error}, State};
 handle_info(Info, #state{name = Name} = State) ->
-    ?DEBUG("osiris_replica_reader: '~s' unhandled message ~W",
-           [Name, Info, 10]),
+    ?DEBUG("osiris_replica_reader: '~s' unhandled message ~W", [Name, Info, 10]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -259,8 +244,7 @@ maybe_send_committed_offset(#state{log = Log,
     case COffs of
         COffs when COffs > Last ->
             ok =
-                erlang:send(RPid, {'$gen_cast', {committed_offset, COffs}},
-                            [noconnect, nosuspend]),
+                erlang:send(RPid, {'$gen_cast', {committed_offset, COffs}}, [noconnect, nosuspend]),
             State#state{committed_offset = COffs};
         _ ->
             State

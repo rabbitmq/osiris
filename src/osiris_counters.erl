@@ -59,7 +59,8 @@ overview() ->
                          lists:zip(Fields, Values)),
                  Acc#{Name => Counters}
               end,
-              #{}, ?MODULE).
+              #{},
+              ?MODULE).
 
 %% internal
 

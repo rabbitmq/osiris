@@ -13,8 +13,7 @@
          lists_find/2]).
 
 -define(BASE64_URI_CHARS,
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01"
-        "23456789_-=").
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-=").
 
 -spec validate_base64uri(string()) -> boolean().
 validate_base64uri(Str) when is_list(Str) ->
@@ -39,14 +38,14 @@ to_base64uri(Str) when is_list(Str) ->
                        false -> [$_ | Acc]
                    end
                 end,
-                [], string:to_graphemes(Str)).
+                [],
+                string:to_graphemes(Str)).
 
 -spec id(term()) -> term().
 id(X) ->
     X.
 
--spec lists_find(fun((term()) -> boolean()), list()) ->
-                    {ok, term()} | not_found.
+-spec lists_find(fun((term()) -> boolean()), list()) -> {ok, term()} | not_found.
 lists_find(_Pred, []) ->
     not_found;
 lists_find(Pred, [Item | Rem]) ->

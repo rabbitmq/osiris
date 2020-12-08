@@ -46,16 +46,14 @@
          counter :: counters:counters_ref()}).
 
 -type parse_state() ::
-    undefined | binary() |
-    {non_neg_integer(), iolist(), non_neg_integer()}.
+    undefined | binary() | {non_neg_integer(), iolist(), non_neg_integer()}.
 
 -record(?MODULE,
         {cfg :: #cfg{},
          parse_state :: parse_state(),
          log :: osiris_log:state(),
          committed_offset = -1 :: -1 | osiris:offset(),
-         offset_listeners = [] ::
-             [{pid(), osiris:offset(), mfa() | undefined}]}).
+         offset_listeners = [] :: [{pid(), osiris:offset(), mfa() | undefined}]}).
 
 -opaque state() :: #?MODULE{}.
 
@@ -145,14 +143,12 @@ init(#{name := Name,
     CntName = {?MODULE, ExtRef},
     Node = node(LeaderPid),
 
-    {ok, {_, LeaderEpochOffs}} =
-        rpc:call(Node, osiris_writer, overview, [LeaderPid]),
+    {ok, {_, LeaderEpochOffs}} = rpc:call(Node, osiris_writer, overview, [LeaderPid]),
 
     Dir = osiris_log:directory(Config),
     Log = osiris_log:init_acceptor(LeaderEpochOffs,
                                    Config#{dir => Dir,
-                                           counter_spec =>
-                                               {CntName, ?ADD_COUNTER_FIELDS}}),
+                                           counter_spec => {CntName, ?ADD_COUNTER_FIELDS}}),
     CntRef = osiris_log:counters_ref(Log),
     {NextOffset, LastChunk} = TailInfo = osiris_log:tail_info(Log),
     case LastChunk of
@@ -178,8 +174,7 @@ init(#{name := Name,
         case supervisor:start_child({osiris_replica_reader_sup, Node},
                                     #{id => make_ref(),
                                       start =>
-                                          {osiris_replica_reader, start_link,
-                                           [ReplicaReaderConf]},
+                                          {osiris_replica_reader, start_link, [ReplicaReaderConf]},
                                       %% replica readers should never be
                                       %% restarted by their sups
                                       %% instead they need to be re-started
@@ -238,8 +233,7 @@ accept(LSock, Process) ->
     %% TODO what if we have more than 1 connection?
     {ok, Sock} = gen_tcp:accept(LSock),
 
-    ?DEBUG("~s: sock opts ~w",
-           [?MODULE, inet:getopts(Sock, [buffer, recbuf])]),
+    ?DEBUG("~s: sock opts ~w", [?MODULE, inet:getopts(Sock, [buffer, recbuf])]),
     Process ! {socket, Sock},
     gen_tcp:controlling_process(Sock, Process),
     accept(LSock, Process).
@@ -258,10 +252,10 @@ accept(LSock, Process) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_call(get_port, _From,
-            #?MODULE{cfg = #cfg{port = Port}} = State) ->
+handle_call(get_port, _From, #?MODULE{cfg = #cfg{port = Port}} = State) ->
     {reply, Port, State};
-handle_call(get_reader_context, _From,
+handle_call(get_reader_context,
+            _From,
             #?MODULE{cfg =
                          #cfg{offset_ref = ORef,
                               name = Name,
@@ -286,24 +280,20 @@ handle_call(get_reader_context, _From,
 %% @end
 %%--------------------------------------------------------------------
 handle_cast({committed_offset, Offs},
-            #?MODULE{cfg = #cfg{offset_ref = ORef, counter = Cnt},
-                     committed_offset = Last} =
+            #?MODULE{cfg = #cfg{offset_ref = ORef, counter = Cnt}, committed_offset = Last} =
                 State) ->
     case Offs > Last of
         true ->
             %% notify offset listeners
             counters:put(Cnt, ?C_COMMITTED_OFFSET, Offs),
             ok = atomics:put(ORef, 1, Offs),
-            {noreply,
-             notify_offset_listeners(State#?MODULE{committed_offset = Offs})};
+            {noreply, notify_offset_listeners(State#?MODULE{committed_offset = Offs})};
         false ->
             State
     end;
 handle_cast({register_offset_listener, Pid, EvtFormatter, Offset},
             #?MODULE{offset_listeners = Listeners} = State0) ->
-    State1 =
-        State0#?MODULE{offset_listeners =
-                           [{Pid, Offset, EvtFormatter} | Listeners]},
+    State1 = State0#?MODULE{offset_listeners = [{Pid, Offset, EvtFormatter} | Listeners]},
     State = notify_offset_listeners(State1),
     {noreply, State};
 handle_cast(Msg, State) ->
@@ -321,8 +311,7 @@ handle_cast(Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info(force_gc,
-            #?MODULE{cfg = #cfg{gc_interval = Interval, counter = Cnt}} =
-                State) ->
+            #?MODULE{cfg = #cfg{gc_interval = Interval, counter = Cnt}} = State) ->
     garbage_collect(),
     counters:add(Cnt, ?C_FORCED_GCS, 1),
     erlang:send_after(Interval, self(), force_gc),
@@ -347,7 +336,8 @@ handle_info({tcp, Socket, Bin},
                        Acc = osiris_log:accept_chunk(B, Acc0),
                        {[FirstOffset | Aks], Acc}
                     end,
-                    {[], Log0}, OffsetChunks),
+                    {[], Log0},
+                    OffsetChunks),
     counters:add(Cnt, ?C_PACKETS, 1),
     case Acks of
         [] ->
@@ -357,8 +347,7 @@ handle_info({tcp, Socket, Bin},
             ok = osiris_writer:ack(LeaderPid, lists:max(Acks))
     end,
     {noreply, State#?MODULE{log = Log, parse_state = ParseState}};
-handle_info({tcp_passive, Socket},
-            #?MODULE{cfg = #cfg{socket = Socket}} = State) ->
+handle_info({tcp_passive, Socket}, #?MODULE{cfg = #cfg{socket = Socket}} = State) ->
     %% we always top up before processing each packet so no need to do anything
     %% here
     {noreply, State};
@@ -368,13 +357,10 @@ handle_info({tcp_closed, Socket},
     {stop, tcp_closed, State};
 handle_info({tcp_error, Socket, Error},
             #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
-    ?DEBUG("osiris_replica: ~s Socket error ~p. Exiting...",
-           [Name, Error]),
+    ?DEBUG("osiris_replica: ~s Socket error ~p. Exiting...", [Name, Error]),
     {stop, {tcp_error, Error}, State};
 handle_info({'DOWN', _Ref, process, Pid, Info}, State) ->
-    ?DEBUG("osiris_replica:handle_info/2: DOWN received Pid "
-           "~w, Info: ~w",
-           [Pid, Info]),
+    ?DEBUG("osiris_replica:handle_info/2: DOWN received Pid ~w, Info: ~w", [Pid, Info]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -424,12 +410,12 @@ parse_chunk(<<?MAGIC:4/unsigned,
               _TData:TSize/binary,
               Rem/binary>> =
                 All,
-            undefined, Acc) ->
+            undefined,
+            Acc) ->
     TotalSize = Size + TSize + ?HEADER_SIZE_B,
     <<Chunk:TotalSize/binary, _/binary>> = All,
     parse_chunk(Rem, undefined, [{FirstOffset, Chunk} | Acc]);
-parse_chunk(Bin, undefined, Acc)
-    when byte_size(Bin) =< ?HEADER_SIZE_B ->
+parse_chunk(Bin, undefined, Acc) when byte_size(Bin) =< ?HEADER_SIZE_B ->
     {Bin, lists:reverse(Acc)};
 parse_chunk(<<?MAGIC:4/unsigned,
               ?VERSION:4/unsigned,
@@ -444,38 +430,30 @@ parse_chunk(<<?MAGIC:4/unsigned,
               TSize:32/unsigned,
               Partial/binary>> =
                 All,
-            undefined, Acc) ->
-    {{FirstOffset, [All], Size + TSize - byte_size(Partial)},
-     lists:reverse(Acc)};
-parse_chunk(Bin, PartialHeaderBin, Acc)
-    when is_binary(PartialHeaderBin) ->
+            undefined,
+            Acc) ->
+    {{FirstOffset, [All], Size + TSize - byte_size(Partial)}, lists:reverse(Acc)};
+parse_chunk(Bin, PartialHeaderBin, Acc) when is_binary(PartialHeaderBin) ->
     %% slight inneficiency but partial headers should be relatively
     %% rare and fairly small - also ensures the header is always intact
     parse_chunk(<<PartialHeaderBin/binary, Bin/binary>>, undefined, Acc);
-parse_chunk(Bin, {FirstOffset, IOData, RemSize}, Acc)
-    when byte_size(Bin) >= RemSize ->
+parse_chunk(Bin, {FirstOffset, IOData, RemSize}, Acc) when byte_size(Bin) >= RemSize ->
     <<Final:RemSize/binary, Rem/binary>> = Bin,
-    parse_chunk(Rem, undefined,
-                [{FirstOffset, lists:reverse([Final | IOData])} | Acc]);
+    parse_chunk(Rem, undefined, [{FirstOffset, lists:reverse([Final | IOData])} | Acc]);
 parse_chunk(Bin, {FirstOffset, IOData, RemSize}, Acc) ->
     %% there is not enough data to complete the partial chunk
-    {{FirstOffset, [Bin | IOData], RemSize - byte_size(Bin)},
-     lists:reverse(Acc)}.
+    {{FirstOffset, [Bin | IOData], RemSize - byte_size(Bin)}, lists:reverse(Acc)}.
 
-notify_offset_listeners(#?MODULE{cfg =
-                                     #cfg{external_ref = Ref,
-                                          event_formatter = EvtFmt},
+notify_offset_listeners(#?MODULE{cfg = #cfg{external_ref = Ref, event_formatter = EvtFmt},
                                  committed_offset = COffs,
                                  offset_listeners = L0} =
                             State) ->
-    {Notify, L} =
-        lists:splitwith(fun({_Pid, O, _}) -> O =< COffs end, L0),
+    {Notify, L} = lists:splitwith(fun({_Pid, O, _}) -> O =< COffs end, L0),
     [begin
-         Evt =
-             wrap_osiris_event(%% the per offset listener event formatter takes precedence of
-                               %% the process scoped one
-                               select_formatter(Fmt, EvtFmt),
-                               {osiris_offset, Ref, COffs}),
+         Evt = wrap_osiris_event(%% the per offset listener event formatter takes precedence of
+                                 %% the process scoped one
+                                 select_formatter(Fmt, EvtFmt),
+                                 {osiris_offset, Ref, COffs}),
          P ! Evt
      end
      || {P, _, Fmt} <- Notify],
