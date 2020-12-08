@@ -193,8 +193,7 @@ handle_batch(Commands,
                       log = Log0} =
                  State0) ->
     %% process commands in reverse order
-    case catch lists:foldr(fun handle_command/2,
-                           {State0, [], [], #{}, #{}, #{}, []},
+    case catch lists:foldr(fun handle_command/2, {State0, [], [], #{}, #{}, #{}, []},
                            Commands)
     of
         {State1, Entries, Replies, Corrs, Trk, Wrt, Dupes} ->
@@ -228,8 +227,7 @@ handle_batch(Commands,
                     false ->
                         State2#?MODULE{duplicates = RemDupes}
                 end,
-            {ok,
-             [garbage_collect | Replies],
+            {ok, [garbage_collect | Replies],
              notify_offset_listeners(notify_data_listeners(State))};
         {stop, normal} ->
             {stop, normal}
@@ -249,8 +247,7 @@ format_status(State) ->
 
 %% Internal
 
-update_pending(BatchOffs,
-               Corrs,
+update_pending(BatchOffs, Corrs,
                #?MODULE{cfg = #cfg{}, pending_corrs = Pending0} = State) ->
     case Corrs of
         _ when map_size(Corrs) == 0 ->
@@ -278,8 +275,7 @@ handle_duplicates(CommittedOffset, Dupes, #cfg{} = Cfg) when is_list(Dupes) ->
                         (Dupe, {Rem, Corrs}) ->
                             {[Dupe | Rem], Corrs}
                     end,
-                    {[], #{}},
-                    Dupes),
+                    {[], #{}}, Dupes),
     send_written_events(Cfg, Corrs),
     Rem.
 
@@ -350,8 +346,7 @@ handle_command({call, From, get_reader_context},
                 Wrt,
                 Dupes}) ->
     Reply =
-        {reply,
-         From,
+        {reply, From,
          #{dir => Dir,
            name => Name,
            committed_offset => max(0, COffs),

@@ -335,15 +335,13 @@ write([], _ChType, _Now, _Writers, State) ->
 write_tracking(Trk0, delta, State) when map_size(Trk0) == 0 ->
     %% empty deltas do not need to be written
     State;
-write_tracking(Trk0,
-               TrkType,
+write_tracking(Trk0, TrkType,
                #?MODULE{cfg = #cfg{}, mode = #write{tracking = Tracking} = W0} = State0) ->
     TData =
         maps:fold(fun(Id, Offs, Acc) ->
                      [<<(byte_size(Id)):8/unsigned, Id/binary, Offs:64/unsigned>> | Acc]
                   end,
-                  [],
-                  Trk0),
+                  [], Trk0),
 
     Now = erlang:system_time(millisecond),
     case TrkType of
@@ -363,8 +361,7 @@ write_wrt_snapshot(Writers, #?MODULE{cfg = #cfg{}, mode = #write{} = W0} = State
         maps:fold(fun(W, {_O, T, S}, Acc) ->
                      [<<(byte_size(W)):8/unsigned, W/binary, T:64/unsigned, S:64/unsigned>> | Acc]
                   end,
-                  [],
-                  Writers),
+                  [], Writers),
     Now = erlang:system_time(millisecond),
 
     State = State0#?MODULE{mode = W0#write{writers = Writers}},
@@ -606,8 +603,7 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
     end.
 
 init_data_reader_from_segment(#{dir := Dir, name := Name} = Config,
-                              #seg_info{file = StartSegment, index = IndexFile},
-                              NextOffs) ->
+                              #seg_info{file = StartSegment, index = IndexFile}, NextOffs) ->
     {ok, Fd} = file:open(StartSegment, [raw, binary, read]),
     %% TODO: next offset needs to be a chunk offset
     {_, FilePos} = scan_index(IndexFile, Fd, NextOffs),
@@ -773,8 +769,7 @@ writers(#?MODULE{mode = #write{writers = Writers}}) ->
     Writers.
 
 -spec read_header(state()) ->
-                     {ok, header_map(), state()} |
-                     {end_of_stream, state()} |
+                     {ok, header_map(), state()} | {end_of_stream, state()} |
                      {error, {invalid_chunk_header, term()}}.
 read_header(#?MODULE{cfg = #cfg{},
                      mode = #read{} = Read,
@@ -807,8 +802,7 @@ read_header(#?MODULE{cfg = #cfg{},
                       RecordData :: iodata(),
                       TrailerData :: iodata()},
                      state()} |
-                    {end_of_stream, state()} |
-                    {error, {invalid_chunk_header, term()}}.
+                    {end_of_stream, state()} | {error, {invalid_chunk_header, term()}}.
 read_chunk(#?MODULE{cfg = #cfg{},
                     mode = #read{last_offset = _Last, next_offset = Offs} = Read,
                     fd = Fd} =
@@ -830,16 +824,14 @@ read_chunk(#?MODULE{cfg = #cfg{},
             %% position after trailer
             {ok, TrailerData} = file:read(Fd, TrailerSize),
             validate_crc(Offs, Crc, BlobData),
-            {ok,
-             {ChType, ChId, Epoch, HeaderData, BlobData, TrailerData},
+            {ok, {ChType, ChId, Epoch, HeaderData, BlobData, TrailerData},
              State#?MODULE{mode = incr_next_offset(NumRecords, Read)}};
         Other ->
             Other
     end.
 
 -spec read_chunk_parsed(state()) ->
-                           {[record()], state()} |
-                           {end_of_stream, state()} |
+                           {[record()], state()} | {end_of_stream, state()} |
                            {error, {invalid_chunk_header, term()}}.
 read_chunk_parsed(#?MODULE{mode = #read{type = RType}} = State0) ->
     %% reads the next chunk of entries, parsed
@@ -862,8 +854,7 @@ read_chunk_parsed(#?MODULE{mode = #read{type = RType}} = State0) ->
 send_file(Sock, State) ->
     send_file(Sock, State, fun(S) -> S end).
 
--spec send_file(gen_tcp:socket(),
-                state(),
+-spec send_file(gen_tcp:socket(), state(),
                 fun((non_neg_integer()) -> non_neg_integer())) ->
                    {ok, state()} | {end_of_stream, state()}.
 send_file(Sock,
@@ -1249,8 +1240,7 @@ last_offset_epochs([#seg_info{index = IdxFile,
                        Fd = open_index_read(I),
                        last_offset_epoch(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd, Acc)
                     end,
-                    last_offset_epoch(file:read(FstFd, ?INDEX_RECORD_SIZE_B),
-                                      FstFd,
+                    last_offset_epoch(file:read(FstFd, ?INDEX_RECORD_SIZE_B), FstFd,
                                       {FstE, FstChId, []}),
                     SegInfos),
     lists:reverse([{LastE, LastO} | Res]).
@@ -1261,16 +1251,13 @@ last_offset_epoch(eof, Fd, Acc) ->
     Acc;
 last_offset_epoch({ok,
                    <<O:64/unsigned, _T:64/signed, CurEpoch:64/unsigned, _:32/unsigned>>},
-                  Fd,
-                  {CurEpoch, _LastOffs, Acc}) ->
+                  Fd, {CurEpoch, _LastOffs, Acc}) ->
     %% epoch is unchanged
     last_offset_epoch(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd, {CurEpoch, O, Acc});
 last_offset_epoch({ok, <<O:64/unsigned, _T:64/signed, Epoch:64/unsigned, _:32/unsigned>>},
-                  Fd,
-                  {CurEpoch, LastOffs, Acc})
+                  Fd, {CurEpoch, LastOffs, Acc})
     when Epoch > CurEpoch ->
-    last_offset_epoch(file:read(Fd, ?INDEX_RECORD_SIZE_B),
-                      Fd,
+    last_offset_epoch(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
                       {Epoch, O, [{CurEpoch, LastOffs} | Acc]}).
 
 segment_from_index_file(IdxFile) ->
@@ -1295,13 +1282,11 @@ make_chunk(Blobs, Writers, ChType, Timestamp, Epoch, Next) ->
                             Data = [<<0:1, (iolist_size(B)):31/unsigned>>, B],
                             {Entries + 1, Count + 1, [Data | Acc]}
                     end,
-                    {0, 0, []},
-                    Blobs),
+                    {0, 0, []}, Blobs),
     TData =
         maps:fold(fun(K, V, Acc) -> [<<(byte_size(K)):8/unsigned, K/binary, V:64/unsigned>> | Acc]
                   end,
-                  [],
-                  Writers),
+                  [], Writers),
 
     Size = iolist_size(EData),
     TSize = iolist_size(TData),
@@ -1318,8 +1303,7 @@ make_chunk(Blobs, Writers, ChType, Timestamp, Epoch, Next) ->
         Crc:32/integer,
         Size:32/unsigned,
         TSize:32/unsigned>>,
-      EData,
-      TData],
+      EData, TData],
      NumRecords}.
 
 write_chunk(_Chunk,
@@ -1355,8 +1339,7 @@ write_chunk(Chunk,
     counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
     counters:add(CntRef, ?C_CHUNKS, 1),
     Writers =
-        maps:fold(fun(K, V, Acc) -> maps:put(K, {Next, Timestamp, V}, Acc) end,
-                  Writers0,
+        maps:fold(fun(K, V, Acc) -> maps:put(K, {Next, Timestamp, V}, Acc) end, Writers0,
                   NewWriters),
     case file:position(Fd, cur) of
         {ok, After} when After >= MaxSize ->
@@ -1487,8 +1470,7 @@ open_new_segment(#?MODULE{cfg =
 
     %% ask to evaluate retention
     ok =
-        osiris_retention:eval(Dir,
-                              RetentionSpec,
+        osiris_retention:eval(Dir, RetentionSpec,
                               %% updates the first offset after retention has
                               %% been evaluated
                               fun ({Fst, _}) when is_integer(Fst) ->
@@ -1640,8 +1622,7 @@ parse_writers_snapshot(<<Size:8/unsigned,
                          Ts:64/unsigned,
                          Seq:64/unsigned,
                          Rem/binary>>,
-                       ChunkId,
-                       Acc) ->
+                       ChunkId, Acc) ->
     parse_writers_snapshot(Rem, ChunkId, Acc#{Id => {ChunkId, Ts, Seq}}).
 
 trim_writers(Max, Writers) when map_size(Writers) =< Max ->
@@ -1659,8 +1640,7 @@ trim_writers(Max, Writers) ->
                       (K, {_ChId, Ts, _}, undefined) ->
                           {K, Ts}
                   end,
-                  undefined,
-                  Writers),
+                  undefined, Writers),
     trim_writers(Max, maps:remove(ToRemove, Writers)).
 
 read_header0(#?MODULE{cfg = #cfg{directory = Dir},

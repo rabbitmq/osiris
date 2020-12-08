@@ -96,8 +96,7 @@ do_metrics(O0) ->
                                  LV = maps:get(F, CL),
                                  [{F, (V - LV) / ?METRICS_INT_S} | Acc]
                               end,
-                              [],
-                              CC),
+                              [], CC),
                 io:format("~s: ~s/~s - Rates ~w~n~n", [node(), M, N, Rates])
              end,
              O1),

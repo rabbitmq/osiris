@@ -22,13 +22,32 @@ all() ->
     [{group, tests}].
 
 all_tests() ->
-    [single_node_write, cluster_write, quorum_write, cluster_batch_write,
-     read_validate_single_node, read_validate, single_node_offset_listener,
-     single_node_offset_listener2, cluster_offset_listener, replica_offset_listener,
-     cluster_restart, cluster_restart_new_leader, cluster_delete, cluster_failure,
-     start_cluster_invalid_replicas, restart_replica, diverged_replica, retention, tracking,
-     tracking_many, tracking_retention, single_node_deduplication, single_node_deduplication_2,
-     cluster_minority_deduplication, cluster_deduplication, writers_retention].
+    [single_node_write,
+     cluster_write,
+     quorum_write,
+     cluster_batch_write,
+     read_validate_single_node,
+     read_validate,
+     single_node_offset_listener,
+     single_node_offset_listener2,
+     cluster_offset_listener,
+     replica_offset_listener,
+     cluster_restart,
+     cluster_restart_new_leader,
+     cluster_delete,
+     cluster_failure,
+     start_cluster_invalid_replicas,
+     restart_replica,
+     diverged_replica,
+     retention,
+     tracking,
+     tracking_many,
+     tracking_retention,
+     single_node_deduplication,
+     single_node_deduplication_2,
+     cluster_minority_deduplication,
+     cluster_deduplication,
+     writers_retention].
 
 -define(BIN_SIZE, 800).
 

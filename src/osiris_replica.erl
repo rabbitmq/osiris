@@ -254,8 +254,7 @@ accept(LSock, Process) ->
 %%--------------------------------------------------------------------
 handle_call(get_port, _From, #?MODULE{cfg = #cfg{port = Port}} = State) ->
     {reply, Port, State};
-handle_call(get_reader_context,
-            _From,
+handle_call(get_reader_context, _From,
             #?MODULE{cfg =
                          #cfg{offset_ref = ORef,
                               name = Name,
@@ -336,8 +335,7 @@ handle_info({tcp, Socket, Bin},
                        Acc = osiris_log:accept_chunk(B, Acc0),
                        {[FirstOffset | Aks], Acc}
                     end,
-                    {[], Log0},
-                    OffsetChunks),
+                    {[], Log0}, OffsetChunks),
     counters:add(Cnt, ?C_PACKETS, 1),
     case Acks of
         [] ->
@@ -410,8 +408,7 @@ parse_chunk(<<?MAGIC:4/unsigned,
               _TData:TSize/binary,
               Rem/binary>> =
                 All,
-            undefined,
-            Acc) ->
+            undefined, Acc) ->
     TotalSize = Size + TSize + ?HEADER_SIZE_B,
     <<Chunk:TotalSize/binary, _/binary>> = All,
     parse_chunk(Rem, undefined, [{FirstOffset, Chunk} | Acc]);
@@ -430,8 +427,7 @@ parse_chunk(<<?MAGIC:4/unsigned,
               TSize:32/unsigned,
               Partial/binary>> =
                 All,
-            undefined,
-            Acc) ->
+            undefined, Acc) ->
     {{FirstOffset, [All], Size + TSize - byte_size(Partial)}, lists:reverse(Acc)};
 parse_chunk(Bin, PartialHeaderBin, Acc) when is_binary(PartialHeaderBin) ->
     %% slight inneficiency but partial headers should be relatively

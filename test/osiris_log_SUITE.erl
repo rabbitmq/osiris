@@ -24,17 +24,38 @@ all() ->
     [{group, tests}].
 
 all_tests() ->
-    [init_empty, init_twice, init_recover, init_recover_with_writers, init_with_lower_epoch,
-     write_batch, subbatch, read_chunk_parsed, read_chunk_parsed_multiple_chunks, read_header,
-     write_multi_log, tail_info_empty, tail_info, init_offset_reader_empty, init_offset_reader,
-     init_offset_reader_timestamp, init_offset_reader_truncated, init_data_reader_empty_log,
-     init_data_reader_truncated, init_epoch_offsets_empty, init_epoch_offsets,
-     init_epoch_offsets_multi_segment, init_epoch_offsets_multi_segment2,
+    [init_empty,
+     init_twice,
+     init_recover,
+     init_recover_with_writers,
+     init_with_lower_epoch,
+     write_batch,
+     subbatch,
+     read_chunk_parsed,
+     read_chunk_parsed_multiple_chunks,
+     read_header,
+     write_multi_log,
+     tail_info_empty,
+     tail_info,
+     init_offset_reader_empty,
+     init_offset_reader,
+     init_offset_reader_timestamp,
+     init_offset_reader_truncated,
+     init_data_reader_empty_log,
+     init_data_reader_truncated,
+     init_epoch_offsets_empty,
+     init_epoch_offsets,
+     init_epoch_offsets_multi_segment,
+     init_epoch_offsets_multi_segment2,
      % truncate,
      % truncate_multi_segment,
      accept_chunk,
-     accept_chunk_truncates_tail, overview, evaluate_retention_max_bytes,
-     evaluate_retention_max_age, offset_tracking, offset_tracking_snapshot,
+     accept_chunk_truncates_tail,
+     overview,
+     evaluate_retention_max_bytes,
+     evaluate_retention_max_age,
+     offset_tracking,
+     offset_tracking_snapshot,
      offset_tracking_empty].
 
 groups() ->
@@ -217,8 +238,7 @@ write_multi_log(Config) ->
     S0 = osiris_log:init(Conf#{max_segment_size => 10 * 1000 * 1000}),
     Data = crypto:strong_rand_bytes(10000),
     BatchOf10 = [Data || _ <- lists:seq(1, 10)],
-    _S1 = lists:foldl(fun(_, Acc) -> osiris_log:write(BatchOf10, Acc) end,
-                      S0,
+    _S1 = lists:foldl(fun(_, Acc) -> osiris_log:write(BatchOf10, Acc) end, S0,
                       lists:seq(1, 101)),
     Segments =
         filelib:wildcard(
@@ -238,8 +258,7 @@ write_multi_log(Config) ->
                         ?assertEqual(10, length(Records)),
                         Acc
                      end,
-                     R0,
-                     lists:seq(1, 101)),
+                     R0, lists:seq(1, 101)),
     ?assertEqual(1011, osiris_log:next_offset(R1)),
     ok.
 
@@ -570,8 +589,7 @@ accept_chunk_truncates_tail(Config) ->
     ok = osiris_log:close(LLog),
 
     FollowerEpochChunks =
-        [{1, [<<"one">>]},
-         {2, [<<"two">>]},
+        [{1, [<<"one">>]}, {2, [<<"two">>]},
          {2, [<<"three">>]}], %% should be truncated next accept
     FDir = ?config(follower1_dir, Config),
     FLog0 = seed_log(FDir, FollowerEpochChunks, Config),
@@ -648,8 +666,7 @@ offset_tracking(Config) ->
     Conf = ?config(osiris_conf, Config),
     S0 = osiris_log:init(Conf),
     ?assertEqual(0, osiris_log:next_offset(S0)),
-    S1 = osiris_log:write_tracking(#{<<"id1">> => 0},
-                                   delta,
+    S1 = osiris_log:write_tracking(#{<<"id1">> => 0}, delta,
                                    osiris_log:write([<<"hi">>], S0)),
     ?assertEqual(2, osiris_log:next_offset(S1)),
     ?assertMatch(#{<<"id1">> := 0}, osiris_log:tracking(S1)),
@@ -705,16 +722,14 @@ seed_log(Dir, EpochChunks, Config) when is_list(Dir) ->
                epoch => 1,
                max_segment_size => 1000 * 1000,
                name => ?config(test_case, Config)},
-             EpochChunks,
-             Config);
+             EpochChunks, Config);
 seed_log(Log, EpochChunks, _Config) ->
     lists:foldl(fun ({Epoch, Records}, Acc0) ->
                         write_chunk(Epoch, now_ms(), Records, Acc0);
                     ({Epoch, Ts, Records}, Acc0) ->
                         write_chunk(Epoch, Ts, Records, Acc0)
                 end,
-                Log,
-                EpochChunks).
+                Log, EpochChunks).
 
 write_chunk(Epoch, Now, Records, Log0) ->
     case osiris_log:get_current_epoch(Log0) of

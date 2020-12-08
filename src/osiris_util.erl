@@ -38,8 +38,7 @@ to_base64uri(Str) when is_list(Str) ->
                        false -> [$_ | Acc]
                    end
                 end,
-                [],
-                string:to_graphemes(Str)).
+                [], string:to_graphemes(Str)).
 
 -spec id(term()) -> term().
 id(X) ->
