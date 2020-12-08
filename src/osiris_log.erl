@@ -129,7 +129,8 @@
       timestamp => osiris:milliseconds(),
       data_size => non_neg_integer(),
       trailer_size => non_neg_integer(),
-      header_data => binary()}.
+      header_data => binary(),
+      position => non_neg_integer()}.
 
 %% holds static or rarely changing fields
 -record(cfg,
@@ -771,19 +772,17 @@ writers(#?MODULE{mode = #write{writers = Writers}}) ->
 -spec read_header(state()) ->
                      {ok, header_map(), state()} | {end_of_stream, state()} |
                      {error, {invalid_chunk_header, term()}}.
-read_header(#?MODULE{cfg = #cfg{},
-                     mode = #read{} = Read,
-                     fd = Fd} =
-                State) ->
+read_header(#?MODULE{cfg = #cfg{}} = State0) ->
     %% reads the next chunk of entries, parsed
     %% NB: this may return records before the requested index,
     %% that is fine - the reading process can do the appropriate filtering
-    case read_header0(State) of
+    case read_header0(State0) of
         {ok,
          #{num_records := NumRecords,
            data_size := DataSize,
            trailer_size := TrailerSize} =
-             Header} ->
+             Header,
+         #?MODULE{mode = #read{} = Read, fd = Fd} = State} ->
             %% skip data portion
             {ok, _} = file:position(Fd, {cur, DataSize + TrailerSize}),
             {ok, Header, State#?MODULE{mode = incr_next_offset(NumRecords, Read)}};
@@ -803,14 +802,11 @@ read_header(#?MODULE{cfg = #cfg{},
                       TrailerData :: iodata()},
                      state()} |
                     {end_of_stream, state()} | {error, {invalid_chunk_header, term()}}.
-read_chunk(#?MODULE{cfg = #cfg{},
-                    mode = #read{last_offset = _Last, next_offset = Offs} = Read,
-                    fd = Fd} =
-               State) ->
+read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
     %% reads the next chunk of entries, parsed
     %% NB: this may return records before the requested index,
     %% that is fine - the reading process can do the appropriate filtering
-    case read_header0(State) of
+    case read_header0(State0) of
         {ok,
          #{type := ChType,
            chunk_id := ChId,
@@ -819,11 +815,12 @@ read_chunk(#?MODULE{cfg = #cfg{},
            num_records := NumRecords,
            header_data := HeaderData,
            data_size := DataSize,
-           trailer_size := TrailerSize}} ->
+           trailer_size := TrailerSize},
+         #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State} ->
             {ok, BlobData} = file:read(Fd, DataSize),
             %% position after trailer
             {ok, TrailerData} = file:read(Fd, TrailerSize),
-            validate_crc(Offs, Crc, BlobData),
+            validate_crc(ChId, Crc, BlobData),
             {ok, {ChType, ChId, Epoch, HeaderData, BlobData, TrailerData},
              State#?MODULE{mode = incr_next_offset(NumRecords, Read)}};
         Other ->
@@ -1651,6 +1648,7 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir},
     %% reads the next header if permitted
     case can_read_next_offset(Read) of
         true ->
+            {ok, Pos} = file:position(Fd, cur),
             case file:read(Fd, ?HEADER_SIZE_B) of
                 {ok,
                  <<?MAGIC:4/unsigned,
@@ -1675,8 +1673,10 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir},
                        timestamp => Timestamp,
                        data_size => DataSize,
                        trailer_size => TrailerSize,
-                       header_data => HeaderData}};
-                {ok, _} ->
+                       header_data => HeaderData,
+                       position => Pos},
+                     State};
+                {ok, Bin} when byte_size(Bin) == ?HEADER_SIZE_B ->
                     %% set the position back for the next read
                     %% TODO: should it be an exception if the next chunk is not
                     %% the expected next chunk id??
@@ -1698,7 +1698,7 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir},
                                 {ok, Fd2} ->
                                     ok = file:close(Fd),
                                     {ok, _} = file:position(Fd2, ?LOG_HEADER_SIZE),
-                                    read_chunk(State#?MODULE{current_file = SegFile, fd = Fd2});
+                                    read_header0(State#?MODULE{current_file = SegFile, fd = Fd2});
                                 {error, enoent} ->
                                     {end_of_stream, State}
                             end
