@@ -714,7 +714,12 @@ init_offset_reader(OffsetSpec,
                     case scan_index(IndexFile, Fd, StartOffset) of
                         eof ->
                             {StartOffset, 0};
-                        IdxResult ->
+                        enoent ->
+                            %% index file was not found
+                            %% just retry
+                            _ = file:close(Fd),
+                            init_offset_reader(OffsetSpec, Conf);
+                        IdxResult when is_tuple(IdxResult) ->
                             IdxResult
                     end,
                 {ok, _Pos} = file:position(Fd, FilePos),
@@ -991,12 +996,18 @@ header_info(Fd, Pos) ->
     {ChType, Offset, Epoch, Num, Size, TSize}.
 
 scan_index(IdxFile, SegFd, Offs) when is_list(IdxFile) ->
-    {ok, Fd} = file:open(IdxFile, [read, raw, binary, read_ahead]),
-    case file:read(Fd, ?IDX_HEADER_SIZE) of
-        {ok, ?IDX_HEADER} ->
-            scan_index(file:read(Fd, ?INDEX_RECORD_SIZE_B * 2), Fd, SegFd, Offs);
-        Err ->
-            Err
+    case file:open(IdxFile, [read, raw, binary, read_ahead]) of
+        {ok, Fd} ->
+            case file:read(Fd, ?IDX_HEADER_SIZE) of
+                {ok, ?IDX_HEADER} ->
+                    scan_index(file:read(Fd, ?INDEX_RECORD_SIZE_B * 2), Fd, SegFd, Offs);
+                eof ->
+                    eof;
+                {error, Posix} ->
+                    Posix
+            end;
+        {error, Posix} ->
+            Posix
     end.
 
 scan_index(eof, IdxFd, _Fd, 0) ->
