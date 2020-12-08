@@ -38,7 +38,8 @@ run(#{name := Name} = Spec) ->
     Dir0 = maps:get(directory, Spec, Cwd),
     Dir = filename:join([Dir0, ?MODULE, Name]),
     %% create cluster (if needed)
-    [LeaderNode | Replicas] = Nodes = [start_slave(N, Dir) || N <- [s1, s2, s3]],
+    [LeaderNode | Replicas] =
+        Nodes = [start_slave(N, Dir) || N <- [s1, s2, s3]],
 
     %% declare osiris cluster
     Conf0 =
@@ -48,14 +49,17 @@ run(#{name := Name} = Spec) ->
           retention => [{max_bytes, 100 * 1000 * 1000}],
           replica_nodes => Replicas},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-    {ok, #{leader_pid := Leader2}} = osiris:start_cluster(Conf0#{name => Name ++ Name}),
+    {ok, #{leader_pid := Leader2}} =
+        osiris:start_cluster(Conf0#{name => Name ++ Name}),
     %% start metrics gatherer on leader node
     start_metrics_gatherer(node(Leader)),
     %%
     %% start publisher
     InFlight = maps:get(in_flight, Spec, 1000),
-    start_publisher(node(Leader), #{leader => Leader, in_flight => InFlight}),
-    start_publisher(node(Leader2), #{leader => Leader2, in_flight => InFlight}),
+    start_publisher(node(Leader),
+                    #{leader => Leader, in_flight => InFlight}),
+    start_publisher(node(Leader2),
+                    #{leader => Leader2, in_flight => InFlight}),
     Nodes.
 
 stop(Nodes) ->
@@ -107,7 +111,9 @@ start_slave(N, RunDir) ->
     Dir0 = filename:join(RunDir, N),
     Host = get_current_host(),
     Dir = "'\"" ++ Dir0 ++ "\"'",
-    Pa = string:join(["-pa" | search_paths()] ++ ["-osiris data_dir", Dir], " "),
+    Pa = string:join(["-pa" | search_paths()]
+                     ++ ["-osiris data_dir", Dir],
+                     " "),
     ?INFO("osiris_bench: starting slave node with ~s~n", [Pa]),
     {ok, S} = slave:start_link(Host, N, Pa),
     ?INFO("osiris_bench: started slave node ~w ~w~n", [S, Host]),
@@ -122,7 +128,8 @@ get_current_host() ->
 
 search_paths() ->
     Ld = code:lib_dir(),
-    lists:filter(fun(P) -> string:prefix(P, Ld) =:= nomatch end, code:get_path()).
+    lists:filter(fun(P) -> string:prefix(P, Ld) =:= nomatch end,
+                 code:get_path()).
 
 -ifdef(TEST).
 

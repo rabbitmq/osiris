@@ -83,7 +83,8 @@ init_per_testcase(TestCase, Config) ->
      | Config].
 
 end_per_testcase(_TestCase, Config) ->
-    [application:stop(App) || App <- lists:reverse(?config(started_apps, Config))],
+    [application:stop(App)
+     || App <- lists:reverse(?config(started_apps, Config))],
     ok.
 
 %%%===================================================================
@@ -115,7 +116,8 @@ single_node_write(Config) ->
 cluster_write(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    [LeaderNode | Replicas] = Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     WriterId = undefined,
     Conf0 =
         #{name => Name,
@@ -132,14 +134,16 @@ cluster_write(Config) ->
         flush(),
         exit(osiris_written_timeout)
     end,
-    ok = validate_log(Leader, [{0, <<"mah-data">>}, {1, <<"mah-data2">>}]),
+    ok =
+        validate_log(Leader, [{0, <<"mah-data">>}, {1, <<"mah-data2">>}]),
     [slave:stop(N) || N <- Nodes],
     ok.
 
 quorum_write(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    [LeaderNode | Replicas] = Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -162,13 +166,15 @@ quorum_write(Config) ->
 cluster_batch_write(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    [LeaderNode | Replicas] = Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
           leader_node => LeaderNode,
           replica_nodes => Replicas},
-    {ok, #{leader_pid := Leader, replica_pids := [ReplicaPid, ReplicaPid2]}} =
+    {ok,
+     #{leader_pid := Leader, replica_pids := [ReplicaPid, ReplicaPid2]}} =
         osiris:start_cluster(Conf0),
     Batch = {batch, 1, 0, <<0:1, 8:31/unsigned, "mah-data">>},
     ok = osiris:write(Leader, undefined, 42, Batch),
@@ -194,7 +200,8 @@ single_node_offset_listener(Config) ->
           leader_node => node(),
           replica_nodes => []},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-    {error, {offset_out_of_range, empty}} = osiris:init_reader(Leader, {abs, 0}),
+    {error, {offset_out_of_range, empty}} =
+        osiris:init_reader(Leader, {abs, 0}),
     osiris:register_offset_listener(Leader, 0),
     ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
     receive
@@ -239,7 +246,8 @@ single_node_offset_listener2(Config) ->
 cluster_offset_listener(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    [_ | Replicas] = Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    [_ | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -269,13 +277,15 @@ cluster_offset_listener(Config) ->
 replica_offset_listener(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    [_ | Replicas] = Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    [_ | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
           leader_node => node(),
           replica_nodes => Replicas},
-    {ok, #{leader_pid := Leader, replica_pids := ReplicaPids}} = osiris:start_cluster(Conf0),
+    {ok, #{leader_pid := Leader, replica_pids := ReplicaPids}} =
+        osiris:start_cluster(Conf0),
     Self = self(),
     R = hd(ReplicaPids),
     _ = spawn(node(R),
@@ -285,7 +295,8 @@ replica_offset_listener(Config) ->
                  receive
                      {osiris_offset, _Name, O} when O > -1 ->
                          ct:pal("got offset ~w", [O]),
-                         {[{0, <<"mah-data">>}], Log} = osiris_log:read_chunk_parsed(Log0),
+                         {[{0, <<"mah-data">>}], Log} =
+                             osiris_log:read_chunk_parsed(Log0),
                          osiris_log:close(Log),
                          Self ! test_passed,
                          ok
@@ -316,7 +327,8 @@ read_validate_single_node(Config) ->
           epoch => 1,
           leader_node => node(),
           replica_nodes => []},
-    {ok, #{leader_pid := Leader, replica_pids := []}} = osiris:start_cluster(Conf0),
+    {ok, #{leader_pid := Leader, replica_pids := []}} =
+        osiris:start_cluster(Conf0),
     timer:sleep(500),
     % start_profile(Config, [osiris_writer, gen_batch_server,
     %                        osiris_log, lists, file]),
@@ -330,7 +342,8 @@ read_validate_single_node(Config) ->
     ct:pal("validating....", []),
     {Time, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
     MsgSec = Num / (Time / 1000 / 1000),
-    ct:pal("validate read of ~b entries took ~wms ~w msg/s", [Num, Time div 1000, MsgSec]),
+    ct:pal("validate read of ~b entries took ~wms ~w msg/s",
+           [Num, Time div 1000, MsgSec]),
     ok.
 
 read_validate(Config) ->
@@ -345,7 +358,8 @@ read_validate(Config) ->
           retention => [{max_bytes, 1000000}],
           leader_node => node(),
           replica_nodes => Replicas},
-    {ok, #{leader_pid := Leader, replica_pids := ReplicaPids}} = osiris:start_cluster(Conf0),
+    {ok, #{leader_pid := Leader, replica_pids := ReplicaPids}} =
+        osiris:start_cluster(Conf0),
     {_, GarbBefore} = erlang:process_info(Leader, garbage_collection),
     {_, MemBefore} = erlang:process_info(Leader, memory),
     {_, BinBefore} = erlang:process_info(Leader, binary),
@@ -373,9 +387,13 @@ read_validate(Config) ->
     ct:pal("Garbage:~n~w~n~w~n", [GarbBefore, GarbAfter]),
     ct:pal("Memory:~n~w~n~w~n", [MemBefore, MemAfter]),
     MsgSec = Num / (Time / 1000 / 1000),
-    ct:pal("~b writes took ~wms ~w msg/s", [Num, trunc(Time div 1000), trunc(MsgSec)]),
+    ct:pal("~b writes took ~wms ~w msg/s",
+           [Num, trunc(Time div 1000), trunc(MsgSec)]),
     ct:pal("~w counters ~p", [node(), osiris_counters:overview()]),
-    [begin ct:pal("~w counters ~p", [N, rpc:call(N, osiris_counters, overview, [])]) end
+    [begin
+         ct:pal("~w counters ~p",
+                [N, rpc:call(N, osiris_counters, overview, [])])
+     end
      || N <- Replicas],
 
     {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
@@ -404,7 +422,8 @@ read_validate(Config) ->
 cluster_restart(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    [LeaderNode | Replicas] = Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -422,7 +441,8 @@ cluster_restart(Config) ->
     end,
 
     osiris:stop_cluster(Conf),
-    {ok, #{leader_pid := Leader1}} = osiris:start_cluster(Conf0#{epoch => 2}),
+    {ok, #{leader_pid := Leader1}} =
+        osiris:start_cluster(Conf0#{epoch => 2}),
     %% give leader some time to discover the committed offset
     timer:sleep(1000),
     ok = validate_log(Leader1, [{0, <<"before-restart">>}]),
@@ -436,14 +456,17 @@ cluster_restart(Config) ->
         exit(osiris_written_timeout)
     end,
 
-    ok = validate_log(Leader1, [{0, <<"before-restart">>}, {1, <<"after-restart">>}]),
+    ok =
+        validate_log(Leader1,
+                     [{0, <<"before-restart">>}, {1, <<"after-restart">>}]),
     [slave:stop(N) || N <- Nodes],
     ok.
 
 cluster_restart_new_leader(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    [LeaderNode | Replicas] = Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -481,14 +504,17 @@ cluster_restart_new_leader(Config) ->
         exit(osiris_written_timeout)
     end,
 
-    ok = validate_log(Leader1, [{0, <<"before-restart">>}, {1, <<"after-restart">>}]),
+    ok =
+        validate_log(Leader1,
+                     [{0, <<"before-restart">>}, {1, <<"after-restart">>}]),
     [slave:stop(N) || N <- Nodes],
     ok.
 
 cluster_delete(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    [LeaderNode | Replicas] = Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -513,7 +539,8 @@ cluster_failure(Config) ->
     %% should also exit
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    [LeaderNode | Replicas] = Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -522,7 +549,8 @@ cluster_failure(Config) ->
     {ok, #{leader_pid := Leader, replica_pids := [R1, R2]} = _Conf} =
         osiris:start_cluster(Conf0),
 
-    _PreRRs = supervisor:which_children({osiris_replica_reader_sup, node(Leader)}),
+    _PreRRs =
+        supervisor:which_children({osiris_replica_reader_sup, node(Leader)}),
     %% stop the leader
     gen_batch_server:stop(Leader, bananas, 5000),
 
@@ -542,7 +570,8 @@ cluster_failure(Config) ->
         flush(),
         exit(down_timeout_2)
     end,
-    [] = supervisor:which_children({osiris_replica_reader_sup, node(Leader)}),
+    [] =
+        supervisor:which_children({osiris_replica_reader_sup, node(Leader)}),
 
     [slave:stop(N) || N <- Nodes],
     ok.
@@ -555,31 +584,37 @@ start_cluster_invalid_replicas(Config) ->
           leader_node => node(),
           replica_nodes => [zen@rabbit],
           dir => ?config(priv_dir, Config)},
-    {ok, #{leader_pid := _Leader, replica_pids := []}} = osiris:start_cluster(Conf0).
+    {ok, #{leader_pid := _Leader, replica_pids := []}} =
+        osiris:start_cluster(Conf0).
 
 restart_replica(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
     Nodes = [s1, s2, s3],
-    [LeaderE1, Replica1, Replica2] = [start_child_node(N, PrivDir) || N <- Nodes],
+    [LeaderE1, Replica1, Replica2] =
+        [start_child_node(N, PrivDir) || N <- Nodes],
     InitConf =
         #{name => Name,
           external_ref => Name,
           epoch => 1,
           leader_node => LeaderE1,
           replica_nodes => [Replica1, Replica2]},
-    {ok, #{leader_pid := LeaderE1Pid, replica_pids := [R1Pid, _]} = Conf} =
+    {ok,
+     #{leader_pid := LeaderE1Pid, replica_pids := [R1Pid, _]} = Conf} =
         osiris:start_cluster(InitConf),
     %% write some records in e1
     Msgs = lists:seq(1, 1),
-    [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>]) || N <- Msgs],
+    [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>])
+     || N <- Msgs],
     wait_for_written(Msgs),
     timer:sleep(100),
     ok = rpc:call(node(R1Pid), gen_server, stop, [R1Pid]),
-    [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>]) || N <- Msgs],
+    [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>])
+     || N <- Msgs],
     wait_for_written(Msgs),
     {ok, _Replica1b} = osiris_replica:start(node(R1Pid), Conf),
-    [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>]) || N <- Msgs],
+    [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>])
+     || N <- Msgs],
     wait_for_written(Msgs),
     ok.
 
@@ -587,7 +622,8 @@ diverged_replica(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
     Nodes = [s1, s2, s3],
-    [LeaderE1, LeaderE2, LeaderE3] = [start_child_node(N, PrivDir) || N <- Nodes],
+    [LeaderE1, LeaderE2, LeaderE3] =
+        [start_child_node(N, PrivDir) || N <- Nodes],
     ConfE1 =
         #{name => Name,
           external_ref => Name,
@@ -596,7 +632,8 @@ diverged_replica(Config) ->
           replica_nodes => [LeaderE2, LeaderE3]},
     {ok, #{leader_pid := LeaderE1Pid}} = osiris:start_cluster(ConfE1),
     %% write some records in e1
-    [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>]) || N <- lists:seq(1, 100)],
+    [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>])
+     || N <- lists:seq(1, 100)],
     wait_for_written(lists:seq(1, 100)),
 
     %% shut down cluster and start only LeaderE2 in epoch 2
@@ -607,7 +644,8 @@ diverged_replica(Config) ->
                 replica_nodes => [LeaderE1, LeaderE2]},
     {ok, LeaderE2Pid} = osiris_writer:start(ConfE2),
     %% write some entries that won't be committedo
-    [osiris:write(LeaderE2Pid, undefined, N, [<<N:64/integer>>]) || N <- lists:seq(101, 200)],
+    [osiris:write(LeaderE2Pid, undefined, N, [<<N:64/integer>>])
+     || N <- lists:seq(101, 200)],
     %% we can't wait for osiris_written here
     timer:sleep(500),
     %% shut down LeaderE2
@@ -620,7 +658,8 @@ diverged_replica(Config) ->
     %% start the cluster in E3 with E3 as leader
     {ok, #{leader_pid := LeaderE3Pid}} = osiris:start_cluster(ConfE3),
     %% write some more in this epoch
-    [osiris:write(LeaderE3Pid, undefined, N, [<<N:64/integer>>]) || N <- lists:seq(201, 300)],
+    [osiris:write(LeaderE3Pid, undefined, N, [<<N:64/integer>>])
+     || N <- lists:seq(201, 300)],
     wait_for_written(lists:seq(201, 300)),
     timer:sleep(1000),
 
@@ -632,7 +671,10 @@ diverged_replica(Config) ->
         [begin
              {ok, D} =
                  file:read_file(
-                     filename:join([PrivDir, N, ?FUNCTION_NAME, "00000000000000000000.index"])),
+                     filename:join([PrivDir,
+                                    N,
+                                    ?FUNCTION_NAME,
+                                    "00000000000000000000.index"])),
              D
          end
          || N <- Nodes],
@@ -643,7 +685,10 @@ diverged_replica(Config) ->
         [begin
              {ok, D} =
                  file:read_file(
-                     filename:join([PrivDir, N, ?FUNCTION_NAME, "00000000000000000000.segment"])),
+                     filename:join([PrivDir,
+                                    N,
+                                    ?FUNCTION_NAME,
+                                    "00000000000000000000.segment"])),
              D
          end
          || N <- Nodes],
@@ -663,7 +708,8 @@ retention(Config) ->
           retention => [{max_bytes, SegSize}],
           max_segment_size => SegSize,
           replica_nodes => []},
-    {ok, #{leader_pid := Leader, replica_pids := []}} = osiris:start_cluster(Conf0),
+    {ok, #{leader_pid := Leader, replica_pids := []}} =
+        osiris:start_cluster(Conf0),
     timer:sleep(500),
     write_n(Leader, Num, 0, 1000 * 8, #{}),
     timer:sleep(1000),
@@ -741,7 +787,8 @@ tracking_retention(Config) ->
           retention => [{max_bytes, SegSize}],
           max_segment_size => SegSize,
           replica_nodes => []},
-    {ok, #{leader_pid := Leader, replica_pids := []}} = osiris:start_cluster(Conf0),
+    {ok, #{leader_pid := Leader, replica_pids := []}} =
+        osiris:start_cluster(Conf0),
     timer:sleep(500),
     TrkId = <<"trkid1">>,
     osiris:write_tracking(Leader, TrkId, 5),
@@ -795,7 +842,8 @@ single_node_deduplication_2(Config) ->
 cluster_minority_deduplication(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    [LeaderNode | Replicas] = Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     WriterId = atom_to_binary(?FUNCTION_NAME, utf8),
     Conf0 =
         #{name => Name,
@@ -822,7 +870,8 @@ cluster_minority_deduplication(Config) ->
 cluster_deduplication(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    [LeaderNode | Replicas] = Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     WriterId = atom_to_binary(?FUNCTION_NAME, utf8),
     Conf0 =
         #{name => Name,
@@ -899,7 +948,8 @@ write_n(Pid, N, Next, BinSize, Written) ->
 
 wait_for_written(Written0) when is_list(Written0) ->
     ct:pal("wait_for_written num: ~w", [length(Written0)]),
-    wait_for_written(lists:foldl(fun(N, Acc) -> maps:put(N, ok, Acc) end, #{}, Written0));
+    wait_for_written(lists:foldl(fun(N, Acc) -> maps:put(N, ok, Acc) end,
+                                 #{}, Written0));
 wait_for_written(Written0) ->
     receive
         {osiris_written, _Name, _WriterId, Corrs} ->
@@ -927,7 +977,8 @@ validate_read(Max, Next, Log0) ->
     {[{Offs, _} | _] = Recs, Log} = osiris_log:read_chunk_parsed(Log0),
     case Offs == Next of
         false ->
-            ct:fail("validate_read failed Offs ~b not eqial to ~b", [Offs, Next]);
+            ct:fail("validate_read failed Offs ~b not eqial to ~b",
+                    [Offs, Next]);
         true ->
             validate_read(Max, Next + length(Recs), Log)
     end.
@@ -936,7 +987,9 @@ start_child_node(N, PrivDir) ->
     Dir0 = filename:join(PrivDir, N),
     Host = get_current_host(),
     Dir = "'\"" ++ Dir0 ++ "\"'",
-    Pa = string:join(["-pa" | search_paths()] ++ ["-osiris data_dir", Dir], " "),
+    Pa = string:join(["-pa" | search_paths()]
+                     ++ ["-osiris data_dir", Dir],
+                     " "),
     ct:pal("starting child node with ~s~n", [Pa]),
     {ok, S} = slave:start_link(Host, N, Pa),
     ct:pal("started child node ~w ~w~n", [S, Host]),
@@ -965,7 +1018,8 @@ make_node_name(N) ->
 
 search_paths() ->
     Ld = code:lib_dir(),
-    lists:filter(fun(P) -> string:prefix(P, Ld) =:= nomatch end, code:get_path()).
+    lists:filter(fun(P) -> string:prefix(P, Ld) =:= nomatch end,
+                 code:get_path()).
 
 % start_profile(Config, Modules) ->
 %     Dir = ?config(priv_dir, Config),
@@ -1005,5 +1059,8 @@ validate_log(Log0, Expected) ->
     end.
 
 print_counters() ->
-    [begin ct:pal("~w counters ~p", [N, rpc:call(N, osiris_counters, overview, [])]) end
+    [begin
+         ct:pal("~w counters ~p",
+                [N, rpc:call(N, osiris_counters, overview, [])])
+     end
      || N <- nodes()].

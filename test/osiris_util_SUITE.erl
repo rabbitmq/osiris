@@ -52,4 +52,5 @@ end_per_testcase(_TestCase, _Config) ->
 to_base64uri_test(Config) ->
     ?assertEqual("Myqueue", osiris_util:to_base64uri("Myqueue")),
     ?assertEqual("my__queue", osiris_util:to_base64uri("my%*queue")),
-    ?assertEqual("my99___queue", osiris_util:to_base64uri("my99_[]queue")).
+    ?assertEqual("my99___queue",
+                 osiris_util:to_base64uri("my99_[]queue")).
