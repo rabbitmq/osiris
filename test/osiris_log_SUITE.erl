@@ -246,7 +246,8 @@ write_multi_log(Config) ->
     ?assertEqual(2, length(Segments)),
 
     OffRef = atomics:new(1, []),
-    atomics:put(OffRef, 1, 1011), %% takes a single offset tracking data into account
+    atomics:put(OffRef, 1,
+                1011), %% takes a single offset tracking data into account
     %% ensure all records can be read
     {ok, R0} = osiris_log:init_offset_reader(first, Conf#{offset_ref => OffRef}),
 
@@ -585,7 +586,8 @@ accept_chunk_truncates_tail(Config) ->
     LDir = ?config(leader_dir, Config),
     LLog = seed_log(LDir, EpochChunks, Config),
     LTail = osiris_log:tail_info(LLog),
-    ?assertEqual({4, {3, 2}}, LTail), %% {NextOffs, {LastEpoch, LastChunkOffset}}
+    ?assertEqual({4, {3, 2}},
+                 LTail), %% {NextOffs, {LastEpoch, LastChunkOffset}}
     ok = osiris_log:close(LLog),
 
     FollowerEpochChunks =

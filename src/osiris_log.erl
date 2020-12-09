@@ -849,96 +849,55 @@ read_chunk_parsed(#?MODULE{mode = #read{type = RType}} = State0) ->
 
 -spec send_file(gen_tcp:socket(), state()) -> {ok, state()} | {end_of_stream, state()}.
 send_file(Sock, State) ->
-    send_file(Sock, State, fun(S) -> S end).
+    send_file(Sock, State, fun(_, S) -> S end).
 
 -spec send_file(gen_tcp:socket(), state(),
-                fun((non_neg_integer()) -> non_neg_integer())) ->
+                fun((header_map(), non_neg_integer()) -> term())) ->
                    {ok, state()} | {end_of_stream, state()}.
-send_file(Sock,
-          #?MODULE{cfg = #cfg{directory = Dir},
-                   mode = #read{type = RType, next_offset = NextOffs} = Read,
-                   current_file = CurFile,
-                   fd = Fd} =
-              State0,
-          Callback) ->
-    case can_read_next_offset(Read) of
-        true ->
-            {ok, Pos} = file:position(Fd, cur),
-            case file:read(Fd, ?HEADER_SIZE_B) of
-                {ok,
-                 <<?MAGIC:4/unsigned,
-                   ?VERSION:4/unsigned,
-                   ChType:8/unsigned,
-                   _NumEntries:16/unsigned,
-                   NumRecords:32/unsigned,
-                   _Timestamp:64/integer,
-                   _Epoch:64/unsigned,
-                   NextOffs:64/unsigned,
-                   _Crc:32/integer,
-                   DataSize:32/unsigned,
-                   TrailerSize:32/unsigned>>} ->
-                    %% read header
-                    %% used to write frame headers to socket
-                    %% and return the number of bytes to sendfile
-                    %% this allow users of this api to send all the data
-                    %% or just header and entry data
-                    ToSend =
-                        case ChType of
-                            ?CHNK_USER when RType == offset ->
-                                %% offset readers only need the entry
-                                %% data not the trailer
-                                DataSize + ?HEADER_SIZE_B;
-                            _ ->
-                                DataSize + TrailerSize + ?HEADER_SIZE_B
-                        end,
+send_file(Sock, #?MODULE{cfg = #cfg{}, mode = #read{type = RType}} = State0, Callback) ->
+    case read_header0(State0) of
+        {ok,
+         #{type := ChType,
+           chunk_id := ChId,
+           num_records := NumRecords,
+           data_size := DataSize,
+           trailer_size := TrailerSize,
+           position := Pos} =
+             Header,
+         #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State1} ->
+            %% read header
+            %% used to write frame headers to socket
+            %% and return the number of bytes to sendfile
+            %% this allow users of this api to send all the data
+            %% or just header and entry data
+            ToSend =
+                case ChType of
+                    ?CHNK_USER when RType == offset ->
+                        %% offset readers only need the entry
+                        %% data not the trailer
+                        DataSize + ?HEADER_SIZE_B;
+                    _ ->
+                        DataSize + TrailerSize + ?HEADER_SIZE_B
+                end,
 
-                    %% sendfile doesn't increment the file descriptor position
-                    %% so we have to do this manually
-                    NextFilePos = Pos + DataSize + TrailerSize + ?HEADER_SIZE_B,
-                    {ok, _} = file:position(Fd, NextFilePos),
-                    State = State0#?MODULE{mode = incr_next_offset(NumRecords, Read)},
-                    %% only sendfile if either the reader is a data reader
-                    %% or the chunk is a user type (for offset readers)
-                    case ChType == ?CHNK_USER orelse RType == data of
-                        true ->
-                            _ = Callback(ToSend),
-                            ok = sendfile(Fd, Sock, Pos, ToSend),
-                            {ok, State};
-                        false ->
-                            %% skip chunk and recurse
-                            send_file(Sock, State, Callback)
-                    end;
-                {ok, B} when byte_size(B) < ?HEADER_SIZE_B ->
-                    %% partial data available
-                    %% reset and wait for update
-                    {ok, Pos} = file:position(Fd, Pos),
-                    {end_of_stream, State0};
-                eof ->
-                    %% open next segment file and start there if it exists
-                    SegFile = make_file_name(NextOffs, "segment"),
-                    case SegFile == CurFile of
-                        true ->
-                            %% the new filename is the same as the old one
-                            %% this should only really happen for an empty
-                            %% log but would cause an infinite loop if it does
-                            {end_of_stream, State0};
-                        false ->
-                            case file:open(
-                                     filename:join(Dir, SegFile), [raw, binary, read])
-                            of
-                                {ok, Fd2} ->
-                                    {ok, _} = file:position(Fd2, ?LOG_HEADER_SIZE),
-                                    ok = file:close(Fd),
-                                    send_file(Sock,
-                                              State0#?MODULE{fd = Fd2, current_file = SegFile},
-                                              Callback);
-                                {error, enoent} ->
-                                    {end_of_stream, State0}
-                            end
-                    end
+            %% sendfile doesn't increment the file descriptor position
+            %% so we have to do this manually
+            NextFilePos = Pos + DataSize + TrailerSize + ?HEADER_SIZE_B,
+            {ok, _} = file:position(Fd, NextFilePos),
+            State = State1#?MODULE{mode = incr_next_offset(NumRecords, Read)},
+            %% only sendfile if either the reader is a data reader
+            %% or the chunk is a user type (for offset readers)
+            case ChType == ?CHNK_USER orelse RType == data of
+                true ->
+                    _ = Callback(Header, ToSend),
+                    ok = sendfile(Fd, Sock, Pos, ToSend),
+                    {ok, State};
+                false ->
+                    %% skip chunk and recurse
+                    send_file(Sock, State, Callback)
             end;
-        false ->
-            {end_of_stream, State0}
+        Other ->
+            Other
     end.
 
 -spec close(state()) -> ok.
