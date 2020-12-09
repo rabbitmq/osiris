@@ -44,7 +44,8 @@ init_per_testcase(_TestCase, Config) ->
     [{started_apps, Apps} | Config].
 
 end_per_testcase(_TestCase, Config) ->
-    [application:stop(App) || App <- lists:reverse(?config(started_apps, Config))],
+    [application:stop(App)
+     || App <- lists:reverse(?config(started_apps, Config))],
     ok.
 
 %%%===================================================================

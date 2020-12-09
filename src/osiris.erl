@@ -42,8 +42,14 @@
 -type milliseconds() :: non_neg_integer().
 -type tail_info() :: {offset(), empty | {epoch(), offset()}}.
 -type offset_spec() ::
-    first | last | next | {abs, offset()} | offset() | {timestamp, milliseconds()}.
--type retention_spec() :: {max_bytes, non_neg_integer()} | {max_age, milliseconds()}.
+    first |
+    last |
+    next |
+    {abs, offset()} |
+    offset() |
+    {timestamp, milliseconds()}.
+-type retention_spec() ::
+    {max_bytes, non_neg_integer()} | {max_age, milliseconds()}.
 -type writer_id() :: binary().
 -type data() :: iodata() | {batch, non_neg_integer(), 0, iodata()}.
 
@@ -59,10 +65,12 @@
               data/0]).
 
 -spec start_cluster(config()) ->
-                       {ok, config()} | {error, term()} | {error, term(), config()}.
+                       {ok, config()} | {error, term()} |
+                       {error, term(), config()}.
 start_cluster(Config00 = #{name := Name}) ->
     true = osiris_util:validate_base64uri(Name),
-    Config0 = Config00#{external_ref => maps:get(reference, Config00, Name)},
+    Config0 =
+        Config00#{external_ref => maps:get(reference, Config00, Name)},
     case osiris_writer:start(Config0) of
         {ok, Pid} ->
             Config = Config0#{leader_pid => Pid},
@@ -79,12 +87,14 @@ start_cluster(Config00 = #{name := Name}) ->
 
 stop_cluster(Config) ->
     ok = osiris_writer:stop(Config),
-    [ok = osiris_replica:stop(N, Config) || N <- maps:get(replica_nodes, Config)],
+    [ok = osiris_replica:stop(N, Config)
+     || N <- maps:get(replica_nodes, Config)],
     ok.
 
 -spec delete_cluster(config()) -> ok.
 delete_cluster(Config) ->
-    [ok = osiris_replica:delete(R, Config) || R <- maps:get(replica_nodes, Config)],
+    [ok = osiris_replica:delete(R, Config)
+     || R <- maps:get(replica_nodes, Config)],
     ok = osiris_writer:delete(Config).
 
 start_writer(Config) ->
@@ -109,8 +119,10 @@ write_tracking(Pid, TrackingId, Offset) ->
 read_tracking(Pid, TrackingId) ->
     osiris_writer:read_tracking(Pid, TrackingId).
 
--spec fetch_writer_seq(pid(), binary()) -> non_neg_integer() | undefined.
-fetch_writer_seq(Pid, WriterId) when is_pid(Pid) andalso is_binary(WriterId) ->
+-spec fetch_writer_seq(pid(), binary()) ->
+                          non_neg_integer() | undefined.
+fetch_writer_seq(Pid, WriterId)
+    when is_pid(Pid) andalso is_binary(WriterId) ->
     osiris_writer:query_writers(Pid,
                                 fun(W) ->
                                    case maps:get(WriterId, W, undefined) of
@@ -136,9 +148,11 @@ fetch_writer_seq(Pid, WriterId) when is_pid(Pid) andalso is_binary(WriterId) ->
 %% @end
 -spec init_reader(pid(), offset_spec()) ->
                      {ok, osiris_log:state()} |
-                     {error, {offset_out_of_range, empty | {offset(), offset()}}} |
+                     {error,
+                      {offset_out_of_range, empty | {offset(), offset()}}} |
                      {error, {invalid_last_offset_epoch, offset(), offset()}}.
-init_reader(Pid, OffsetSpec) when is_pid(Pid) andalso node(Pid) =:= node() ->
+init_reader(Pid, OffsetSpec)
+    when is_pid(Pid) andalso node(Pid) =:= node() ->
     ?DEBUG("osiris: initialising reader. Spec: ~w", [OffsetSpec]),
     {ok, Ctx} = gen:call(Pid, '$gen_call', get_reader_context),
     osiris_log:init_offset_reader(OffsetSpec, Ctx).
@@ -151,9 +165,12 @@ register_offset_listener(Pid, Offset) ->
 %% Registers a one-off offset listener that will send an `{osiris_offset, offset()}'
 %% message when the osiris cluster committed offset moves beyond the provided offset
 %% @end
--spec register_offset_listener(pid(), offset(), mfarg() | undefined) -> ok.
+-spec register_offset_listener(pid(), offset(),
+                               mfarg() | undefined) ->
+                                  ok.
 register_offset_listener(Pid, Offset, EvtFormatter) ->
-    Msg = {'$gen_cast', {register_offset_listener, self(), EvtFormatter, Offset}},
+    Msg = {'$gen_cast',
+           {register_offset_listener, self(), EvtFormatter, Offset}},
     try
         erlang:send(Pid, Msg)
     catch
@@ -175,7 +192,8 @@ start_replicas(Config, [Node | Nodes], ReplicaPids) ->
             {ok, Pid, _} ->
                 start_replicas(Config, Nodes, [Pid | ReplicaPids]);
             {error, Reason} ->
-                error_logger:info_msg("osiris:start_replicas failed to start replica on ~w, reason: ~w",
+                error_logger:info_msg("osiris:start_replicas failed to start replica "
+                                      "on ~w, reason: ~w",
                                       [Node, Reason]),
                 %% coordinator might try to start this replica in the future
                 start_replicas(Config, Nodes, ReplicaPids)
