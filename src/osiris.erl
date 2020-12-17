@@ -16,6 +16,7 @@
          init_reader/2,
          register_offset_listener/2,
          register_offset_listener/3,
+         update_retention/2,
          start_cluster/1,
          stop_cluster/1,
          start_writer/1,
@@ -178,6 +179,21 @@ register_offset_listener(Pid, Offset, EvtFormatter) ->
             ok
     end,
     ok.
+
+-spec update_retention(pid(), [osiris:retention_spec()]) ->
+                          ok | {error, term()}.
+update_retention(Pid, Retention)
+    when is_pid(Pid) andalso is_list(Retention) ->
+    Msg = {update_retention, Retention},
+    try
+        case gen:call(Pid, '$gen_call', Msg) of
+            {ok, ok} ->
+                ok
+        end
+    catch
+        _:Reason ->
+            {error, Reason}
+    end.
 
 start_replicas(Config) ->
     start_replicas(Config, maps:get(replica_nodes, Config), []).

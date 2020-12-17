@@ -40,6 +40,8 @@ all_tests() ->
      restart_replica,
      diverged_replica,
      retention,
+     update_retention,
+     update_retention_replica,
      tracking,
      tracking_many,
      tracking_retention,
@@ -714,6 +716,70 @@ retention(Config) ->
     write_n(Leader, Num, 0, 1000 * 8, #{}),
     timer:sleep(1000),
     %% assert on num segs
+    ok.
+
+update_retention(Config) ->
+    DataDir = ?config(data_dir, Config),
+    Num = 150000,
+    Name = ?config(cluster_name, Config),
+    SegSize = 50000 * 1000,
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          % retention => [{max_bytes, SegSize}],
+          max_segment_size => SegSize,
+          replica_nodes => []},
+    {ok, #{leader_pid := Leader, replica_pids := []}} =
+        osiris:start_cluster(Conf0),
+    timer:sleep(500),
+    write_n(Leader, Num, 0, 1000 * 8, #{}),
+    %% a retention update should trigger a retention evaluation
+    Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
+    FilesPre = filelib:wildcard(Wc),
+    ok = osiris:update_retention(Leader, [{max_bytes, SegSize}]),
+    timer:sleep(1000),
+    Files = filelib:wildcard(Wc),
+    ?assert(length(Files) < length(FilesPre)),
+    %% assert on num segs
+    ok.
+
+update_retention_replica(Config) ->
+    DataDir = ?config(data_dir, Config),
+    Num = 150000,
+    SegSize = 50000 * 1000,
+    Name = ?config(cluster_name, Config),
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, DataDir) || N <- [s1, s2, s3]],
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          max_segment_size => SegSize,
+          leader_node => LeaderNode,
+          replica_nodes => Replicas},
+    {ok, #{leader_pid := Leader, replica_pids := [R1, R2]}} =
+        osiris:start_cluster(Conf0),
+    Retention = [{max_bytes, SegSize}],
+    timer:sleep(500),
+    write_n(Leader, Num, 0, 1000 * 8, #{}),
+
+    %% update retention for all members
+    ok = osiris:update_retention(Leader, Retention),
+    ok = osiris:update_retention(R1, Retention),
+    ok = osiris:update_retention(R2, Retention),
+    timer:sleep(1000),
+    %% validate
+    Fun = fun(Pid) ->
+             Node = hd(string:split(atom_to_list(node(Pid)), "@")),
+             Wc = filename:join([DataDir, Node, ?FUNCTION_NAME, "*.segment"]),
+             Files = filelib:wildcard(Wc),
+             length(Files)
+          end,
+    ?assertEqual(1, rpc:call(node(R1), erlang, apply, [Fun, [R1]])),
+    ?assertEqual(1, rpc:call(node(R2), erlang, apply, [Fun, [R2]])),
+    ?assertEqual(1,
+                 rpc:call(node(Leader), erlang, apply, [Fun, [Leader]])),
+    [slave:stop(N) || N <- Nodes],
     ok.
 
 tracking(Config) ->
