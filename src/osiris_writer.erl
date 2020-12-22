@@ -405,6 +405,17 @@ handle_command({call, From, {query_writers, QueryFun}},
         end,
     Replies = [{reply, From, Result} | Replies0],
     {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
+handle_command({call, From, {update_retention, Retention}},
+               {#?MODULE{log = Log0} = State,
+                Records,
+                Replies0,
+                Corrs,
+                Trk,
+                Wrt,
+                Dupes}) ->
+    Log = osiris_log:update_retention(Retention, Log0),
+    Replies = [{reply, From, ok} | Replies0],
+    {State#?MODULE{log = Log}, Records, Replies, Corrs, Trk, Wrt, Dupes};
 handle_command(osiris_stop, _Acc) ->
     throw({stop, normal});
 handle_command(_Unk, Acc) ->

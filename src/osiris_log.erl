@@ -36,6 +36,7 @@
          writers/1,
          close/1,
          overview/1,
+         update_retention/2,
          evaluate_retention/2,
          directory/1,
          delete_directory/1]).
@@ -1201,6 +1202,16 @@ overview(Dir) ->
             {Range, OffsEpochs}
     end.
 
+-spec update_retention([retention_spec()], state()) -> state().
+update_retention(Retention,
+                 #?MODULE{cfg = #cfg{retention = Retention0} = Cfg} = State0)
+    when is_list(Retention) ->
+    ?INFO("osiris_log: update_retention from: ~w to ~w",
+          [Retention0, Retention]),
+    State = State0#?MODULE{cfg = Cfg#cfg{retention = Retention}},
+    ok = trigger_retention_eval(State),
+    State.
+
 -spec evaluate_retention(file:filename(), [retention_spec()]) ->
                             range().
 evaluate_retention(Dir, Specs) ->
@@ -1486,7 +1497,6 @@ make_file_name(N, Suff) ->
 open_new_segment(#?MODULE{cfg =
                               #cfg{directory = Dir,
                                    counter = Cnt,
-                                   retention = RetentionSpec,
                                    max_writers = MaxWriters},
                           fd = undefined,
                           index_fd = undefined,
@@ -1534,15 +1544,7 @@ open_new_segment(#?MODULE{cfg =
         end,
 
     %% ask to evaluate retention
-    ok =
-        osiris_retention:eval(Dir, RetentionSpec,
-                              %% updates the first offset after retention has
-                              %% been evaluated
-                              fun ({Fst, _}) when is_integer(Fst) ->
-                                      counters:put(Cnt, ?C_FIRST_OFFSET, Fst);
-                                  (_) ->
-                                      ok
-                              end),
+    ok = trigger_retention_eval(State),
     State.
 
 open_index_read(File) ->
@@ -1798,6 +1800,21 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir},
         false ->
             {end_of_stream, State}
     end.
+
+trigger_retention_eval(#?MODULE{cfg =
+                                    #cfg{directory = Dir,
+                                         retention = RetentionSpec,
+                                         counter = Cnt}}) ->
+    ok =
+        osiris_retention:eval(Dir, RetentionSpec,
+                              %% updates the first offset after retention has
+                              %% been evaluated
+                              fun ({Fst, _}) when is_integer(Fst) ->
+                                      counters:put(Cnt, ?C_FIRST_OFFSET, Fst);
+                                  (_) ->
+                                      ok
+                              end),
+    ok.
 
 -ifdef(TEST).
 

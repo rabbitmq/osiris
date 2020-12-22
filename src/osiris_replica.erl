@@ -273,7 +273,11 @@ handle_call(get_reader_context, _From,
           name => Name,
           committed_offset => COffs,
           offset_ref => ORef},
-    {reply, Reply, State}.
+    {reply, Reply, State};
+handle_call({update_retention, Retention}, _From,
+            #?MODULE{log = Log0} = State) ->
+    Log = osiris_log:update_retention(Retention, Log0),
+    {reply, ok, State#?MODULE{log = Log}}.
 
 %%--------------------------------------------------------------------
 %% @private
