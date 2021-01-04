@@ -1035,7 +1035,6 @@ scan_index({ok,
     {_ChType, O, E, Num, _, _} = header_info(Fd, Pos),
     case Offset >= O andalso Offset < O + Num of
         true ->
-            ?DEBUG("scan index found ~w ~b", [O, Pos]),
             {O, Pos};
         false ->
             {O + Num, eof}
@@ -1055,10 +1054,8 @@ scan_index({ok,
     case Offset >= O andalso Offset < ONext of
         true ->
             ok = file:close(IdxFd),
-            ?DEBUG("scan index2 found ~w ~b", [O, Pos]),
             {O, Pos};
         false ->
-            ?DEBUG("scan index ~w ~b", [O, Pos]),
             {ok, _} = file:position(IdxFd, {cur, -?INDEX_RECORD_SIZE_B}),
             scan_index(file:read(IdxFd, ?INDEX_RECORD_SIZE_B * 2),
                        IdxFd,
