@@ -27,9 +27,9 @@ init([]) ->
           type => worker,
           start => {osiris_retention, start_link, []}},
     ServerSup =
-        #{id => osiris_server_sup,
+        #{id => osiris_server_sup_sup,
           type => supervisor,
-          start => {osiris_server_sup, start_link, []}},
+          start => {osiris_server_sup_sup, start_link, []}},
     ReplicaReader =
         #{id => osiris_replica_reader_sup,
           type => supervisor,

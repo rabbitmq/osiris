@@ -62,33 +62,24 @@
 
 -export_type([state/0]).
 
-start(Config = #{name := Name, leader_node := Leader}) ->
-    supervisor:start_child({?SUP, Leader},
-                           #{id => child_name(Name),
-                             start => {?MODULE, start_link, [Config]},
-                             restart => temporary,
-                             shutdown => 5000,
-                             type => worker}).
-
-stop(#{name := Name, leader_node := Leader}) ->
-    CName = child_name(Name),
-    try
-        _ = supervisor:terminate_child({?SUP, Leader}, CName),
-        _ = supervisor:delete_child({?SUP, Leader}, CName),
-        ok
-    catch
-        _:{noproc, _} ->
-            %% Whole supervisor or app is already down - i.e. stop_app
-            ok
+start(Config) ->
+    case ?SUP:start(Config) of
+        {ok, Pid} ->
+            ?SUP:get_writer(Pid, Config);
+        Err ->
+            Err
     end.
 
-delete(#{leader_node := Leader, name := Name} = Config) ->
+stop(Config) ->
+    ?SUP:stop(Config).
+
+delete(#{leader_node := Leader} = Config) ->
     try
-        case supervisor:get_childspec({?SUP, Leader}, child_name(Name)) of
-            {ok, _} ->
+        case ?SUP:is_children(Config) of
+            true ->
                 stop(Config),
                 rpc:call(Leader, osiris_log, delete_directory, [Config]);
-            {error, not_found} ->
+            false ->
                 ok
         end
     catch
@@ -494,10 +485,6 @@ agreed_commit(Indexes) ->
     SortedIdxs = lists:sort(fun erlang:'>'/2, Indexes),
     Nth = length(SortedIdxs) div 2 + 1,
     lists:nth(Nth, SortedIdxs).
-
-child_name(Name) ->
-    lists:flatten(
-        io_lib:format("~s_writer", [Name])).
 
 is_duplicate(undefined, _, _, _) ->
     {false, 0};

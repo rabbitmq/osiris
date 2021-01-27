@@ -49,7 +49,10 @@ all_tests() ->
      single_node_deduplication_2,
      cluster_minority_deduplication,
      cluster_deduplication,
-     writers_retention].
+     writers_retention,
+     osiris_crc,
+     osiris_crc_monitor
+    ].
 
 -define(BIN_SIZE, 800).
 
@@ -999,6 +1002,76 @@ writers_retention(Config) ->
     %% validate there are only a single entry
     ok.
 
+osiris_crc(Config) ->
+    Name = ?config(cluster_name, Config),
+    Num = 150000,
+    SegSize = 1000 * 10000,
+    Conf0 = #{name => Name,
+              epoch => 1,
+              leader_node => node(),
+              replica_nodes => [],
+              dir => ?config(priv_dir, Config),
+              max_segment_size => SegSize},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    write_n(Leader, Num, 0, 8 * 1000, #{}),
+
+    {ok, CRC} = osiris_server_sup:get_crc(Name),
+    gen_server:call(CRC, {register, self(), <<"tag1">>, 2, fun(V) -> V end}),
+
+    receive
+        {osiris_chunk, _, <<"tag1">>, [Ck1, _]} ->
+            gen_server:cast(CRC, {ack, {self(), <<"tag1">>}, Ck1}),
+            receive
+                {osiris_chunk, _, <<"tag1">>, [_]} ->
+                    ok
+            after 10000 ->
+                    flush(),
+                    exit(osiris_second_batch_timeout)
+            end
+    after 10000 ->
+            flush(),
+            exit(osiris_chunk_timeout)
+    end,
+    ok.
+
+osiris_crc_monitor(Config) ->
+    Name = ?config(cluster_name, Config),
+    Conf0 = #{name => Name,
+              epoch => 1,
+              leader_node => node(),
+              replica_nodes => [],
+              dir => ?config(priv_dir, Config)},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    Wid = <<"wid1">>,
+    ?assertEqual(undefined, osiris:fetch_writer_seq(Leader, Wid)),
+    ok = osiris:write(Leader, Wid, 42, <<"mah-data">>),
+    receive_written([42]),
+
+    {ok, CRC} = osiris_server_sup:get_crc(Name),
+    Pid = self(),
+    spawn(fun() ->
+                  gen_server:call(CRC, {register, self(), <<"tag1">>, 2, fun(V) -> V end}),
+                  receive
+                      {osiris_chunk, _, <<"tag1">>, ChunkIds} ->
+                          Pid ! {chunk_received, ChunkIds}
+                  end
+          end),
+    %% Reader has died without ack, in flight chunks should be sent to the next reader
+    receive
+        {chunk_received, ChunkIds} ->
+            gen_server:call(CRC, {register, self(), <<"tag2">>, 2, fun(V) -> V end}),
+            receive
+                {osiris_chunk, _, <<"tag2">>, _} ->
+                    ok
+            after 10000 ->
+                    flush(),
+                    exit(osiris_chunk_timeout)
+            end,
+            ok
+    after 5000 ->
+            exit(missing_chunk_on_spawned_reader)
+    end.
+
 %% Utility
 
 write_n(Pid, N, Written) ->
@@ -1126,7 +1199,14 @@ validate_log(Log0, Expected) ->
 
 print_counters() ->
     [begin
-         ct:pal("~w counters ~p",
-                [N, rpc:call(N, osiris_counters, overview, [])])
-     end
-     || N <- nodes()].
+         ct:pal("~w counters ~p", [N, rpc:call(N, osiris_counters, overview, [])])
+     end || N <- nodes()].
+
+receive_written(Ids) ->
+    receive
+        {osiris_written, _Name, _WriterId, Ids} ->
+            ok
+    after 2000 ->
+              flush(),
+              exit(osiris_written_timeout)
+    end.
