@@ -37,7 +37,6 @@
          leader_pid :: pid(),
          directory :: file:filename(),
          port :: non_neg_integer(),
-         listening_socket :: gen_tcp:socket(),
          socket :: undefined | gen_tcp:socket(),
          gc_interval :: non_neg_integer(),
          external_ref :: term(),
@@ -206,7 +205,6 @@ init(#{name := Name,
                        leader_pid = LeaderPid,
                        directory = Dir,
                        port = Port,
-                       listening_socket = LSock,
                        gc_interval = Interval,
                        external_ref = ExtRef,
                        offset_ref = ORef,
@@ -242,7 +240,8 @@ accept(LSock, Process) ->
            [?MODULE, inet:getopts(Sock, [buffer, recbuf])]),
     Process ! {socket, Sock},
     gen_tcp:controlling_process(Sock, Process),
-    accept(LSock, Process).
+    _ = gen_tcp:close(LSock),
+    ok.
 
 %%--------------------------------------------------------------------
 %% @private

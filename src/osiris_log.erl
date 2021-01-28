@@ -827,6 +827,7 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
     %% reads the next chunk of entries, parsed
     %% NB: this may return records before the requested index,
     %% that is fine - the reading process can do the appropriate filtering
+    %% TODO: skip non user chunks for offset readers
     case read_header0(State0) of
         {ok,
          #{num_records := NumRecords,
