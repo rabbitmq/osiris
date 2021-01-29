@@ -821,29 +821,36 @@ writers(#?MODULE{mode = #write{writers = Writers}}) ->
     Writers.
 
 -spec read_header(state()) ->
-    {ok, header_map(), state()} |
-    {end_of_stream, state()} |
-    {error, {invalid_chunk_header, term()}}.
+                     {ok, header_map(), state()} | {end_of_stream, state()} |
+                     {error, {invalid_chunk_header, term()}}.
 read_header(#?MODULE{mode = #read{type = RType}} = State0) ->
     %% reads the next chunk of entries, parsed
     %% NB: this may return records before the requested index,
     %% that is fine - the reading process can do the appropriate filtering
     case read_header0(State0) of
-        {ok, #{type := Type,
-               num_records := NumRecords,
-               data_size := DataSize,
-               trailer_size := TrailerSize}, #?MODULE{cfg = #cfg{},
-                                                      mode = #read{} = Read,
-                                                      fd = Fd} = State}
-          when RType == offset, Type =/= ?CHNK_USER ->
+        {ok,
+         #{type := Type,
+           num_records := NumRecords,
+           data_size := DataSize,
+           trailer_size := TrailerSize},
+         #?MODULE{cfg = #cfg{},
+                  mode = #read{} = Read,
+                  fd = Fd} =
+             State}
+            when RType == offset, Type =/= ?CHNK_USER ->
             %% skip data portion
             {ok, _} = file:position(Fd, {cur, DataSize + TrailerSize}),
-            read_header(State#?MODULE{mode = incr_next_offset(NumRecords, Read)});
-         {ok, #{num_records := NumRecords,
-               data_size := DataSize,
-               trailer_size := TrailerSize} = Header, #?MODULE{cfg = #cfg{},
-                                                               mode = #read{} = Read,
-                                                               fd = Fd} = State} ->
+            read_header(State#?MODULE{mode =
+                                          incr_next_offset(NumRecords, Read)});
+        {ok,
+         #{num_records := NumRecords,
+           data_size := DataSize,
+           trailer_size := TrailerSize} =
+             Header,
+         #?MODULE{cfg = #cfg{},
+                  mode = #read{} = Read,
+                  fd = Fd} =
+             State} ->
             %% skip data portion
             {ok, _} = file:position(Fd, {cur, DataSize + TrailerSize}),
             {ok, Header,
@@ -870,17 +877,19 @@ read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
     %% NB: this may return records before the requested index,
     %% that is fine - the reading process can do the appropriate filtering
     case read_header0(State0) of
-        {ok, #{type := ChType,
-               chunk_id := ChId,
-               epoch := Epoch,
-               crc := Crc,
-               num_records := NumRecords,
-               header_data := HeaderData,
-               data_size := DataSize,
-               trailer_size := TrailerSize}, #?MODULE{cfg = #cfg{},
-                                                      mode = #read{last_offset = _Last,
-                                                                   next_offset = Offs} = Read,
-                                                      fd = Fd} = State} ->
+        {ok,
+         #{type := ChType,
+           chunk_id := ChId,
+           epoch := Epoch,
+           crc := Crc,
+           num_records := NumRecords,
+           header_data := HeaderData,
+           data_size := DataSize,
+           trailer_size := TrailerSize},
+         #?MODULE{cfg = #cfg{},
+                  mode = #read{last_offset = _Last, next_offset = Offs} = Read,
+                  fd = Fd} =
+             State} ->
             {ok, BlobData} = file:read(Fd, DataSize),
             %% position after trailer
             {ok, TrailerData} = file:read(Fd, TrailerSize),
