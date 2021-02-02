@@ -21,7 +21,8 @@
                                                                     ?FUNCTION_NAME,
                                                                     ?FUNCTION_ARITY},
                                                             file => ?FILE,
-                                                            line => ?LINE}),
+                                                            line => ?LINE,
+                                                            domain => [osiris]}),
        ok).
 
 -define(C_NUM_LOG_FIELDS, 3).
