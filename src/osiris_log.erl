@@ -887,7 +887,7 @@ read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
            data_size := DataSize,
            trailer_size := TrailerSize},
          #?MODULE{cfg = #cfg{},
-                  mode = #read{last_offset = _Last, next_offset = Offs} = Read,
+                  mode = Read,
                   fd = Fd} =
              State} ->
             {ok, BlobData} = file:read(Fd, DataSize),

@@ -25,26 +25,30 @@
 %% be more efficient to deliver several chunks together.
 -define(DEFAULT_BATCH_SIZE, 3).
 
+-type reader_group() ::
+        #{monitor_ref => reference(),
+          tags => [binary()]}.
+
+-record(reader_state,
+        {formatter :: function(),
+          credit :: integer(),
+          in_flight :: sets:new()}).
+
 -record(state,
-        {log,
-         config,
-         sup,
-         readers,
-         service_queue,
-         reader_groups,
-         pending,
-         batch_size}).
+        {log :: 'undefined' | osiris_log:state(),
+         config :: osiris:config(),
+         sup :: pid(),
+         readers :: #{{pid(), Tag :: binary()} => #reader_state{}},
+         service_queue :: queue:queue(),
+         reader_groups :: #{pid() => reader_group()},
+         pending :: [ChunkId :: integer()],
+         batch_size :: integer()}).
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-%%--------------------------------------------------------------------
-%% @doc
-%% Starts the server
-%% @end
-%%--------------------------------------------------------------------
--spec start_link(term(), pid()) ->
+-spec start_link(osiris:config(), pid()) ->
                     {ok, Pid :: pid()} |
                     {error, Error :: {already_started, pid()}} |
                     {error, Error :: term()} |
@@ -56,18 +60,6 @@ start_link(Config, SupPid) ->
 %%% gen_server callbacks
 %%%===================================================================
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Initializes the server
-%% @end
-%%--------------------------------------------------------------------
--spec init(Args :: term()) ->
-              {ok, State :: term()} |
-              {ok, State :: term(), Timeout :: timeout()} |
-              {ok, State :: term(), hibernate} |
-              {stop, Reason :: term()} |
-              ignore.
 init([Config, SupPid]) ->
     process_flag(trap_exit, true),
     gen_server:cast(self(), init),
@@ -82,29 +74,7 @@ init([Config, SupPid]) ->
                 application:get_env(osiris, crc_batch_size,
                                     ?DEFAULT_BATCH_SIZE)}}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling call messages
-%% @end
-%%--------------------------------------------------------------------
--spec handle_call(Request :: term(), From :: {pid(), term()},
-                  State :: term()) ->
-                     {reply, Reply :: term(), NewState :: term()} |
-                     {reply,
-                      Reply :: term(),
-                      NewState :: term(),
-                      Timeout :: timeout()} |
-                     {reply, Reply :: term(), NewState :: term(), hibernate} |
-                     {noreply, NewState :: term()} |
-                     {noreply, NewState :: term(), Timeout :: timeout()} |
-                     {noreply, NewState :: term(), hibernate} |
-                     {stop,
-                      Reason :: term(),
-                      Reply :: term(),
-                      NewState :: term()} |
-                     {stop, Reason :: term(), NewState :: term()}.
-handle_call({register, Pid, Tag, Prefetch, Fmt}, _From,
+handle_call({register, Pid, Tag, Credit, Fmt}, _From,
             #state{readers = Readers,
                    reader_groups = Groups0,
                    service_queue = SQ} =
@@ -113,10 +83,9 @@ handle_call({register, Pid, Tag, Prefetch, Fmt}, _From,
     case maps:get(Reader, Readers, undefined) of
         undefined ->
             ReaderState =
-                #{prefetch => Prefetch,
-                  formatter => Fmt,
-                  credit => Prefetch,
-                  in_flight => gb_sets:new()},
+                #reader_state{formatter = Fmt,
+                              credit = Credit,
+                              in_flight = sets:new()},
             Groups =
                 case maps:get(Pid, Groups0, undefined) of
                     undefined ->
@@ -136,17 +105,6 @@ handle_call({register, Pid, Tag, Prefetch, Fmt}, _From,
             {reply, ok, State}
     end.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling cast messages
-%% @end
-%%--------------------------------------------------------------------
--spec handle_cast(Request :: term(), State :: term()) ->
-                     {noreply, NewState :: term()} |
-                     {noreply, NewState :: term(), Timeout :: timeout()} |
-                     {noreply, NewState :: term(), hibernate} |
-                     {stop, Reason :: term(), NewState :: term()}.
 handle_cast(init, #state{config = Config, sup = SupPid} = State) ->
     {ok, Writer} = osiris_server_sup:get_writer(SupPid, Config),
     {ok, Ctx} = gen:call(Writer, '$gen_call', get_reader_context),
@@ -160,9 +118,9 @@ handle_cast({ack, Reader, ChunkId},
             %% chunks might now be pending or processed by another reader.
             %% TODO: Not sure we should act on this?
             {noreply, State};
-        #{credit := C0, in_flight := InFlight0} = Cfg0 ->
-            Cfg = Cfg0#{in_flight => gb_sets:del_element(ChunkId, InFlight0),
-                        credit => C0 + 1},
+        #reader_state{credit = C0, in_flight = InFlight0} = Cfg0 ->
+            Cfg = Cfg0#reader_state{in_flight = sets:del_element(ChunkId, InFlight0),
+                                    credit = C0 + 1},
             Readers = Readers0#{Reader => Cfg},
             case C0 of
                 0 ->
@@ -175,17 +133,6 @@ handle_cast({ack, Reader, ChunkId},
             end
     end.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handling all non call/cast messages
-%% @end
-%%--------------------------------------------------------------------
--spec handle_info(Info :: timeout() | term(), State :: term()) ->
-                     {noreply, NewState :: term()} |
-                     {noreply, NewState :: term(), Timeout :: timeout()} |
-                     {noreply, NewState :: term(), hibernate} |
-                     {stop, Reason :: normal | term(), NewState :: term()}.
 handle_info({'DOWN', _, _, Pid, _},
             #state{readers = Readers0,
                    service_queue = SQ0,
@@ -195,8 +142,8 @@ handle_info({'DOWN', _, _, Pid, _},
     {#{tags := Tags}, Groups} = maps:take(Pid, Groups0),
     {InFlight, Readers} =
         lists:foldl(fun(Tag, {InF, Rs}) ->
-                       {#{in_flight := InF0}, Rs0} = maps:take({Pid, Tag}, Rs),
-                       {gb_sets:to_list(InF0) ++ InF, Rs0}
+                            {#reader_state{in_flight = InF0}, Rs0} = maps:take({Pid, Tag}, Rs),
+                            {sets:to_list(InF0) ++ InF, Rs0}
                     end,
                     {[], Readers0}, Tags),
     Pending = Pending0 ++ lists:sort(InFlight),
@@ -212,44 +159,12 @@ handle_info({'DOWN', _, _, Pid, _},
 handle_info(_Info, State) ->
     {noreply, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% This function is called by a gen_server when it is about to
-%% terminate. It should be the opposite of Module:init/1 and do any
-%% necessary cleaning up. When it returns, the gen_server terminates
-%% with Reason. The return value is ignored.
-%% @end
-%%--------------------------------------------------------------------
--spec terminate(Reason ::
-                    normal | shutdown | {shutdown, term()} | term(),
-                State :: term()) ->
-                   any().
 terminate(_Reason, _State) ->
     ok.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Convert process state when code is changed
-%% @end
-%%--------------------------------------------------------------------
--spec code_change(OldVsn :: term() | {down, term()}, State :: term(),
-                  Extra :: term()) ->
-                     {ok, NewState :: term()} | {error, Reason :: term()}.
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% This function is called for changing the form and appearance
-%% of gen_server status when it is returned from sys:get_status/1,2
-%% or when it appears in termination error logs.
-%% @end
-%%--------------------------------------------------------------------
--spec format_status(Opt :: normal | terminate, Status :: list()) ->
-                       Status :: term().
 format_status(_Opt, Status) ->
     Status.
 
@@ -264,7 +179,7 @@ notify_readers(#state{log = Seg0,
                    State) ->
     case queue:peek(SQ0) of
         {value, Reader} ->
-            #{credit := Credit} = maps:get(Reader, Readers0),
+            #reader_state{credit = Credit} = maps:get(Reader, Readers0),
             case Pending of
                 [] ->
                     case read_chunks_from_segment(min(BatchSize, Credit), Seg0)
@@ -307,21 +222,21 @@ wrap_event(Fmt, Evt) ->
 
 deliver_chunks({Pid, Tag} = Reader, ChunkIds,
                #state{readers = Readers0, service_queue = SQ0} = State) ->
-    #{formatter := Fmt,
-      credit := C0,
-      in_flight := InFlight0} =
+    #reader_state{formatter = Fmt,
+                  credit = C0,
+                  in_flight = InFlight0} =
         Cfg0 = maps:get(Reader, Readers0),
     Pid ! wrap_event(Fmt, {osiris_chunk, self(), Tag, ChunkIds}),
     C = C0 - length(ChunkIds),
-    Cfg = Cfg0#{in_flight => add_in_flight_chunks(ChunkIds, InFlight0),
-                credit => C},
+    Cfg = Cfg0#reader_state{in_flight = add_in_flight_chunks(ChunkIds, InFlight0),
+                            credit = C},
     Readers = Readers0#{Reader => Cfg},
     case C of
-        0 ->
+        _ when C =< 0 ->
             notify_readers(State#state{readers = Readers,
                                        service_queue = queue:drop(SQ0)});
         _ ->
-            %% Reader has a higher prefetch but we deliver a limited number
+            %% Reader has a higher credit but we deliver a limited number
             %% of chunks every time. It has to move to the tail of the queue
             notify_readers(State#state{readers = Readers,
                                        service_queue =
@@ -329,6 +244,6 @@ deliver_chunks({Pid, Tag} = Reader, ChunkIds,
     end.
 
 add_in_flight_chunks(ChunkIds, InFlight) ->
-    lists:foldl(fun(ChunkId, Acc) -> gb_sets:add_element(ChunkId, Acc)
+    lists:foldl(fun(ChunkId, Acc) -> sets:add_element(ChunkId, Acc)
                 end,
                 InFlight, ChunkIds).
