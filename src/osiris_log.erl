@@ -1761,11 +1761,12 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir},
                        header_data => HeaderData,
                        position => Pos},
                      State};
-                {ok, Bin} when byte_size(Bin) == ?HEADER_SIZE_B ->
-                    %% set the position back for the next read
-                    %% TODO: should it be an exception if the next chunk is not
-                    %% the expected next chunk id??
-                    {ok, _} = file:position(Fd, {cur, -?HEADER_SIZE_B}),
+                {ok, Bin} when byte_size(Bin) < ?HEADER_SIZE_B ->
+                    %% partial header read
+                    %% this can happen when a replica reader reads ahead
+                    %% optimistically
+                    %% set the position back and and return end of stream
+                    {ok, Pos} = file:position(Fd, Pos),
                     {end_of_stream, State};
                 eof ->
                     %% open next segment file and start there if it exists
