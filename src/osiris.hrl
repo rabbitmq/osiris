@@ -40,3 +40,4 @@
 -define(CHNK_TRK_SNAPSHOT, 2).
 -define(CHNK_WRT_SNAPSHOT, 3).
 
+-define(SUP, osiris_server_sup).

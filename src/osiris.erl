@@ -70,8 +70,8 @@
                        {error, term(), config()}.
 start_cluster(Config00 = #{name := Name}) ->
     true = osiris_util:validate_base64uri(Name),
-    Config0 =
-        Config00#{external_ref => maps:get(reference, Config00, Name)},
+    %% ensure reference is set
+    Config0 = maps:merge(#{reference => Name}, Config00),
     case osiris_writer:start(Config0) of
         {ok, Pid} ->
             Config = Config0#{leader_pid => Pid},

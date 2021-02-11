@@ -11,8 +11,6 @@
 
 -include("osiris.hrl").
 
--define(SUP, osiris_server_sup).
-
 %% osiris replica, spaws remote reader, TCP listener
 %% replicates and confirms latest offset back to primary
 
@@ -77,7 +75,7 @@
 
 start(Node, Config = #{name := Name}) when is_list(Name) ->
     supervisor:start_child({?SUP, Node},
-                           #{id => child_name(Name),
+                           #{id => Name,
                              start => {?MODULE, start_link, [Config]},
                              restart => temporary,
                              shutdown => 5000,
@@ -85,31 +83,10 @@ start(Node, Config = #{name := Name}) when is_list(Name) ->
                              modules => [?MODULE]}).
 
 stop(Node, #{name := Name}) ->
-    CName = child_name(Name),
-    try
-        _ = supervisor:terminate_child({?SUP, Node}, CName),
-        _ = supervisor:delete_child({?SUP, Node}, CName),
-        ok
-    catch
-        _:{noproc, _} ->
-            %% Whole supervisor or app is already down - i.e. stop_app
-            ok
-    end.
+    ?SUP:stop_child(Node, Name).
 
-delete(Node, Config = #{name := Name}) ->
-    try
-        case supervisor:get_childspec({?SUP, Node}, child_name(Name)) of
-            {ok, _} ->
-                stop(Node, Config),
-                rpc:call(Node, osiris_log, delete_directory, [Config]);
-            {error, not_found} ->
-                ok
-        end
-    catch
-        _:{noproc, _} ->
-            %% Whole supervisor or app is already down - i.e. stop_app
-            ok
-    end.
+delete(Node, Config = #{}) ->
+    ?SUP:delete_child(Node, Config).
 
 %%--------------------------------------------------------------------
 %% @doc
@@ -141,7 +118,7 @@ get_port(Server) ->
 %%--------------------------------------------------------------------
 init(#{name := Name,
        leader_pid := LeaderPid,
-       external_ref := ExtRef} =
+       reference := ExtRef} =
          Config) ->
     {ok, {Min, Max}} = application:get_env(port_range),
     {Port, LSock} = open_tcp_port(Min, Max),
@@ -534,9 +511,6 @@ notify_offset_listeners(#?MODULE{cfg =
     State#?MODULE{offset_listeners = L}.
 
 %% INTERNAL
-child_name(Name) ->
-    lists:flatten(
-        io_lib:format("~s_replica", [Name])).
 
 wrap_osiris_event(undefined, Evt) ->
     Evt;

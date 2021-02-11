@@ -312,7 +312,7 @@
     #{dir := file:filename(),
       epoch => non_neg_integer(),
       max_segment_size => non_neg_integer(),
-      counter_spec => {Tag :: atom(), Fields :: [atom()]}}.
+      counter_spec => {Tag :: term(), Fields :: [atom()]}}.
 -type record() :: {offset(), iodata()}.
 -type offset_spec() :: osiris:offset_spec().
 -type retention_spec() :: osiris:retention_spec().
@@ -381,15 +381,14 @@
 
               % record/0,
 
--spec directory(osiris:config()) -> file:filename().
-directory(#{name := Name} = Config) ->
-    Dir = case Config of
-              #{dir := D} ->
-                  D;
-              _ ->
-                  {ok, D} = application:get_env(osiris, data_dir),
-                  D
-          end,
+-spec directory(osiris:config() | list()) -> file:filename().
+directory(#{name := Name, dir := Dir}) ->
+    filename:join(Dir, Name);
+directory(#{name := Name}) ->
+    {ok, Dir} = application:get_env(osiris, data_dir),
+    filename:join(Dir, Name);
+directory(Name) when is_list(Name) ->
+    {ok, Dir} = application:get_env(osiris, data_dir),
     filename:join(Dir, Name).
 
 -spec init(config()) -> state().
@@ -1175,8 +1174,10 @@ close(#?MODULE{cfg = #cfg{counter_id = CntId}, fd = Fd}) ->
             osiris_counters:delete(CntId)
     end.
 
-delete_directory(Config) ->
-    Dir = directory(Config),
+delete_directory(#{name := Name} = Config) when is_map(Config) ->
+    delete_directory(Name);
+delete_directory(Name) when is_list(Name) ->
+    Dir = directory(Name),
     case file:list_dir(Dir) of
         {ok, Files} ->
             [ok =
