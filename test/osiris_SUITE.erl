@@ -1043,7 +1043,7 @@ validate_read(Max, Next, Log0) ->
     {[{Offs, _} | _] = Recs, Log} = osiris_log:read_chunk_parsed(Log0),
     case Offs == Next of
         false ->
-            ct:fail("validate_read failed Offs ~b not eqial to ~b",
+            ct:fail("validate_read failed Offs ~b not equal to ~b",
                     [Offs, Next]);
         true ->
             validate_read(Max, Next + length(Recs), Log)
@@ -1061,6 +1061,8 @@ start_child_node(N, PrivDir) ->
     ct:pal("started child node ~w ~w~n", [S, Host]),
     Res = rpc:call(S, application, ensure_all_started, [osiris]),
     ok = rpc:call(S, logger, set_primary_config, [level, all]),
+    ok = rpc:call(S, osiris, configure_logger, [logger]),
+
     ct:pal("application start result ~p", [Res]),
     S.
 

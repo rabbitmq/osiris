@@ -146,6 +146,7 @@ init(#{name := Name,
 
     {ok, {_, LeaderEpochOffs}} =
         rpc:call(Node, osiris_writer, overview, [LeaderPid]),
+    ?DEBUG("~s: writer epoch offset ~w", [?MODULE, LeaderEpochOffs]),
 
     Dir = osiris_log:directory(Config),
     Log = osiris_log:init_acceptor(LeaderEpochOffs,
@@ -154,6 +155,8 @@ init(#{name := Name,
                                                {CntName, ?ADD_COUNTER_FIELDS}}),
     CntRef = osiris_log:counters_ref(Log),
     {NextOffset, LastChunk} = TailInfo = osiris_log:tail_info(Log),
+
+    ?DEBUG("~s: tail info: ~w", [TailInfo]),
     case LastChunk of
         empty ->
             ok;
@@ -162,6 +165,8 @@ init(#{name := Name,
             %% re-discover the committed offset
             osiris_writer:ack(LeaderPid, LastChId)
     end,
+    ?INFO("osiris_replica:init/1: next offset ~b",
+          [NextOffset]),
     %% spawn reader process on leader node
     {ok, HostName} = inet:gethostname(),
     {ok, Ip} = inet:getaddr(HostName, inet),
@@ -198,7 +203,6 @@ init(#{name := Name,
     ORef = atomics:new(1, [{signed, true}]),
     atomics:put(ORef, 1, -1),
     EvtFmt = maps:get(event_formatter, Config, undefined),
-    ?INFO("osiris_replica:init/1: next offset ~b", [NextOffset]),
     {ok,
      #?MODULE{cfg =
                   #cfg{name = Name,

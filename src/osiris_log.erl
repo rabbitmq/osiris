@@ -466,6 +466,8 @@ init_acceptor(EpochOffsets0, #{name := Name, dir := Dir} = Conf) ->
 
     %% then truncate to
     SegInfos = build_log_overview(Dir),
+    ?DEBUG("~s: ~s from epoch offsets: ~w",
+           [?MODULE, ?FUNCTION_NAME, EpochOffsets]),
     ok = truncate_to(Name, EpochOffsets, SegInfos),
     %% after truncation we can do normal init
     init(Conf, acceptor).
@@ -505,7 +507,18 @@ truncate_to(_Name, [], SegInfos) ->
 truncate_to(Name, [{E, ChId} | NextEOs], SegInfos) ->
     case find_segment_for_offset(ChId, SegInfos) of
         not_found ->
-            truncate_to(Name, NextEOs, SegInfos);
+            case lists:last(SegInfos) of
+                #seg_info{last = #chunk_info{epoch = E,
+                                             id = LastChId,
+                                             num = Num}}
+                when ChId > LastChId + Num ->
+                    %% the last available chunk id is smaller than the
+                    %% source but is in the same epoch
+                    %% this is fine no truncation needed
+                    ok;
+                _ ->
+                    truncate_to(Name, NextEOs, SegInfos)
+            end;
         {end_of_log, _Info} ->
             ok;
         {found, #seg_info{file = File, index = Idx}} ->

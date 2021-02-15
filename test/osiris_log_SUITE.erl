@@ -51,6 +51,8 @@ all_tests() ->
      % truncate_multi_segment,
      accept_chunk,
      accept_chunk_truncates_tail,
+     accept_chunk_does_not_truncate_tail_in_same_epoch,
+     accept_chunk_in_other_epoch,
      overview,
      evaluate_retention_max_bytes,
      evaluate_retention_max_age,
@@ -75,6 +77,7 @@ end_per_group(_Group, _Config) ->
     ok.
 
 init_per_testcase(TestCase, Config) ->
+    osiris:configure_logger(logger),
     PrivDir = ?config(priv_dir, Config),
     Dir = filename:join(PrivDir, TestCase),
     LeaderDir = filename:join(Dir, "leader"),
@@ -606,6 +609,7 @@ read_chunk(S0) ->
     {[Hd, Ch, Tr], S1}.
 
 accept_chunk_truncates_tail(Config) ->
+    ok = logger:set_primary_config(level, all),
     EpochChunks =
         [{1, [<<"one">>]}, {2, [<<"two">>]}, {3, [<<"three">>, <<"four">>]}],
     Conf = ?config(osiris_conf, Config),
@@ -634,6 +638,62 @@ accept_chunk_truncates_tail(Config) ->
     osiris_log:close(ALog),
     % validate equal
     ?assertMatch({LO, EOffs}, osiris_log:overview(FDir)),
+    ok.
+
+accept_chunk_does_not_truncate_tail_in_same_epoch(Config) ->
+    ok = logger:set_primary_config(level, all),
+    EpochChunks =
+        [{1, [<<"one">>]},
+         {1, [<<"two">>, <<"two">>]},
+         {1, [<<"three">>]},
+         {1, [<<"four">>]}],
+    Conf = ?config(osiris_conf, Config),
+    LDir = ?config(leader_dir, Config),
+    LLog = seed_log(LDir, EpochChunks, Config),
+    LTail = osiris_log:tail_info(LLog),
+    ?assertEqual({5, {1, 4}}, LTail), %% {NextOffs, {LastEpoch, LastChunkOffset}}
+    ok = osiris_log:close(LLog),
+    FollowerEpochChunks =
+        [{1, [<<"one">>]},
+         {1, [<<"two">>, <<"two">>]}],
+    FDir = ?config(follower1_dir, Config),
+    FLog0 = seed_log(FDir, FollowerEpochChunks, Config),
+    osiris_log:close(FLog0),
+
+    {_LO, EOffs} = osiris_log:overview(LDir),
+    ALog0 = osiris_log:init_acceptor(EOffs, Conf#{dir => FDir, epoch => 2}),
+    ATail = osiris_log:tail_info(ALog0),
+    osiris_log:close(ALog0),
+    %% ensure we don't truncate too much
+    ?assertEqual({3, {1, 1}}, ATail),
+    ok.
+
+accept_chunk_in_other_epoch(Config) ->
+    ok = logger:set_primary_config(level, all),
+    EpochChunks =
+        [{1, [<<"one">>]},
+         {1, [<<"two">>, <<"two">>]},
+         {1, [<<"three">>]},
+         {2, [<<"four">>]}],
+    Conf = ?config(osiris_conf, Config),
+    LDir = ?config(leader_dir, Config),
+    LLog = seed_log(LDir, EpochChunks, Config),
+    LTail = osiris_log:tail_info(LLog),
+    ?assertEqual({5, {2, 4}}, LTail), %% {NextOffs, {LastEpoch, LastChunkOffset}}
+    ok = osiris_log:close(LLog),
+    FollowerEpochChunks =
+        [{1, [<<"one">>]},
+         {1, [<<"two">>, <<"two">>]}],
+    FDir = ?config(follower1_dir, Config),
+    FLog0 = seed_log(FDir, FollowerEpochChunks, Config),
+    osiris_log:close(FLog0),
+
+    {_LO, EOffs} = osiris_log:overview(LDir),
+    ALog0 = osiris_log:init_acceptor(EOffs, Conf#{dir => FDir, epoch => 2}),
+    ATail = osiris_log:tail_info(ALog0),
+    osiris_log:close(ALog0),
+    %% ensure we don't truncate too much
+    ?assertEqual({3, {1, 1}}, ATail),
     ok.
 
 overview(Config) ->
