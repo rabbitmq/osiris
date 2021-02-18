@@ -64,6 +64,7 @@
 -define(C_COMMITTED_OFFSET, ?C_NUM_LOG_FIELDS + 1).
 -define(C_FORCED_GCS, ?C_NUM_LOG_FIELDS + 2).
 -define(C_PACKETS, ?C_NUM_LOG_FIELDS + 3).
+-define(DEFAULT_ONE_TIME_TOKEN_TIMEOUT, 30000).
 
 %%%===================================================================
 %%% API functions
@@ -340,8 +341,12 @@ handle_info(force_gc,
     {noreply, State};
 handle_info({socket, Socket}, #?MODULE{cfg = Cfg} = State) ->
     ok = inet:setopts(Socket, [{active, 5}]),
-
-    {noreply, State#?MODULE{cfg = Cfg#cfg{socket = Socket}}};
+    Timeout = application:get_env(osiris, one_time_token_timeout, ?DEFAULT_ONE_TIME_TOKEN_TIMEOUT),
+    {noreply, State#?MODULE{cfg = Cfg#cfg{socket = Socket}}, Timeout};
+handle_info(timeout, #?MODULE{parse_state = {awaiting_token, _}} = State) ->
+    {stop, missing_token, State};
+handle_info(timeout, State) ->
+    {noreply, State};
 handle_info({tcp, Socket, <<Token:256/binary, Rem/binary>>},
             #?MODULE{cfg = #cfg{socket = Socket},
                      parse_state = {awaiting_token, Token}} = State) ->
