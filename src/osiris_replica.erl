@@ -45,7 +45,7 @@
          counter :: counters:counters_ref()}).
 
 -type parse_state() ::
-    undefined | binary() |
+    undefined | {awaiting_token, binary()} | binary() |
     {non_neg_integer(), iolist(), non_neg_integer()}.
 
 -record(?MODULE,
@@ -170,6 +170,8 @@ init(#{name := Name,
     %% spawn reader process on leader node
     {ok, HostName} = inet:gethostname(),
     {ok, Ip} = inet:getaddr(HostName, inet),
+    rand:seed(exsplus),
+    Token = list_to_binary([rand:uniform(256) - 1 || _ <- lists:seq(1, 256)]),
     ReplicaReaderConf =
         #{host => Ip,
           port => Port,
@@ -177,7 +179,8 @@ init(#{name := Name,
           replica_pid => self(),
           leader_pid => LeaderPid,
           start_offset => TailInfo,
-          external_ref => ExtRef},
+          external_ref => ExtRef,
+          connection_token => Token},
     _RRPid =
         case supervisor:start_child({osiris_replica_reader_sup, Node},
                                     #{id => make_ref(),
@@ -214,7 +217,8 @@ init(#{name := Name,
                        offset_ref = ORef,
                        event_formatter = EvtFmt,
                        counter = CntRef},
-              log = Log}}.
+              log = Log,
+              parse_state = {awaiting_token, Token}}}.
 
 open_tcp_port(M, M) ->
     throw({error, all_busy});
@@ -338,6 +342,37 @@ handle_info({socket, Socket}, #?MODULE{cfg = Cfg} = State) ->
     ok = inet:setopts(Socket, [{active, 5}]),
 
     {noreply, State#?MODULE{cfg = Cfg#cfg{socket = Socket}}};
+handle_info({tcp, Socket, <<Token:256/binary, Rem/binary>>},
+            #?MODULE{cfg = #cfg{socket = Socket},
+                     parse_state = {awaiting_token, Token}} = State) ->
+    ok = inet:setopts(Socket, [{active, 1}]),
+    {noreply, State#?MODULE{parse_state = Rem}};
+handle_info({tcp, Socket, <<_Other:256/binary, _Rem/binary>>},
+            #?MODULE{cfg = #cfg{socket = Socket},
+                     parse_state = {awaiting_token, _Token}} = State) ->
+    {stop, invalid_token, State};
+handle_info({tcp, Socket, Bin},
+            #?MODULE{cfg = #cfg{socket = Socket},
+                     parse_state = {awaiting_token, Token}} = State) ->
+    ok = inet:setopts(Socket, [{active, 1}]),
+    {noreply, State#?MODULE{parse_state = {awaiting_token, Token, Bin}}};
+handle_info({tcp, Socket, Bin0},
+            #?MODULE{cfg = #cfg{socket = Socket},
+                     parse_state = {awaiting_token, Token, PartialBin}} = State) ->
+    Bin = <<PartialBin/binary, Bin0/binary>>,
+    case byte_size(Bin) of
+        S when S >= 256 ->
+            case Bin of
+                <<Token:256/binary, Rem/binary>> ->
+                    ok = inet:setopts(Socket, [{active, 1}]),
+                    {noreply, State#?MODULE{parse_state = Rem}};
+                _ ->
+                    {stop, invalid_token, State}
+            end;
+        _ ->
+            ok = inet:setopts(Socket, [{active, 1}]),
+            {noreply, State#?MODULE{parse_state = {awaiting_token, Token, Bin}}}
+    end;
 handle_info({tcp, Socket, Bin},
             #?MODULE{cfg =
                          #cfg{socket = Socket,
