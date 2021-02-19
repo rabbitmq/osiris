@@ -82,7 +82,8 @@ init(#{host := Host,
        replica_pid := ReplicaPid,
        leader_pid := LeaderPid,
        start_offset := {StartOffset, _} = TailInfo,
-       external_ref := ExtRef} =
+       external_ref := ExtRef,
+       connection_token := Token} =
          Args) ->
     CntId = {?MODULE, ExtRef, Host, Port},
     CntRef = osiris_counters:new(CntId, ?COUNTER_FIELDS),
@@ -97,6 +98,7 @@ init(#{host := Host,
                          {packet, 0},
                          {nodelay, true},
                          {sndbuf, SndBuf}]),
+    ok = gen_tcp:send(Sock, Token),
     %% register data listener with osiris_proc
     ok = osiris_writer:register_data_listener(LeaderPid, StartOffset),
     MRef = monitor(process, LeaderPid),
