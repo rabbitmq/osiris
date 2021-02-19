@@ -44,8 +44,13 @@
          event_formatter :: undefined | mfa(),
          counter :: counters:counters_ref()}).
 
+-type token() :: binary().
+
 -type parse_state() ::
-    undefined | {awaiting_token, binary()} | binary() |
+    undefined |
+    {awaiting_token, token()} |
+    {awaiting_token, token(), binary()} |
+    binary() |
     {non_neg_integer(), iolist(), non_neg_integer()}.
 
 -record(?MODULE,
@@ -412,7 +417,7 @@ handle_info({tcp_passive, Socket},
 handle_info({tcp_closed, Socket},
             #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
     ?DEBUG("osiris_replica: ~s Socket closed. Exiting...", [Name]),
-    {stop, tcp_closed, State};
+    {stop, normal, State};
 handle_info({tcp_error, Socket, Error},
             #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
     ?DEBUG("osiris_replica: ~s Socket error ~p. Exiting...",
