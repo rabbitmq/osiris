@@ -56,54 +56,247 @@
 -define(C_FIRST_OFFSET, 2).
 -define(C_CHUNKS, 3).
 
-%% Data format
-%% Write in "chunks" which are batches of blobs
+%% Specification of the Log format.
 %%
-%% <<
-%%   Magic=5:4/unsigned,
-%%   ProtoVersion:4/unsigned,
-%%   ChunkType:8/unsigned, %% 0=user, 1=tracking delta, 2=tracking snapshot
-%%   NumEntries:16/unsigned, %% need some kind of limit on chunk sizes 64k is a good start
-%%   NumRecords:32/unsigned, %% total including all sub batch entries
-%%   Timestamp:64/signed, %% millisecond posix (ish) timestamp
-%%   Epoch:64/unsigned,
-%%   ChunkFirstOffset:64/unsigned,
-%%   ChunkCrc:32/integer, %% crc32 checksum for the records portion of the data
-%%   DataLength:32/unsigned %% length until end of chunk,
-%%   TrailerLength:32/unsigned
-%%   [Entry]
-%%   [Trailer]/binary
-%%   ...>>
+%% Notes:
+%%   * All integers are in Big Endian order.
+%%   * Timestamps are expressed in milliseconds.
+%%   * Timestamps are stored in signed 64-bit integers.
 %%
-%%   Entry Format
-%%   <<0=SimpleEntryType:1,
-%%     Size:31/unsigned,
-%%     Data:Size/binary>> |
+%% Log format
+%% ==========
 %%
-%%   <<1=SubBatchEntryType:1,
-%%     CompressionType:3,
-%%     Reserved:4,
-%%     NumRecords:16/unsigned,
-%%     Size:32/unsigned,
-%%     Data:Size/binary>>
+%%   |0              |1              |2              |3              | Bytes
+%%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
+%%   +---------------+---------------+---------------+---------------+
+%%   | Log magic (0x4f53494c = "OSIL")                               |
+%%   +---------------------------------------------------------------+
+%%   | Log version (0x00000001)                                      |
+%%   +---------------------------------------------------------------+
+%%   | Contiguous list of Chunks                                     |
+%%   : (until EOF)                                                   :
+%%   :                                                               :
+%%   +---------------------------------------------------------------+
 %%
-%%   Trailer Entry Format
-%%  <<Size:8/unsigned,
-%%    WriterId:Size/binary,
-%%    Timestamp:64/signed,
-%%    Sequence:64/unsigned>>
+%% Chunk format
+%% ============
 %%
-%%  Tracking Entry Body Format:
-%%  <<
-%%    Size:8/unsigned,
-%%    Id:Size/binary,
-%%    Offset:64/unsigned>>
+%% A chunk is the unit of replication and read.
 %%
-%%   Chunks is the unit of replication and read
+%%   |0              |1              |2              |3              | Bytes
+%%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
+%%   +-------+-------+---------------+---------------+---------------+
+%%   | Mag   | Ver   | Chunk type    | Number of entries             |
+%%   +-------+-------+---------------+-------------------------------+
+%%   | Number of records                                             |
+%%   +---------------------------------------------------------------+
+%%   | Timestamp                                                     |
+%%   | (8 bytes)                                                     |
+%%   +---------------------------------------------------------------+
+%%   | Epoch                                                         |
+%%   | (8 bytes)                                                     |
+%%   +---------------------------------------------------------------+
+%%   | First offset                                                  |
+%%   | (8 bytes)                                                     |
+%%   +---------------------------------------------------------------+
+%%   | Data CRC                                                      |
+%%   +---------------------------------------------------------------+
+%%   | Data length                                                   |
+%%   +---------------------------------------------------------------+
+%%   | Trailer length                                                |
+%%   +---------------------------------------------------------------+
+%%   | Contiguous list of Data entries                               |
+%%   : (<data length> bytes)                                         :
+%%   :                                                               :
+%%   +---------------------------------------------------------------+
+%%   | Contiguous list of Trailer entries                            |
+%%   : (<trailer length> bytes)                                      :
+%%   :                                                               :
+%%   +---------------------------------------------------------------+
 %%
-%%   Index format:
-%%   Maps each chunk to an offset
-%%   | Offset | FileOffset
+%% Mag = 0x5
+%%   Magic number to identify the beginning of a chunk
+%%
+%% Ver = 0x1
+%%   Version of the chunk format
+%%
+%% Chunk type = CHNK_USER (0x00) |
+%%              CHNK_TRK_DELTA (0x01) |
+%%              CHNK_TRK_SNAPSHOT (0x02) |
+%%              CHNK_WRT_SNAPSHOT (0x03)
+%%   Type which determines what to do with entries.
+%%
+%% Number of entries = unsigned 16-bit integer
+%%   Number of entries in the data section following the chunk header.
+%%
+%% Number of records = unsigned 32-bit integer
+%%
+%% Timestamp = signed 64-bit integer
+%%
+%% Epoch = unsigned 64-bit integer
+%%
+%% First offset = unsigned 64-bit integer
+%%
+%% Data CRC = unsigned 32-bit integer
+%%
+%% Data length = unsigned 32-bit integer
+%%
+%% Trailer length = unsigned 32-bit integer
+%%
+%% Data Entry format
+%% =================
+%%
+%%   |0              |1              |2              |3              | Bytes
+%%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
+%%   +---------------+---------------+---------------+---------------+
+%%   |T| Data entry header and body                                  |
+%%   +-+ (format and length depends on the chunk and entry types)    :
+%%   :                                                               :
+%%   :                                                               :
+%%   +---------------------------------------------------------------+
+%%
+%% T = SimpleEntry (0) |
+%%     SubBatchEntry (1)
+%%
+%% SimpleEntry (CHNK_USER)
+%% -----------------------
+%%
+%%   |0              |1              |2              |3              | Bytes
+%%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
+%%   +---------------+---------------+---------------+---------------+
+%%   |0| Entry body length                                           |
+%%   +-+-------------------------------------------------------------+
+%%   | Entry body                                                    :
+%%   : (<body length> bytes)                                         :
+%%   :                                                               :
+%%   +---------------------------------------------------------------+
+%%
+%% Entry body length = unsigned 31-bit integer
+%%
+%% Entry body = arbitrary data
+%%
+%% SimpleEntry (CHNK_TRK_DELTA or CHNK_TRK_SNAPSHOT)
+%% -------------------------------------------------
+%%
+%%   |0              |1              |2              |3              | Bytes
+%%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
+%%   +-+-------------+---------------+---------------+---------------+
+%%   |0| Entry body length                                           |
+%%   +-+-------------------------------------------------------------+
+%%   | Entry Body                                                    |
+%%   : (<body length> bytes)                                         :
+%%   :                                                               :
+%%   +---------------------------------------------------------------+
+%%
+%% The entry body is made of a contiguous list of the following block, until
+%% the body length is reached.
+%%
+%%   |0              |1              |2              |3              | Bytes
+%%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
+%%   +---------------+---------------+---------------+---------------+
+%%   | ID size       | ID                                            |
+%%   +---------------+                                               |
+%%   |                                                               |
+%%   :                                                               :
+%%   +---------------------------------------------------------------+
+%%   | Offset                                                        |
+%%   | (8 bytes)                                                     |
+%%   +---------------------------------------------------------------+
+%%
+%% ID size = unsigned 8-bit integer
+%%
+%% ID = arbitrary data
+%%
+%% Offset = unsigned 64-bit integer
+%%
+%% SimpleEntry (CHNK_WRT_SNAPSHOT)
+%% -------------------------------
+%%
+%%   |0              |1              |2              |3              | Bytes
+%%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
+%%   +-+-------------+---------------+---------------+---------------+
+%%   |0| Entry body length                                           |
+%%   +-+-------------------------------------------------------------+
+%%   | Entry Body                                                    |
+%%   : (<body length> bytes)                                         :
+%%   :                                                               :
+%%   +---------------------------------------------------------------+
+%%
+%% The entry body is made of a contiguous list of the following block, until
+%% the body length is reached.
+%%
+%%   |0              |1              |2              |3              | Bytes
+%%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
+%%   +---------------+---------------+---------------+---------------+
+%%   | WriterID size | WriterID                                      |
+%%   +---------------+                                               |
+%%   |                                                               |
+%%   :                                                               :
+%%   +---------------------------------------------------------------+
+%%   | Timestamp                                                     |
+%%   | (8 bytes)                                                     |
+%%   +---------------------------------------------------------------+
+%%   | Sequence                                                      |
+%%   | (8 bytes)                                                     |
+%%   +---------------------------------------------------------------+
+%%
+%% WriterID size = unsigned 8-bit integer
+%%
+%% WriterID = arbitrary data
+%%
+%% Timestamp = signed 64-bit integer
+%%
+%% Sequence = unsigned 64-bit integer
+%%
+%% SubBatchEntry (CHNK_USER)
+%% -------------------------
+%%
+%%   |0              |1              |2              |3              | Bytes
+%%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
+%%   +-+-----+-------+---------------+---------------+---------------+
+%%   |1| Cmp | Rsvd  | Number of records             | Length  (...) |
+%%   +-+-----+-------+-------------------------------+---------------+
+%%   | Length                                        | Body          |
+%%   +-+---------------------------------------------+               +
+%%   | Body                                                          |
+%%   :                                                               :
+%%   +---------------------------------------------------------------+
+%%
+%% Cmp = unsigned 3-bit integer
+%%   Compression type
+%%
+%% Rsvd = 0x0
+%%   Reserved bits
+%%
+%% Number of records = unsigned 16-bit integer
+%%
+%% Length = unsigned 32-bit integer
+%%
+%% Body = arbitrary data
+%%
+%% Trailer format
+%% ==============
+%%
+%% The trailer is made of a contiguous list of the following block, until the
+%% trailer length stated in the chunk header is reached.
+%%
+%%   |0              |1              |2              |3              | Bytes
+%%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
+%%   +-+-------------+---------------+---------------+---------------+
+%%   | WriterID size | WriterID                                      |
+%%   +---------------+                                               |
+%%   |                                                               |
+%%   :                                                               :
+%%   +---------------------------------------------------------------+
+%%   | Sequence                                                      |
+%%   | (8 bytes)                                                     |
+%%   +---------------------------------------------------------------+
+%%
+%% Index format
+%% ============
+%%
+%% Maps each chunk to an offset
+%% | Offset | FileOffset
 
 -type offset() :: osiris:offset().
 -type epoch() :: osiris:epoch().
