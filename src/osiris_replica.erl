@@ -37,17 +37,14 @@
          port :: non_neg_integer(),
          socket :: undefined | gen_tcp:socket(),
          gc_interval :: non_neg_integer(),
-         external_ref :: term(),
+         reference :: term(),
          offset_ref :: atomics:atomics_ref(),
          event_formatter :: undefined | mfa(),
-         counter :: counters:counters_ref()}).
-
--type token() :: binary().
+         counter :: counters:counters_ref(),
+         token :: undefined | binary()}).
 
 -type parse_state() ::
     undefined |
-    {awaiting_token, token()} |
-    {awaiting_token, token(), binary()} |
     binary() |
     {non_neg_integer(), iolist(), non_neg_integer()}.
 
@@ -139,7 +136,7 @@ init(#{name := Name,
     CntRef = osiris_log:counters_ref(Log),
     {NextOffset, LastChunk} = TailInfo = osiris_log:tail_info(Log),
 
-    ?DEBUG("~s: tail info: ~w", [TailInfo]),
+    ?DEBUG("~s: tail info: ~w", [Name, TailInfo]),
     case LastChunk of
         empty ->
             ok;
@@ -154,7 +151,7 @@ init(#{name := Name,
     {ok, HostName} = inet:gethostname(),
     {ok, Ip} = inet:getaddr(HostName, inet),
     rand:seed(exsplus),
-    Token = list_to_binary([rand:uniform(256) - 1 || _ <- lists:seq(1, 256)]),
+    Token = crypto:strong_rand_bytes(256),
     ReplicaReaderConf =
         #{host => Ip,
           port => Port,
@@ -162,9 +159,9 @@ init(#{name := Name,
           replica_pid => self(),
           leader_pid => LeaderPid,
           start_offset => TailInfo,
-          external_ref => ExtRef,
+          reference => ExtRef,
           connection_token => Token},
-    _RRPid =
+    RRPid =
         case supervisor:start_child({osiris_replica_reader_sup, Node},
                                     #{id => make_ref(),
                                       start =>
@@ -184,6 +181,7 @@ init(#{name := Name,
             {ok, Pid, _} ->
                 Pid
         end,
+    true = link(RRPid),
     Interval = maps:get(replica_gc_interval, Config, 5000),
     erlang:send_after(Interval, self(), force_gc),
     ORef = atomics:new(1, [{signed, true}]),
@@ -196,12 +194,13 @@ init(#{name := Name,
                        directory = Dir,
                        port = Port,
                        gc_interval = Interval,
-                       external_ref = ExtRef,
+                       reference = ExtRef,
                        offset_ref = ORef,
                        event_formatter = EvtFmt,
-                       counter = CntRef},
+                       counter = CntRef,
+                       token = Token},
               log = Log,
-              parse_state = {awaiting_token, Token}}}.
+              parse_state = undefined}}.
 
 open_tcp_port(M, M) ->
     throw({error, all_busy});
@@ -321,44 +320,21 @@ handle_info(force_gc,
     counters:add(Cnt, ?C_FORCED_GCS, 1),
     erlang:send_after(Interval, self(), force_gc),
     {noreply, State};
-handle_info({socket, Socket}, #?MODULE{cfg = Cfg} = State) ->
-    ok = inet:setopts(Socket, [{active, 5}]),
+handle_info({socket, Socket}, #?MODULE{cfg = #cfg{name = Name,
+                                                  token = Token} = Cfg} = State) ->
     Timeout = application:get_env(osiris, one_time_token_timeout, ?DEFAULT_ONE_TIME_TOKEN_TIMEOUT),
-    {noreply, State#?MODULE{cfg = Cfg#cfg{socket = Socket}}, Timeout};
-handle_info(timeout, #?MODULE{parse_state = {awaiting_token, _}} = State) ->
-    {stop, missing_token, State};
-handle_info(timeout, State) ->
-    {noreply, State};
-handle_info({tcp, Socket, <<Token:256/binary, Rem/binary>>},
-            #?MODULE{cfg = #cfg{socket = Socket},
-                     parse_state = {awaiting_token, Token}} = State) ->
-    ok = inet:setopts(Socket, [{active, 1}]),
-    {noreply, State#?MODULE{parse_state = Rem}};
-handle_info({tcp, Socket, <<_Other:256/binary, _Rem/binary>>},
-            #?MODULE{cfg = #cfg{socket = Socket},
-                     parse_state = {awaiting_token, _Token}} = State) ->
-    {stop, invalid_token, State};
-handle_info({tcp, Socket, Bin},
-            #?MODULE{cfg = #cfg{socket = Socket},
-                     parse_state = {awaiting_token, Token}} = State) ->
-    ok = inet:setopts(Socket, [{active, 1}]),
-    {noreply, State#?MODULE{parse_state = {awaiting_token, Token, Bin}}};
-handle_info({tcp, Socket, Bin0},
-            #?MODULE{cfg = #cfg{socket = Socket},
-                     parse_state = {awaiting_token, Token, PartialBin}} = State) ->
-    Bin = <<PartialBin/binary, Bin0/binary>>,
-    case byte_size(Bin) of
-        S when S >= 256 ->
-            case Bin of
-                <<Token:256/binary, Rem/binary>> ->
-                    ok = inet:setopts(Socket, [{active, 1}]),
-                    {noreply, State#?MODULE{parse_state = Rem}};
-                _ ->
-                    {stop, invalid_token, State}
-            end;
-        _ ->
-            ok = inet:setopts(Socket, [{active, 1}]),
-            {noreply, State#?MODULE{parse_state = {awaiting_token, Token, Bin}}}
+    case gen_tcp:recv(Socket, 256, Timeout) of
+        {ok, Token} ->
+            %% token validated, all good we can let the flood of data begin
+            ok = inet:setopts(Socket, [{active, 5}]),
+            {noreply, State#?MODULE{cfg = Cfg#cfg{socket = Socket}}};
+        {ok, Other} ->
+            ?WARN("~s: ~s invalid token received ~w",
+                  [?MODULE, Name, Other]),
+            {stop, invalid_token, State};
+        {error, Reason} ->
+            ?WARN("~s: ~s error awaiting token ~w",
+                  [?MODULE, Name, Reason])
     end;
 handle_info({tcp, Socket, Bin},
             #?MODULE{cfg =
@@ -368,7 +344,10 @@ handle_info({tcp, Socket, Bin},
                      parse_state = ParseState0,
                      log = Log0} =
                 State) ->
-    ok = inet:setopts(Socket, [{active, 1}]),
+    %% deliberately ignoring return value here as it would fail if the
+    %% tcp connection has been closed and we still want to try to process
+    %% any messages still in the mailbox
+    _ = inet:setopts(Socket, [{active, 1}]),
     %% validate chunk
     {ParseState, OffsetChunks} = parse_chunk(Bin, ParseState0, []),
     {Acks, Log} =
@@ -492,7 +471,7 @@ parse_chunk(Bin, {FirstOffset, IOData, RemSize}, Acc) ->
      lists:reverse(Acc)}.
 
 notify_offset_listeners(#?MODULE{cfg =
-                                     #cfg{external_ref = Ref,
+                                     #cfg{reference = Ref,
                                           event_formatter = EvtFmt},
                                  committed_offset = COffs,
                                  offset_listeners = L0} =

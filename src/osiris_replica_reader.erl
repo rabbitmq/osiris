@@ -82,7 +82,7 @@ init(#{host := Host,
        replica_pid := ReplicaPid,
        leader_pid := LeaderPid,
        start_offset := {StartOffset, _} = TailInfo,
-       external_ref := ExtRef,
+       reference := ExtRef,
        connection_token := Token} =
          Args) ->
     CntId = {?MODULE, ExtRef, Host, Port},
