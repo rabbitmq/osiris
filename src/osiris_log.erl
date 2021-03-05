@@ -365,7 +365,8 @@
         {epoch :: epoch(),
          timestamp :: non_neg_integer(),
          id :: offset(),
-         num :: non_neg_integer()}).
+         num :: non_neg_integer()
+         }).
 -record(seg_info,
         {file :: file:filename(),
          size = 0 :: non_neg_integer(),
@@ -438,6 +439,7 @@ init(#{dir := Dir,
         [#seg_info{file = Filename,
                    index = IdxFilename,
                    first = #chunk_info{id = FstChId},
+                   size = Size,
                    last =
                        #chunk_info{epoch = E,
                                    id = ChId,
@@ -464,7 +466,9 @@ init(#{dir := Dir,
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             %% recover tracking info
             {Tracking, Writers} = recover_tracking(Filename),
-            {ok, _} = file:position(Fd, eof),
+            %% truncate segment to size in case there is trailing data
+            {ok, _} = file:position(Fd, Size),
+            ok = file:truncate(Fd),
             {ok, _} = file:position(IdxFd, eof),
             #?MODULE{cfg = Cfg,
                      mode =
@@ -482,6 +486,8 @@ init(#{dir := Dir,
             %% the empty log case
             {ok, Fd} = open(Filename, ?FILE_OPTS_WRITE),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
+            %% TODO: do we potentially need to truncate the segment
+            %% here too?
             {ok, _} = file:position(Fd, eof),
             {ok, _} = file:position(IdxFd, eof),
             #?MODULE{cfg = Cfg,
@@ -1108,13 +1114,17 @@ read_chunk_parsed(#?MODULE{mode = #read{type = RType}} = State0) ->
     end.
 
 -spec send_file(gen_tcp:socket(), state()) ->
-                   {ok, state()} | {end_of_stream, state()}.
+                   {ok, state()} |
+                   {error, term()} |
+                   {end_of_stream, state()}.
 send_file(Sock, State) ->
     send_file(Sock, State, fun(_, S) -> S end).
 
 -spec send_file(gen_tcp:socket(), state(),
                 fun((header_map(), non_neg_integer()) -> term())) ->
-                   {ok, state()} | {end_of_stream, state()}.
+                   {ok, state()} |
+                   {error, term()} |
+                   {end_of_stream, state()}.
 send_file(Sock,
           #?MODULE{cfg = #cfg{}, mode = #read{type = RType}} = State0,
           Callback) ->
@@ -1370,9 +1380,15 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
                    LastTs:64/signed,
                    LastEpoch:64/unsigned,
                    LastChId:64/unsigned,
-                   _/binary>>} =
+                   _LastCrc:32/integer,
+                   LastSize:32/unsigned,
+                   LastTSize:32/unsigned>>} =
                     file:read(Fd, ?HEADER_SIZE_B),
-                {ok, Size} = file:position(Fd, eof),
+                Size = LastChunkPos + LastSize + LastTSize + ?HEADER_SIZE_B,
+                {ok, Eof} = file:position(Fd, eof),
+                ?DEBUG_IF("~s: segment ~s has trailing data ~w ~w",
+                          [?MODULE, filename:basename(SegFile),
+                           Size, Eof], Size =/= Eof),
                 _ = file:close(Fd),
                 [#seg_info{file = SegFile,
                            index = IdxFile,
@@ -1563,7 +1579,8 @@ make_chunk(Blobs, Writers, ChType, Timestamp, Epoch, Next) ->
         Next:64/unsigned,
         Crc:32/integer,
         Size:32/unsigned,
-        TSize:32/unsigned>>,
+        TSize:32/unsigned
+      >>,
       EData, TData],
      NumRecords}.
 
@@ -2000,7 +2017,24 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir},
                                     {end_of_stream, State}
                             end
                     end;
+                {ok,
+                 <<?MAGIC:4/unsigned,
+                   ?VERSION:4/unsigned,
+                   _ChType:8/unsigned,
+                   _NumEntries:16/unsigned,
+                   _NumRecords:32/unsigned,
+                   _Timestamp:64/signed,
+                   _Epoch:64/unsigned,
+                   UnexpectedChId:64/unsigned,
+                   _Crc:32/integer,
+                   _DataSize:32/unsigned,
+                   _TrailerSize:32/unsigned>>} ->
+                    %% TODO: we may need to return the new state here if
+                    %% we've crossed segments
+                    {ok, Pos} = file:position(Fd, Pos),
+                    {error, {unexpected_chunk_id, UnexpectedChId, NextChId}};
                 Invalid ->
+                    _ = file:position(Fd, Pos),
                     {error, {invalid_chunk_header, Invalid}}
             end;
         false ->

@@ -117,6 +117,8 @@ init(#{name := Name,
        leader_pid := LeaderPid,
        reference := ExtRef} =
          Config) ->
+    process_flag(trap_exit, true),
+    process_flag(message_queue_data, off_heap),
     {ok, {Min, Max}} = application:get_env(port_range),
     {Port, LSock} = open_tcp_port(Min, Max),
     Self = self(),
@@ -383,6 +385,11 @@ handle_info({'DOWN', _Ref, process, Pid, Info}, State) ->
     ?DEBUG("osiris_replica:handle_info/2: DOWN received Pid "
            "~w, Info: ~w",
            [Pid, Info]),
+    {noreply, State};
+handle_info({'EXIT', Ref, Info}, State) ->
+    ?DEBUG("osiris_replica:handle_info/2: EXIT received "
+           "~w, Info: ~w",
+           [Ref, Info]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -396,7 +403,8 @@ handle_info({'DOWN', _Ref, process, Pid, Info}, State) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
-terminate(_Reason, #?MODULE{log = Log}) ->
+terminate(Reason, #?MODULE{cfg = #cfg{name = Name}, log = Log}) ->
+    ?DEBUG("~s: ~s terminating with ~w ", [?MODULE, Name, Reason]),
     ok = osiris_log:close(Log),
     ok.
 
