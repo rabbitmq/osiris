@@ -7,6 +7,7 @@
 
 -module(osiris_SUITE).
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 -export([]).

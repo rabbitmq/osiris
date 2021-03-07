@@ -7,6 +7,7 @@
 
 -module(osiris_util_SUITE).
 
+-compile(nowarn_export_all).
 -compile(export_all).
 
 -export([]).
@@ -49,7 +50,7 @@ end_per_testcase(_TestCase, _Config) ->
 %%% Test cases
 %%%===================================================================
 
-to_base64uri_test(Config) ->
+to_base64uri_test(_Config) ->
     ?assertEqual("Myqueue", osiris_util:to_base64uri("Myqueue")),
     ?assertEqual("my__queue", osiris_util:to_base64uri("my%*queue")),
     ?assertEqual("my99___queue",
