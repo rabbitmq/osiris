@@ -312,7 +312,7 @@
     #{dir := file:filename(),
       epoch => non_neg_integer(),
       max_segment_size => non_neg_integer(),
-      counter_spec => {Tag :: atom(), Fields :: [atom()]}}.
+      counter_spec => {Tag :: term(), Fields :: [atom()]}}.
 -type record() :: {offset(), iodata()}.
 -type offset_spec() :: osiris:offset_spec().
 -type retention_spec() :: osiris:retention_spec().
@@ -365,7 +365,8 @@
         {epoch :: epoch(),
          timestamp :: non_neg_integer(),
          id :: offset(),
-         num :: non_neg_integer()}).
+         num :: non_neg_integer()
+         }).
 -record(seg_info,
         {file :: file:filename(),
          size = 0 :: non_neg_integer(),
@@ -381,15 +382,14 @@
 
               % record/0,
 
--spec directory(osiris:config()) -> file:filename().
-directory(#{name := Name} = Config) ->
-    Dir = case Config of
-              #{dir := D} ->
-                  D;
-              _ ->
-                  {ok, D} = application:get_env(osiris, data_dir),
-                  D
-          end,
+-spec directory(osiris:config() | list()) -> file:filename().
+directory(#{name := Name, dir := Dir}) ->
+    filename:join(Dir, Name);
+directory(#{name := Name}) ->
+    {ok, Dir} = application:get_env(osiris, data_dir),
+    filename:join(Dir, Name);
+directory(Name) when is_list(Name) ->
+    {ok, Dir} = application:get_env(osiris, data_dir),
     filename:join(Dir, Name).
 
 -spec init(config()) -> state().
@@ -439,6 +439,7 @@ init(#{dir := Dir,
         [#seg_info{file = Filename,
                    index = IdxFilename,
                    first = #chunk_info{id = FstChId},
+                   size = Size,
                    last =
                        #chunk_info{epoch = E,
                                    id = ChId,
@@ -463,10 +464,13 @@ init(#{dir := Dir,
                    element(1, TailInfo)]),
             {ok, Fd} = open(Filename, ?FILE_OPTS_WRITE),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
-            %% recover tracking info
-            {Tracking, Writers} = recover_tracking(Filename),
-            {ok, _} = file:position(Fd, eof),
+            {ok, Size} = file:position(Fd, Size),
+            ok = file:truncate(Fd),
             {ok, _} = file:position(IdxFd, eof),
+            %% recover tracking info
+            {Tracking, Writers} = recover_tracking(Fd),
+            {ok, Size} = file:position(Fd, Size),
+            %% truncate segment to size in case there is trailing data
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
@@ -483,6 +487,8 @@ init(#{dir := Dir,
             %% the empty log case
             {ok, Fd} = open(Filename, ?FILE_OPTS_WRITE),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
+            %% TODO: do we potentially need to truncate the segment
+            %% here too?
             {ok, _} = file:position(Fd, eof),
             {ok, _} = file:position(IdxFd, eof),
             #?MODULE{cfg = Cfg,
@@ -1109,13 +1115,17 @@ read_chunk_parsed(#?MODULE{mode = #read{type = RType}} = State0) ->
     end.
 
 -spec send_file(gen_tcp:socket(), state()) ->
-                   {ok, state()} | {end_of_stream, state()}.
+                   {ok, state()} |
+                   {error, term()} |
+                   {end_of_stream, state()}.
 send_file(Sock, State) ->
     send_file(Sock, State, fun(_, S) -> S end).
 
 -spec send_file(gen_tcp:socket(), state(),
                 fun((header_map(), non_neg_integer()) -> term())) ->
-                   {ok, state()} | {end_of_stream, state()}.
+                   {ok, state()} |
+                   {error, term()} |
+                   {end_of_stream, state()}.
 send_file(Sock,
           #?MODULE{cfg = #cfg{}, mode = #read{type = RType}} = State0,
           Callback) ->
@@ -1175,8 +1185,10 @@ close(#?MODULE{cfg = #cfg{counter_id = CntId}, fd = Fd}) ->
             osiris_counters:delete(CntId)
     end.
 
-delete_directory(Config) ->
-    Dir = directory(Config),
+delete_directory(#{name := Name} = Config) when is_map(Config) ->
+    delete_directory(Name);
+delete_directory(Name) when is_list(Name) ->
+    Dir = directory(Name),
     case file:list_dir(Dir) of
         {ok, Files} ->
             [ok =
@@ -1369,9 +1381,15 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
                    LastTs:64/signed,
                    LastEpoch:64/unsigned,
                    LastChId:64/unsigned,
-                   _/binary>>} =
+                   _LastCrc:32/integer,
+                   LastSize:32/unsigned,
+                   LastTSize:32/unsigned>>} =
                     file:read(Fd, ?HEADER_SIZE_B),
-                {ok, Size} = file:position(Fd, eof),
+                Size = LastChunkPos + LastSize + LastTSize + ?HEADER_SIZE_B,
+                {ok, Eof} = file:position(Fd, eof),
+                ?DEBUG_IF("~s: segment ~s has trailing data ~w ~w",
+                          [?MODULE, filename:basename(SegFile),
+                           Size, Eof], Size =/= Eof),
                 _ = file:close(Fd),
                 [#seg_info{file = SegFile,
                            index = IdxFile,
@@ -1562,7 +1580,8 @@ make_chunk(Blobs, Writers, ChType, Timestamp, Epoch, Next) ->
         Next:64/unsigned,
         Crc:32/integer,
         Size:32/unsigned,
-        TSize:32/unsigned>>,
+        TSize:32/unsigned
+      >>,
       EData, TData],
      NumRecords}.
 
@@ -1827,12 +1846,12 @@ part(Len, [B | L]) when Len > 0 ->
             [binary:part(B, {0, Len})]
     end.
 
-recover_tracking(File) ->
+recover_tracking(Fd) ->
     %% TODO: if the first chunk in the segment isn't a tracking snapshot and
     %% there are prior segments we could scan at least two segments increasing
     %% the chance of encountering a snapshot and thus ensure we don't miss any
     %% tracking entries
-    {ok, Fd} = file:open(File, [read, binary, raw]),
+    {ok, 0} = file:position(Fd, 0),
     {ok, ?LOG_HEADER_SIZE} = file:position(Fd, ?LOG_HEADER_SIZE),
     recover_tracking(Fd, #{}, #{}).
 
@@ -1879,7 +1898,6 @@ recover_tracking(Fd, Trk, Wrt) ->
                                                    Wrt))
             end;
         eof ->
-            file:close(Fd),
             {Trk, Wrt}
     end.
 
@@ -1999,7 +2017,24 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir},
                                     {end_of_stream, State}
                             end
                     end;
+                {ok,
+                 <<?MAGIC:4/unsigned,
+                   ?VERSION:4/unsigned,
+                   _ChType:8/unsigned,
+                   _NumEntries:16/unsigned,
+                   _NumRecords:32/unsigned,
+                   _Timestamp:64/signed,
+                   _Epoch:64/unsigned,
+                   UnexpectedChId:64/unsigned,
+                   _Crc:32/integer,
+                   _DataSize:32/unsigned,
+                   _TrailerSize:32/unsigned>>} ->
+                    %% TODO: we may need to return the new state here if
+                    %% we've crossed segments
+                    {ok, Pos} = file:position(Fd, Pos),
+                    {error, {unexpected_chunk_id, UnexpectedChId, NextChId}};
                 Invalid ->
+                    _ = file:position(Fd, Pos),
                     {error, {invalid_chunk_header, Invalid}}
             end;
         false ->

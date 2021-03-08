@@ -29,7 +29,6 @@
          stop/1,
          delete/1]).
 
--define(SUP, osiris_server_sup).
 -define(ADD_COUNTER_FIELDS, [committed_offset]).
 -define(C_COMMITTED_OFFSET, ?C_NUM_LOG_FIELDS + 1).
 
@@ -40,7 +39,7 @@
 
 -record(cfg,
         {name :: string(),
-         ext_reference :: term(),
+         reference :: term(),
          offset_ref :: atomics:atomics_ref(),
          replicas = [] :: [node()],
          directory :: file:filename(),
@@ -64,38 +63,17 @@
 
 start(Config = #{name := Name, leader_node := Leader}) ->
     supervisor:start_child({?SUP, Leader},
-                           #{id => child_name(Name),
+                           #{id => Name,
                              start => {?MODULE, start_link, [Config]},
                              restart => temporary,
                              shutdown => 5000,
                              type => worker}).
 
-stop(#{name := Name, leader_node := Leader}) ->
-    CName = child_name(Name),
-    try
-        _ = supervisor:terminate_child({?SUP, Leader}, CName),
-        _ = supervisor:delete_child({?SUP, Leader}, CName),
-        ok
-    catch
-        _:{noproc, _} ->
-            %% Whole supervisor or app is already down - i.e. stop_app
-            ok
-    end.
+stop(#{name := Name, leader_node := Node}) ->
+    ?SUP:stop_child(Node, Name).
 
-delete(#{leader_node := Leader, name := Name} = Config) ->
-    try
-        case supervisor:get_childspec({?SUP, Leader}, child_name(Name)) of
-            {ok, _} ->
-                stop(Config),
-                rpc:call(Leader, osiris_log, delete_directory, [Config]);
-            {error, not_found} ->
-                ok
-        end
-    catch
-        _:{noproc, _} ->
-            %% Whole supervisor or app is already down - i.e. stop_app
-            ok
-    end.
+delete(#{leader_node := Node} = Config) ->
+    ?SUP:delete_child(Node, Config).
 
 -spec start_link(Config :: map()) ->
                     {ok, pid()} | {error, {already_started, pid()}}.
@@ -146,7 +124,8 @@ query_writers(Pid, QueryFun) ->
 
 -spec init(osiris:config()) -> {ok, state()}.
 init(#{name := Name,
-       external_ref := ExtRef,
+       epoch := Epoch,
+       reference := ExtRef,
        replica_nodes := Replicas} =
          Config)
     when is_list(Name) ->
@@ -175,14 +154,14 @@ init(#{name := Name,
     counters:put(CntRef, ?C_COMMITTED_OFFSET, CommittedOffset),
     EvtFmt = maps:get(event_formatter, Config, undefined),
     ?INFO("osiris_writer:init/1: name: ~s last offset: ~b "
-          "committed chunk id: ~b",
-          [Name, LastOffs, CommittedOffset]),
+          "committed chunk id: ~b epoch: ~b",
+          [Name, LastOffs, CommittedOffset, Epoch]),
     {ok,
      #?MODULE{cfg =
                   #cfg{name = Name,
                        %% reference used for notification
                        %% if not provided use the name
-                       ext_reference = ExtRef,
+                       reference = ExtRef,
                        event_formatter = EvtFmt,
                        offset_ref = ORef,
                        replicas = Replicas,
@@ -431,7 +410,7 @@ notify_data_listeners(#?MODULE{log = Seg, data_listeners = L0} =
     State#?MODULE{data_listeners = L}.
 
 notify_offset_listeners(#?MODULE{cfg =
-                                     #cfg{ext_reference = Ref,
+                                     #cfg{reference = Ref,
                                           event_formatter = EvtFmt},
                                  committed_offset = COffs,
                                  offset_listeners = L0} =
@@ -464,7 +443,7 @@ notify_writers(Q0, COffs, Cfg) ->
             Q0
     end.
 
-send_written_events(#cfg{ext_reference = ExtRef,
+send_written_events(#cfg{reference = ExtRef,
                          event_formatter = Fmt},
                     Corrs) ->
     %% TODO: minor optimisation: use maps:iterator here to avoid building a new
@@ -494,10 +473,6 @@ agreed_commit(Indexes) ->
     SortedIdxs = lists:sort(fun erlang:'>'/2, Indexes),
     Nth = length(SortedIdxs) div 2 + 1,
     lists:nth(Nth, SortedIdxs).
-
-child_name(Name) ->
-    lists:flatten(
-        io_lib:format("~s_writer", [Name])).
 
 is_duplicate(undefined, _, _, _) ->
     {false, 0};

@@ -598,7 +598,7 @@ restart_replica(Config) ->
         [start_child_node(N, PrivDir) || N <- Nodes],
     InitConf =
         #{name => Name,
-          external_ref => Name,
+          reference => Name,
           epoch => 1,
           leader_node => LeaderE1,
           replica_nodes => [Replica1, Replica2]},
@@ -629,7 +629,7 @@ diverged_replica(Config) ->
         [start_child_node(N, PrivDir) || N <- Nodes],
     ConfE1 =
         #{name => Name,
-          external_ref => Name,
+          reference => Name,
           epoch => 1,
           leader_node => LeaderE1,
           replica_nodes => [LeaderE2, LeaderE3]},

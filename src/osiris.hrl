@@ -7,6 +7,11 @@
 
 %% logging shim
 -define(DEBUG(Fmt, Args), ?DISPATCH_LOG(debug, Fmt, Args)).
+-define(DEBUG_IF(Fmt, Args, Bool),
+        if Bool ->
+               ?DISPATCH_LOG(debug, Fmt, Args);
+           true -> ok
+        end).
 -define(INFO(Fmt, Args), ?DISPATCH_LOG(info, Fmt, Args)).
 -define(NOTICE(Fmt, Args), ?DISPATCH_LOG(notice, Fmt, Args)).
 -define(WARN(Fmt, Args), ?DISPATCH_LOG(warning, Fmt, Args)).
@@ -40,3 +45,4 @@
 -define(CHNK_TRK_SNAPSHOT, 2).
 -define(CHNK_WRT_SNAPSHOT, 3).
 
+-define(SUP, osiris_server_sup).

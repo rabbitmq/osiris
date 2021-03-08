@@ -82,7 +82,7 @@ init(#{host := Host,
        replica_pid := ReplicaPid,
        leader_pid := LeaderPid,
        start_offset := {StartOffset, _} = TailInfo,
-       external_ref := ExtRef,
+       reference := ExtRef,
        connection_token := Token} =
          Args) ->
     CntId = {?MODULE, ExtRef, Host, Port},
@@ -242,15 +242,18 @@ do_sendfile(#state{socket = Sock,
                    counter = Cnt,
                    log = Log0} =
                 State0) ->
+    State = maybe_send_committed_offset(State0),
     case osiris_log:send_file(Sock, Log0) of
         {ok, Log} ->
             Offset = osiris_log:next_offset(Log) - 1,
             ok = counters:add(Cnt, ?C_CHUNKS_SENT, 1),
             ok = counters:put(Cnt, ?C_OFFSET, Offset),
-            State = maybe_send_committed_offset(State0#state{log = Log}),
-            do_sendfile(State);
+            do_sendfile(State#state{log = Log});
+        {error, _Err} ->
+            ?DEBUG("osiris_relica_reader: sendfile err ~w", [_Err]),
+            State;
         {end_of_stream, Log} ->
-            maybe_send_committed_offset(State0#state{log = Log})
+            State#state{log = Log}
     end.
 
 maybe_send_committed_offset(#state{log = Log,
