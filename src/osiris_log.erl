@@ -464,12 +464,13 @@ init(#{dir := Dir,
                    element(1, TailInfo)]),
             {ok, Fd} = open(Filename, ?FILE_OPTS_WRITE),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
-            %% recover tracking info
-            {Tracking, Writers} = recover_tracking(Filename),
-            %% truncate segment to size in case there is trailing data
-            {ok, _} = file:position(Fd, Size),
+            {ok, Size} = file:position(Fd, Size),
             ok = file:truncate(Fd),
             {ok, _} = file:position(IdxFd, eof),
+            %% recover tracking info
+            {Tracking, Writers} = recover_tracking(Fd),
+            {ok, Size} = file:position(Fd, Size),
+            %% truncate segment to size in case there is trailing data
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
@@ -1845,12 +1846,12 @@ part(Len, [B | L]) when Len > 0 ->
             [binary:part(B, {0, Len})]
     end.
 
-recover_tracking(File) ->
+recover_tracking(Fd) ->
     %% TODO: if the first chunk in the segment isn't a tracking snapshot and
     %% there are prior segments we could scan at least two segments increasing
     %% the chance of encountering a snapshot and thus ensure we don't miss any
     %% tracking entries
-    {ok, Fd} = file:open(File, [read, binary, raw]),
+    {ok, 0} = file:position(Fd, 0),
     {ok, ?LOG_HEADER_SIZE} = file:position(Fd, ?LOG_HEADER_SIZE),
     recover_tracking(Fd, #{}, #{}).
 
@@ -1897,7 +1898,6 @@ recover_tracking(Fd, Trk, Wrt) ->
                                                    Wrt))
             end;
         eof ->
-            file:close(Fd),
             {Trk, Wrt}
     end.
 
