@@ -65,6 +65,8 @@
 -define(C_FORCED_GCS, ?C_NUM_LOG_FIELDS + 2).
 -define(C_PACKETS, ?C_NUM_LOG_FIELDS + 3).
 -define(DEFAULT_ONE_TIME_TOKEN_TIMEOUT, 30000).
+-define(TOKEN_SIZE, 32).
+-define(DEF_REC_BUF, 408300 * 5).
 
 %%%===================================================================
 %%% API functions
@@ -120,7 +122,8 @@ init(#{name := Name,
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
     {ok, {Min, Max}} = application:get_env(port_range),
-    {Port, LSock} = open_tcp_port(Min, Max),
+    RecBuf = application:get_env(osiris, replica_recbuf, ?DEF_REC_BUF),
+    {Port, LSock} = open_tcp_port(RecBuf, Min, Max),
     Self = self(),
     spawn_link(fun() -> accept(LSock, Self) end),
     CntName = {?MODULE, ExtRef},
@@ -152,8 +155,7 @@ init(#{name := Name,
     %% spawn reader process on leader node
     {ok, HostName} = inet:gethostname(),
     {ok, Ip} = inet:getaddr(HostName, inet),
-    rand:seed(exsplus),
-    Token = crypto:strong_rand_bytes(256),
+    Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
     ReplicaReaderConf =
         #{host => Ip,
           port => Port,
@@ -204,11 +206,9 @@ init(#{name := Name,
               log = Log,
               parse_state = undefined}}.
 
-open_tcp_port(M, M) ->
+open_tcp_port(_RcvBuf, M, M) ->
     throw({error, all_busy});
-open_tcp_port(Min, Max) ->
-    %% TODO: make configurable
-    RcvBuf = 408300 * 5,
+open_tcp_port(RcvBuf, Min, Max) ->
     case gen_tcp:listen(Min,
                         [binary,
                          {packet, raw},
@@ -219,16 +219,15 @@ open_tcp_port(Min, Max) ->
         {ok, LSock} ->
             {Min, LSock};
         {error, eaddrinuse} ->
-            open_tcp_port(Min + 1, Max);
+            open_tcp_port(RcvBuf, Min + 1, Max);
         E ->
             throw(E)
     end.
 
 accept(LSock, Process) ->
-    %% TODO what if we have more than 1 connection?
     {ok, Sock} = gen_tcp:accept(LSock),
 
-    ?DEBUG("~s: sock opts ~w",
+    ?DEBUG("~s: socket accepted opts ~w",
            [?MODULE, inet:getopts(Sock, [buffer, recbuf])]),
     Process ! {socket, Sock},
     gen_tcp:controlling_process(Sock, Process),
@@ -325,7 +324,7 @@ handle_info(force_gc,
 handle_info({socket, Socket}, #?MODULE{cfg = #cfg{name = Name,
                                                   token = Token} = Cfg} = State) ->
     Timeout = application:get_env(osiris, one_time_token_timeout, ?DEFAULT_ONE_TIME_TOKEN_TIMEOUT),
-    case gen_tcp:recv(Socket, 256, Timeout) of
+    case gen_tcp:recv(Socket, ?TOKEN_SIZE, Timeout) of
         {ok, Token} ->
             %% token validated, all good we can let the flood of data begin
             ok = inet:setopts(Socket, [{active, 5}]),
