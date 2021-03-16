@@ -699,6 +699,9 @@ delete_segment(#seg_info{file = File, index = Index}) ->
     ok = file:delete(Index),
     ok.
 
+truncate_to(_Name, _, []) ->
+    %% the target log is empty
+    ok;
 truncate_to(_Name, [], SegInfos) ->
     %% ?????  this means the entire log is out
     [begin ok = delete_segment(I) end || I <- SegInfos],
@@ -1189,6 +1192,7 @@ delete_directory(#{name := Name} = Config) when is_map(Config) ->
     delete_directory(Name);
 delete_directory(Name) when is_list(Name) ->
     Dir = directory(Name),
+    ?DEBUG("osiris_log: deleting directory ~s", [Dir]),
     case file:list_dir(Dir) of
         {ok, Files} ->
             [ok =

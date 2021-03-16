@@ -45,6 +45,7 @@ all_tests() ->
      init_data_reader_empty_log,
      init_data_reader_truncated,
      init_epoch_offsets_empty,
+     init_epoch_offsets_empty_writer,
      init_epoch_offsets,
      init_epoch_offsets_multi_segment,
      init_epoch_offsets_multi_segment2,
@@ -505,6 +506,21 @@ init_data_reader_truncated(Config) ->
     ok.
 
 init_epoch_offsets_empty(Config) ->
+    EpochChunks =
+        [{1, [<<"one">>]}, {1, [<<"two">>]}, {1, [<<"three">>, <<"four">>]}],
+    Conf = ?config(osiris_conf, Config),
+    LDir = ?config(leader_dir, Config),
+    FDir = ?config(follower1_dir, Config),
+    LogInit = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(LogInit),
+    EOffs = [{1, 0}],
+    Log0 =
+        osiris_log:init_acceptor(EOffs, Conf#{dir => FDir, epoch => 1}),
+    {0, empty} = osiris_log:tail_info(Log0),
+    osiris_log:close(Log0),
+    ok.
+
+init_epoch_offsets_empty_writer(Config) ->
     EpochChunks =
         [{1, [<<"one">>]}, {1, [<<"two">>]}, {1, [<<"three">>, <<"four">>]}],
     Conf = ?config(osiris_conf, Config),

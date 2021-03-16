@@ -117,6 +117,7 @@ single_node_write(Config) ->
     ok.
 
 cluster_write(Config) ->
+    ok = logger:set_primary_config(level, all),
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
     [LeaderNode | Replicas] =
@@ -127,18 +128,30 @@ cluster_write(Config) ->
           epoch => 1,
           leader_node => LeaderNode,
           replica_nodes => Replicas},
-    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    {ok, #{leader_pid := Leader,
+           replica_pids := ReplicaPids}} = osiris:start_cluster(Conf0),
     ok = osiris:write(Leader, WriterId, 42, <<"mah-data">>),
     ok = osiris:write(Leader, WriterId, 43, <<"mah-data2">>),
     receive
         {osiris_written, _, undefined, [42, 43]} ->
-            ok
+            ok;
+        {osiris_written, _, undefined, [42]} ->
+            receive
+                {osiris_written, _, undefined, [43]} ->
+                    ok
+            after 2000 ->
+                      flush(),
+                      exit(osiris_written_timeout_2)
+            end
     after 2000 ->
-        flush(),
-        exit(osiris_written_timeout)
+              flush(),
+              exit(osiris_written_timeout)
     end,
-    ok =
-        validate_log(Leader, [{0, <<"mah-data">>}, {1, <<"mah-data2">>}]),
+    %% give time for all members to receive data
+    timer:sleep(500),
+    [begin
+         ok = validate_log(P, [{0, <<"mah-data">>}, {1, <<"mah-data2">>}])
+     end || P <- [Leader | ReplicaPids]],
     [slave:stop(N) || N <- Nodes],
     ok.
 
@@ -1060,9 +1073,9 @@ start_child_node(N, PrivDir) ->
     ct:pal("starting child node with ~s~n", [Pa]),
     {ok, S} = slave:start_link(Host, N, Pa),
     ct:pal("started child node ~w ~w~n", [S, Host]),
+    ok = rpc:call(S, osiris, configure_logger, [logger]),
     Res = rpc:call(S, application, ensure_all_started, [osiris]),
     ok = rpc:call(S, logger, set_primary_config, [level, all]),
-    ok = rpc:call(S, osiris, configure_logger, [logger]),
 
     ct:pal("application start result ~p", [Res]),
     S.
