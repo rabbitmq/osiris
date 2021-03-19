@@ -435,6 +435,7 @@ parse_chunk(<<?MAGIC:4/unsigned,
               _Crc:32/integer,
               Size:32/unsigned,
               TSize:32/unsigned,
+              _Reserved:32,
               _Data:Size/binary,
               _TData:TSize/binary,
               Rem/binary>> =
@@ -457,6 +458,7 @@ parse_chunk(<<?MAGIC:4/unsigned,
               _Crc:32/integer,
               Size:32/unsigned,
               TSize:32/unsigned,
+              _Reserved:32,
               Partial/binary>> =
                 All,
             undefined, Acc) ->
