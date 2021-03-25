@@ -30,7 +30,7 @@
                                                             domain => [osiris]}),
        ok).
 
--define(C_NUM_LOG_FIELDS, 3).
+-define(C_NUM_LOG_FIELDS, 4).
 
 -define(MAGIC, 5).
 %% chunk format version

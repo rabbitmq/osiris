@@ -46,6 +46,7 @@ all_tests() ->
      update_retention_replica,
      tracking,
      tracking_many,
+     tracking_all,
      tracking_retention,
      single_node_deduplication,
      single_node_deduplication_2,
@@ -886,6 +887,36 @@ tracking_many(Config) ->
     ok = osiris:write_tracking(Leader, TrackId, 3),
     timer:sleep(250),
     ?assertEqual(3, osiris:read_tracking(Leader, TrackId)),
+    ok.
+
+tracking_all(Config) ->
+    Name = ?config(cluster_name, Config),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          replica_nodes => [],
+          dir => ?config(priv_dir, Config)},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
+    receive
+        {osiris_written, _Name, _, [42]} ->
+            ok
+    after 2000 ->
+        flush(),
+        exit(osiris_written_timeout)
+    end,
+    TrackId1 = <<"tracking-id-1">>,
+    TrackId2 = <<"tracking-id-2">>,
+    TrackId3 = <<"tracking-id-3">>,
+    ?assertEqual(#{}, osiris:read_tracking(Leader)),
+    ok = osiris:write_tracking(Leader, TrackId1, 0),
+    ok = osiris:write_tracking(Leader, TrackId2, 1),
+    ok = osiris:write_tracking(Leader, TrackId3, 2),
+    timer:sleep(250),
+    ?assertEqual(#{TrackId1 => 0,
+                   TrackId2 => 1,
+                   TrackId3 => 2}, osiris:read_tracking(Leader)),
     ok.
 
 tracking_retention(Config) ->

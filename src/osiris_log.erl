@@ -31,6 +31,7 @@
          get_current_epoch/1,
          get_directory/1,
          get_name/1,
+         get_default_max_segment_size/0,
          counters_ref/1,
          tracking/1,
          writers/1,
@@ -60,10 +61,13 @@
          first_offset,
          %% number of chunks read or written
          %% incremented even if a reader only reads the header
-         chunks]).
+         chunks,
+         %% number of segments
+         segments]).
 -define(C_OFFSET, 1).
 -define(C_FIRST_OFFSET, 2).
 -define(C_CHUNKS, 3).
+-define(C_SEGMENTS, 4).
 
 %% Specification of the Log format.
 %%
@@ -436,6 +440,7 @@ init(#{dir := Dir,
     %% it hasn't necessarily been written yet, for an empty log the first offset
     %% is initialised to 0 however and will be updated after each retention run.
     counters:put(Cnt, ?C_OFFSET, -1),
+    counters:put(Cnt, ?C_SEGMENTS, 0),
     Cfg = #cfg{directory = Dir,
                name = Name,
                max_segment_size = MaxSize,
@@ -472,6 +477,7 @@ init(#{dir := Dir,
 
             counters:put(Cnt, ?C_FIRST_OFFSET, FstChId),
             counters:put(Cnt, ?C_OFFSET, ChId + N - 1),
+            counters:put(Cnt, ?C_SEGMENTS, length(Infos)),
             ?INFO("~s:~s/~b: next offset ~b first offset ~b",
                   [?MODULE,
                    ?FUNCTION_NAME,
@@ -785,7 +791,7 @@ truncate_to(Name, [{E, ChId} | NextEOs], SegInfos) ->
                            {invalid_last_offset_epoch, offset(), offset()}}.
 init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
     SegInfos = build_log_overview(Dir),
-    Range = range_from_segment_infos(SegInfos),
+    {Range, _} = range_from_segment_infos(SegInfos),
     ?INFO("osiris_segment:init_data_reader/2 at ~b prev "
           "~w range: ~w",
           [StartOffset, PrevEO, Range]),
@@ -923,7 +929,7 @@ init_data_reader_from_segment(#{dir := Dir, name := Name} = Config,
                               empty | {From :: offset(), To :: offset()}}}.
 init_offset_reader({abs, Offs}, #{dir := Dir} = Conf) ->
     %% TODO: some unnecessary computation here
-    Range = range_from_segment_infos(build_log_overview(Dir)),
+    {Range, _} = range_from_segment_infos(build_log_overview(Dir)),
     case Range of
         empty ->
             {error, {offset_out_of_range, Range}};
@@ -968,7 +974,7 @@ init_offset_reader(OffsetSpec,
                      offset_ref := OffsetRef} =
                        Conf) ->
     SegInfo = build_log_overview(Dir),
-    Range = range_from_segment_infos(SegInfo),
+    {Range, _} = range_from_segment_infos(SegInfo),
     ?INFO("osiris_log:init_offset_reader/2 spec ~w range "
           "~w ",
           [OffsetSpec, Range]),
@@ -1041,6 +1047,10 @@ get_directory(#?MODULE{cfg = #cfg{directory = Dir}}) ->
 -spec get_name(state()) -> string().
 get_name(#?MODULE{cfg = #cfg{name = Name}}) ->
     Name.
+
+-spec get_default_max_segment_size() -> non_neg_integer().
+get_default_max_segment_size() ->
+    ?DEFAULT_MAX_SEGMENT_SIZE_B.
 
 -spec counters_ref(state()) -> counters:counters_ref().
 counters_ref(#?MODULE{cfg = #cfg{counter = C}}) ->
@@ -1449,7 +1459,7 @@ overview(Dir) ->
         [] ->
             {empty, []};
         SegInfos ->
-            Range = range_from_segment_infos(SegInfos),
+            {Range, _} = range_from_segment_infos(SegInfos),
             OffsEpochs = last_offset_epochs(SegInfos),
             {Range, OffsEpochs}
     end.
@@ -1689,19 +1699,19 @@ sendfile(Fd, Sock, Pos, ToSend) ->
 
 range_from_segment_infos([#seg_info{first = undefined,
                                     last = undefined}]) ->
-    empty;
+    {empty, 1};
 range_from_segment_infos([#seg_info{first =
                                         #chunk_info{id = FirstChId},
                                     last =
                                         #chunk_info{id = LastChId,
                                                     num = LastNumRecs}}]) ->
-    {FirstChId, LastChId + LastNumRecs - 1};
+    {{FirstChId, LastChId + LastNumRecs - 1}, 1};
 range_from_segment_infos([#seg_info{first =
                                         #chunk_info{id = FirstChId}}
                           | Rem]) ->
     #seg_info{last = #chunk_info{id = LastChId, num = LastNumRecs}} =
         lists:last(Rem),
-    {FirstChId, LastChId + LastNumRecs - 1}.
+    {{FirstChId, LastChId + LastNumRecs - 1}, length(Rem) + 1}.
 
 %% find the segment the offset is in _or_ if the offset is the very next
 %% chunk offset it will return the last segment
@@ -1776,6 +1786,7 @@ open_new_segment(#?MODULE{cfg =
     %% we always move to the end of the file
     {ok, _} = file:position(Fd, eof),
     {ok, _} = file:position(IdxFd, eof),
+    counters:add(Cnt, ?C_SEGMENTS, 1),
 
     FstOffs = counters:get(Cnt, ?C_FIRST_OFFSET),
     %% filter tracking ids lower than first offset
@@ -2088,8 +2099,9 @@ trigger_retention_eval(#?MODULE{cfg =
         osiris_retention:eval(Dir, RetentionSpec,
                               %% updates the first offset after retention has
                               %% been evaluated
-                              fun ({Fst, _}) when is_integer(Fst) ->
-                                      counters:put(Cnt, ?C_FIRST_OFFSET, Fst);
+                              fun ({{Fst, _}, Seg}) when is_integer(Fst) ->
+                                      counters:put(Cnt, ?C_FIRST_OFFSET, Fst),
+                                      counters:put(Cnt, ?C_SEGMENTS, Seg);
                                   (_) ->
                                       ok
                               end),

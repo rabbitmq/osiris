@@ -12,6 +12,7 @@
 -export([write/4,
          write_tracking/3,
          read_tracking/2,
+         read_tracking/1,
          fetch_writer_seq/2,
          init_reader/2,
          register_offset_listener/2,
@@ -119,6 +120,10 @@ write_tracking(Pid, TrackingId, Offset) ->
 -spec read_tracking(pid(), binary()) -> offset() | undefined.
 read_tracking(Pid, TrackingId) ->
     osiris_writer:read_tracking(Pid, TrackingId).
+
+-spec read_tracking(pid()) -> #{binary() => offset()} | undefined.
+read_tracking(Pid) ->
+    osiris_writer:read_tracking(Pid).
 
 -spec fetch_writer_seq(pid(), binary()) ->
                           non_neg_integer() | undefined.

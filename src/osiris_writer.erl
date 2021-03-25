@@ -22,6 +22,7 @@
          write/5,
          write_tracking/3,
          read_tracking/2,
+         read_tracking/1,
          query_writers/2,
          init/1,
          handle_batch/2,
@@ -125,6 +126,9 @@ write_tracking(Pid, TrackingId, Offset)
 
 read_tracking(Pid, TrackingId) ->
     gen_batch_server:call(Pid, {read_tracking, TrackingId}).
+
+read_tracking(Pid) ->
+    gen_batch_server:call(Pid, read_tracking).
 
 query_writers(Pid, QueryFun) ->
     gen_batch_server:call(Pid, {query_writers, QueryFun}).
@@ -317,6 +321,11 @@ handle_command({call, From, {read_tracking, TrackingId}},
     Tracking = osiris_log:tracking(State#?MODULE.log),
     Replies =
         [{reply, From, maps:get(TrackingId, Tracking, undefined)} | Replies0],
+    {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
+handle_command({call, From, read_tracking},
+               {State, Records, Replies0, Corrs, Trk, Wrt, Dupes}) ->
+    Tracking = osiris_log:tracking(State#?MODULE.log),
+    Replies = [{reply, From, Tracking} | Replies0],
     {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
 handle_command({cast, {register_data_listener, Pid, Offset}},
                {#?MODULE{data_listeners = Listeners} = State0,
