@@ -105,6 +105,8 @@
 %%   +---------------------------------------------------------------+
 %%   | Trailer length                                                |
 %%   +---------------------------------------------------------------+
+%%   | Reserved                                                      |
+%%   +---------------------------------------------------------------+
 %%   | Contiguous list of Data entries                               |
 %%   : (<data length> bytes)                                         :
 %%   :                                                               :
@@ -142,6 +144,8 @@
 %% Data length = unsigned 32-bit integer
 %%
 %% Trailer length = unsigned 32-bit integer
+%%
+%% Reserved = 4 bytes reserved for future extensions
 %%
 %% Data Entry format
 %% =================
@@ -605,6 +609,7 @@ accept_chunk([<<?MAGIC:4/unsigned,
                 Crc:32/integer,
                 DataSize:32/unsigned,
                 _TrailerSize:32/unsigned,
+                _Reserved:32,
                 Data/binary>>
               | DataParts] =
                  Chunk,
@@ -834,7 +839,8 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
                                    PrevO:64/unsigned,
                                    _Crc:32/integer,
                                    _DataSize:32/unsigned,
-                                   _TrailerSize:32/unsigned>>} ->
+                                   _TrailerSize:32/unsigned,
+                                   _Reserved:32>>} ->
                                     ok = file:close(Fd),
                                     {ok,
                                      init_data_reader_from_segment(Config,
@@ -853,7 +859,8 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
                                    PrevO:64/unsigned,
                                    _Crc:32/integer,
                                    _DataSize:32/unsigned,
-                                   _TrailerSize:32/unsigned>>} ->
+                                   _TrailerSize:32/unsigned,
+                                   _Reserved:32>>} ->
                                     ok = file:close(Fd),
                                     {error,
                                      {invalid_last_offset_epoch, PrevE, OtherE}}
@@ -1219,7 +1226,8 @@ header_info(Fd, Pos) ->
        Offset:64/unsigned,
        _Crc:32/integer,
        Size:32/unsigned,
-       TSize:32/unsigned>>} =
+       TSize:32/unsigned,
+       _Reserved:32>>} =
         file:read(Fd, ?HEADER_SIZE_B),
     {ChType, Offset, Epoch, Num, Size, TSize}.
 
@@ -1387,7 +1395,8 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
                    LastChId:64/unsigned,
                    _LastCrc:32/integer,
                    LastSize:32/unsigned,
-                   LastTSize:32/unsigned>>} =
+                   LastTSize:32/unsigned,
+                   _Reserved:32>>} =
                     file:read(Fd, ?HEADER_SIZE_B),
                 Size = LastChunkPos + LastSize + LastTSize + ?HEADER_SIZE_B,
                 {ok, Eof} = file:position(Fd, eof),
@@ -1584,8 +1593,8 @@ make_chunk(Blobs, Writers, ChType, Timestamp, Epoch, Next) ->
         Next:64/unsigned,
         Crc:32/integer,
         Size:32/unsigned,
-        TSize:32/unsigned
-      >>,
+        TSize:32/unsigned,
+        0:32/unsigned>>,
       EData, TData],
      NumRecords}.
 
@@ -1872,7 +1881,8 @@ recover_tracking(Fd, Trk, Wrt) ->
            ChunkId:64/unsigned,
            _Crc:32/integer,
            Size:32/unsigned,
-           TSize:32/unsigned>>} ->
+           TSize:32/unsigned,
+           _Reserved:32>>} ->
             case ChType of
                 ?CHNK_TRK_DELTA ->
                     %% tracking is written a single record so we don't
@@ -1974,7 +1984,8 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir},
                    NextChId:64/unsigned,
                    Crc:32/integer,
                    DataSize:32/unsigned,
-                   TrailerSize:32/unsigned>> =
+                   TrailerSize:32/unsigned,
+                   _Reserved:32>> =
                      HeaderData} ->
                     {ok,
                      #{chunk_id => NextChId,
@@ -2032,7 +2043,8 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir},
                    UnexpectedChId:64/unsigned,
                    _Crc:32/integer,
                    _DataSize:32/unsigned,
-                   _TrailerSize:32/unsigned>>} ->
+                   _TrailerSize:32/unsigned,
+                   _Reserved:32>>} ->
                     %% TODO: we may need to return the new state here if
                     %% we've crossed segments
                     {ok, Pos} = file:position(Fd, Pos),
