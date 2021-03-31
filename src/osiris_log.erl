@@ -1175,8 +1175,12 @@ send_file(Sock,
             case ChType == ?CHNK_USER orelse RType == data of
                 true ->
                     _ = Callback(Header, ToSend),
-                    ok = sendfile(Fd, Sock, Pos, ToSend),
-                    {ok, State};
+                    case sendfile(Fd, Sock, Pos, ToSend) of
+                        ok ->
+                            {ok, State};
+                        Err ->
+                            Err
+                    end;
                 false ->
                     %% skip chunk and recurse
                     send_file(Sock, State, Callback)
@@ -1665,7 +1669,9 @@ sendfile(Fd, Sock, Pos, ToSend) ->
             %% TODO add counter for this?
             sendfile(Fd, Sock, Pos, ToSend);
         {ok, BytesSent} ->
-            sendfile(Fd, Sock, Pos + BytesSent, ToSend - BytesSent)
+            sendfile(Fd, Sock, Pos + BytesSent, ToSend - BytesSent);
+        {error, _} = Err ->
+            Err
     end.
 
 range_from_segment_infos([#seg_info{first = undefined,
