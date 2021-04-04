@@ -11,7 +11,8 @@
          new/2,
          fetch/1,
          overview/0,
-         delete/1]).
+         delete/1,
+         delete_all/1]).
 
 %% holds static or rarely changing fields
 -record(cfg, {}).
@@ -47,6 +48,12 @@ fetch(Name) ->
 -spec delete(term()) -> ok.
 delete(Name) ->
     true = ets:delete(?MODULE, Name),
+    ok.
+
+-spec delete_all(term()) -> ok.
+delete_all(Name) ->
+    Match = {{'_', Name},'_', '_'},
+    true = ets:match_delete(?MODULE, Match),
     ok.
 
 -spec overview() -> #{name() => #{atom() => non_neg_integer()}}.

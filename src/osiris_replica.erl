@@ -60,10 +60,11 @@
 
 -export_type([state/0]).
 
--define(ADD_COUNTER_FIELDS, [committed_offset, forced_gcs, packets]).
+-define(ADD_COUNTER_FIELDS, [committed_offset, forced_gcs, packets, readers]).
 -define(C_COMMITTED_OFFSET, ?C_NUM_LOG_FIELDS + 1).
 -define(C_FORCED_GCS, ?C_NUM_LOG_FIELDS + 2).
 -define(C_PACKETS, ?C_NUM_LOG_FIELDS + 3).
+-define(C_READERS, ?C_NUM_LOG_FIELDS + 4).
 -define(DEFAULT_ONE_TIME_TOKEN_TIMEOUT, 30000).
 -define(TOKEN_SIZE, 32).
 -define(DEF_REC_BUF, 408300 * 5).
@@ -255,14 +256,18 @@ handle_call(get_reader_context, _From,
             #?MODULE{cfg =
                          #cfg{offset_ref = ORef,
                               name = Name,
-                              directory = Dir},
+                              directory = Dir,
+                              reference = Ref,
+                              counter = CntRef},
                      committed_offset = COffs} =
                 State) ->
     Reply =
         #{dir => Dir,
           name => Name,
           committed_offset => COffs,
-          offset_ref => ORef},
+          offset_ref => ORef,
+          reference => Ref,
+          readers_counter_fun => fun(Inc) -> counters:add(CntRef, ?C_READERS, Inc) end},
     {reply, Reply, State};
 handle_call({update_retention, Retention}, _From,
             #?MODULE{log = Log0} = State) ->

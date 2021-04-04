@@ -90,7 +90,8 @@ init_per_testcase(TestCase, Config) ->
      {osiris_conf,
       #{dir => Dir,
         name => atom_to_list(TestCase),
-        epoch => 1}},
+        epoch => 1,
+        readers_count => fun(_) -> ok end}},
      {dir, Dir}
      | Config].
 

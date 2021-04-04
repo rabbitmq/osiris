@@ -356,7 +356,8 @@
          counter_id :: term(),
          %% the maximum number of active writer deduplication sessions
          %% that will be included in snapshots written to new segments
-         max_writers = 255 :: non_neg_integer()}).
+         max_writers = 255 :: non_neg_integer(),
+         readers_counter_fun = fun(_) -> ok end :: function()}).
 -record(read,
         {type :: data | offset,
          offset_ref :: undefined | atomics:atomics_ref(),
@@ -789,9 +790,10 @@ truncate_to(Name, [{E, ChId} | NextEOs], SegInfos) ->
                             empty | {offset(), offset()}}} |
                           {error,
                            {invalid_last_offset_epoch, offset(), offset()}}.
-init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
+init_data_reader({StartOffset, PrevEO}, #{dir := Dir,
+                                          readers_counter_fun := Fun} = Config) ->
     SegInfos = build_log_overview(Dir),
-    {Range, _} = range_from_segment_infos(SegInfos),
+    Range = range_from_segment_infos(SegInfos),
     ?INFO("osiris_segment:init_data_reader/2 at ~b prev "
           "~w range: ~w",
           [StartOffset, PrevEO, Range]),
@@ -808,7 +810,7 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
                     exit({segment_not_found, F, SegInfos});
                 {_, StartSegmentInfo} ->
                     {ok,
-                     init_data_reader_from_segment(Config, StartSegmentInfo, F)}
+                     init_data_reader_from_segment(Config, StartSegmentInfo, F, Fun)}
             end;
         empty when StartOffset > 0 ->
             {error, {offset_out_of_range, Range}};
@@ -830,7 +832,8 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
                             {ok,
                              init_data_reader_from_segment(Config,
                                                            StartSegmentInfo,
-                                                           StartOffset)}
+                                                           StartOffset,
+                                                           Fun)}
                     end;
                 {PrevE, PrevO} ->
                     case find_segment_for_offset(PrevO, SegInfos) of
@@ -865,7 +868,8 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
                                                                    element(2,
                                                                            find_segment_for_offset(StartOffset,
                                                                                                    SegInfos)),
-                                                                   StartOffset)};
+                                                                   StartOffset,
+                                                                   Fun)};
                                 {ok,
                                  <<?MAGIC:4/unsigned,
                                    ?VERSION:4/unsigned,
@@ -889,17 +893,19 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
 
 init_data_reader_from_segment(#{dir := Dir, name := Name} = Config,
                               #seg_info{file = StartSegment, index = IndexFile},
-                              NextOffs) ->
+                              NextOffs, CounterFun) ->
     {ok, Fd} = file:open(StartSegment, [raw, binary, read]),
     %% TODO: next offset needs to be a chunk offset
     {_, FilePos} = scan_index(IndexFile, Fd, NextOffs),
     {ok, _Pos} = file:position(Fd, FilePos),
     Cnt = make_counter(Config),
     counters:put(Cnt, ?C_OFFSET, NextOffs - 1),
+    CounterFun(1),
     #?MODULE{cfg =
                  #cfg{directory = Dir,
                       counter = Cnt,
-                      name = Name},
+                      name = Name,
+                      readers_counter_fun = CounterFun},
              mode =
                  #read{type = data,
                        offset_ref = maps:get(offset_ref, Config, undefined),
@@ -929,7 +935,7 @@ init_data_reader_from_segment(#{dir := Dir, name := Name} = Config,
                               empty | {From :: offset(), To :: offset()}}}.
 init_offset_reader({abs, Offs}, #{dir := Dir} = Conf) ->
     %% TODO: some unnecessary computation here
-    {Range, _} = range_from_segment_infos(build_log_overview(Dir)),
+    Range = range_from_segment_infos(build_log_overview(Dir)),
     case Range of
         empty ->
             {error, {offset_out_of_range, Range}};
@@ -971,10 +977,11 @@ init_offset_reader({timestamp, Ts}, #{dir := Dir} = Conf) ->
 init_offset_reader(OffsetSpec,
                    #{dir := Dir,
                      name := Name,
-                     offset_ref := OffsetRef} =
+                     offset_ref := OffsetRef,
+                     readers_counter_fun := Fun} =
                        Conf) ->
     SegInfo = build_log_overview(Dir),
-    {Range, _} = range_from_segment_infos(SegInfo),
+    Range = range_from_segment_infos(SegInfo),
     ?INFO("osiris_log:init_offset_reader/2 spec ~w range "
           "~w ",
           [OffsetSpec, Range]),
@@ -1012,11 +1019,15 @@ init_offset_reader(OffsetSpec,
                             IdxResult
                     end,
                 {ok, _Pos} = file:position(Fd, FilePos),
+                Cnt = make_counter(Conf),
+                Fun(1),
                 {ok,
                  #?MODULE{cfg =
                               #cfg{directory = Dir,
-                                   counter = make_counter(Conf),
-                                   name = Name},
+                                   counter = Cnt,
+                                   name = Name,
+                                   readers_counter_fun = Fun
+                                  },
                           mode =
                               #read{type = offset,
                                     offset_ref = OffsetRef,
@@ -1213,8 +1224,10 @@ send_file(Sock,
     end.
 
 -spec close(state()) -> ok.
-close(#?MODULE{cfg = #cfg{counter_id = CntId}, fd = Fd}) ->
+close(#?MODULE{cfg = #cfg{counter_id = CntId,
+                          readers_counter_fun = Fun}, fd = Fd}) ->
     _ = file:close(Fd),
+    Fun(-1),
     case CntId of
         undefined ->
             ok;
@@ -1459,7 +1472,7 @@ overview(Dir) ->
         [] ->
             {empty, []};
         SegInfos ->
-            {Range, _} = range_from_segment_infos(SegInfos),
+            Range = range_from_segment_infos(SegInfos),
             OffsEpochs = last_offset_epochs(SegInfos),
             {Range, OffsEpochs}
     end.
@@ -1477,8 +1490,9 @@ update_retention(Retention,
 -spec evaluate_retention(file:filename(), [retention_spec()]) ->
                             range().
 evaluate_retention(Dir, Specs) ->
-    SegInfos = build_log_overview(Dir),
-    range_from_segment_infos(evaluate_retention0(SegInfos, Specs)).
+    SegInfos0 = build_log_overview(Dir),
+    SegInfos = evaluate_retention0(SegInfos0, Specs),
+    {range_from_segment_infos(SegInfos), length(SegInfos)}.
 
 evaluate_retention0(Infos, []) ->
     %% we should never hit empty infos as one should always be left
@@ -1699,19 +1713,19 @@ sendfile(Fd, Sock, Pos, ToSend) ->
 
 range_from_segment_infos([#seg_info{first = undefined,
                                     last = undefined}]) ->
-    {empty, 1};
+    empty;
 range_from_segment_infos([#seg_info{first =
                                         #chunk_info{id = FirstChId},
                                     last =
                                         #chunk_info{id = LastChId,
                                                     num = LastNumRecs}}]) ->
-    {{FirstChId, LastChId + LastNumRecs - 1}, 1};
+    {FirstChId, LastChId + LastNumRecs - 1};
 range_from_segment_infos([#seg_info{first =
                                         #chunk_info{id = FirstChId}}
                           | Rem]) ->
     #seg_info{last = #chunk_info{id = LastChId, num = LastNumRecs}} =
         lists:last(Rem),
-    {{FirstChId, LastChId + LastNumRecs - 1}, length(Rem) + 1}.
+    {FirstChId, LastChId + LastNumRecs - 1}.
 
 %% find the segment the offset is in _or_ if the offset is the very next
 %% chunk offset it will return the last segment
