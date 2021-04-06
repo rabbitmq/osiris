@@ -39,10 +39,8 @@
          committed_offset = -1 :: -1 | osiris:offset(),
          offset_listener :: undefined | osiris:offset()}).
 
--define(COUNTER_FIELDS, [chunks_sent, offset, offset_listeners]).
--define(C_CHUNKS_SENT, 1).
--define(C_OFFSET, 2).
--define(C_OFFSET_LISTENERS, 3).
+-define(COUNTER_FIELDS, [offset_listeners]).
+-define(C_OFFSET_LISTENERS, ?C_NUM_LOG_FIELDS + 1).
 
 %%%===================================================================
 %%% API functions
@@ -86,9 +84,10 @@ init(#{host := Host,
        connection_token := Token} =
          Args) ->
     CntId = {?MODULE, ExtRef, Host, Port},
-    CntRef = osiris_counters:new(CntId, ?COUNTER_FIELDS),
+    CntSpec = {CntId, ?COUNTER_FIELDS},
     %% TODO: handle errors
-    {ok, Log} = osiris_writer:init_data_reader(LeaderPid, TailInfo),
+    {ok, Log} = osiris_writer:init_data_reader(LeaderPid, TailInfo, CntSpec),
+    CntRef = osiris_log:counters_ref(Log),
     ?INFO("starting replica reader ~s at offset ~b Args: ~p",
           [Name, osiris_log:next_offset(Log), Args]),
     SndBuf = 146988 * 10,
@@ -239,15 +238,11 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 
 do_sendfile(#state{socket = Sock,
-                   counter = Cnt,
                    log = Log0} =
                 State0) ->
     State = maybe_send_committed_offset(State0),
     case osiris_log:send_file(Sock, Log0) of
         {ok, Log} ->
-            Offset = osiris_log:next_offset(Log) - 1,
-            ok = counters:add(Cnt, ?C_CHUNKS_SENT, 1),
-            ok = counters:put(Cnt, ?C_OFFSET, Offset),
             do_sendfile(State#state{log = Log});
         {error, _Err} ->
             ?DEBUG("osiris_relica_reader: sendfile err ~w", [_Err]),

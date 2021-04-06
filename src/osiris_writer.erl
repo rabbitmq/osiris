@@ -16,6 +16,7 @@
          start/1,
          overview/1,
          init_data_reader/2,
+         init_data_reader/3,
          register_data_listener/2,
          ack/2,
          write/5,
@@ -88,6 +89,12 @@ overview(Pid) when node(Pid) == node() ->
 
 init_data_reader(Pid, TailInfo) when node(Pid) == node() ->
     Ctx = gen_batch_server:call(Pid, get_reader_context),
+    osiris_log:init_data_reader(TailInfo, Ctx).
+
+init_data_reader(Pid, TailInfo, {_, _} = CounterSpec)
+  when node(Pid) == node() ->
+    Ctx0 = gen_batch_server:call(Pid, get_reader_context),
+    Ctx = Ctx0#{counter_spec => CounterSpec},
     osiris_log:init_data_reader(TailInfo, Ctx).
 
 register_data_listener(Pid, Offset) ->

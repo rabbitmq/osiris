@@ -51,7 +51,16 @@
 -define(TRK_SNAP, 1).
 -define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
 -define(INDEX_RECORD_SIZE_B, 28).
--define(COUNTER_FIELDS, [offset, first_offset, chunks]).
+-define(COUNTER_FIELDS,
+        [
+         %% the last offset (not chunk id) in the log (writers)
+         %% the last offset read (readers)
+         offset,
+         %% not updated for readers
+         first_offset,
+         %% number of chunks read or written
+         %% incremented even if a reader only reads the header
+         chunks]).
 -define(C_OFFSET, 1).
 -define(C_FIRST_OFFSET, 2).
 -define(C_CHUNKS, 3).
@@ -876,9 +885,11 @@ init_data_reader_from_segment(#{dir := Dir, name := Name} = Config,
     %% TODO: next offset needs to be a chunk offset
     {_, FilePos} = scan_index(IndexFile, Fd, NextOffs),
     {ok, _Pos} = file:position(Fd, FilePos),
+    Cnt = make_counter(Config),
+    counters:put(Cnt, ?C_OFFSET, NextOffs - 1),
     #?MODULE{cfg =
                  #cfg{directory = Dir,
-                      counter = make_counter(Config),
+                      counter = Cnt,
                       name = Name},
              mode =
                  #read{type = data,
@@ -1094,7 +1105,6 @@ read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
            trailer_size := TrailerSize},
          #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State} ->
             {ok, BlobData} = file:read(Fd, DataSize),
-            %% position after trailer
             {ok, TrailerData} = file:read(Fd, TrailerSize),
             validate_crc(ChId, Crc, BlobData),
             {ok, {ChType, ChId, Epoch, HeaderData, BlobData, TrailerData},
@@ -1969,7 +1979,8 @@ trim_writers(Max, Writers) ->
                   undefined, Writers),
     trim_writers(Max, maps:remove(ToRemove, Writers)).
 
-read_header0(#?MODULE{cfg = #cfg{directory = Dir},
+read_header0(#?MODULE{cfg = #cfg{directory = Dir,
+                                 counter = CntRef},
                       mode = #read{next_offset = NextChId} = Read,
                       current_file = CurFile,
                       fd = Fd} =
@@ -1993,6 +2004,8 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir},
                    TrailerSize:32/unsigned,
                    _Reserved:32>> =
                      HeaderData} ->
+                    counters:put(CntRef, ?C_OFFSET, NextChId + NumRecords),
+                    counters:add(CntRef, ?C_CHUNKS, 1),
                     {ok,
                      #{chunk_id => NextChId,
                        epoch => Epoch,

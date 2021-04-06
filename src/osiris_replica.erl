@@ -323,7 +323,8 @@ handle_info(force_gc,
     {noreply, State};
 handle_info({socket, Socket}, #?MODULE{cfg = #cfg{name = Name,
                                                   token = Token} = Cfg} = State) ->
-    Timeout = application:get_env(osiris, one_time_token_timeout, ?DEFAULT_ONE_TIME_TOKEN_TIMEOUT),
+    Timeout = application:get_env(osiris, one_time_token_timeout,
+                                  ?DEFAULT_ONE_TIME_TOKEN_TIMEOUT),
     case gen_tcp:recv(Socket, ?TOKEN_SIZE, Timeout) of
         {ok, Token} ->
             %% token validated, all good we can let the flood of data begin
