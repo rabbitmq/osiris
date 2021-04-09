@@ -91,7 +91,7 @@ init_per_testcase(TestCase, Config) ->
       #{dir => Dir,
         name => atom_to_list(TestCase),
         epoch => 1,
-        readers_count => fun(_) -> ok end}},
+        readers_counter_fun => fun(_) -> ok end}},
      {dir, Dir}
      | Config].
 
