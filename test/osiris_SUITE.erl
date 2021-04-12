@@ -34,6 +34,7 @@ all_tests() ->
      cluster_offset_listener,
      replica_offset_listener,
      cluster_restart,
+     cluster_restart_large,
      cluster_restart_new_leader,
      cluster_delete,
      cluster_failure,
@@ -475,6 +476,38 @@ cluster_restart(Config) ->
     ok =
         validate_log(Leader1,
                      [{0, <<"before-restart">>}, {1, <<"after-restart">>}]),
+    [slave:stop(N) || N <- Nodes],
+    ok.
+
+cluster_restart_large(Config) ->
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          replica_nodes => Replicas,
+          max_segment_size => 100 * 1000,
+          leader_node => LeaderNode},
+    {ok, #{leader_pid := Leader} = Conf} = osiris:start_cluster(Conf0),
+    write_n(Leader, 255, 0, 1000000, #{}),
+    CountersPre = rpc:call(LeaderNode, osiris_counters, overview, []),
+
+    osiris:stop_cluster(Conf),
+    {ok, #{leader_pid := _Leader1}} =
+        osiris:start_cluster(Conf0#{epoch => 2}),
+    %% give leader some time to discover the committed offset
+    timer:sleep(1000),
+    CountersPost = rpc:call(LeaderNode, osiris_counters, overview, []),
+    %% assert key countesr are recovered
+    ct:pal("Counters ~p", [CountersPost]),
+    Keys = [first_offset, offset],
+    ?assertEqual(
+            maps:with(Keys, CountersPre),
+            maps:with(Keys, CountersPost)
+           ),
+
     [slave:stop(N) || N <- Nodes],
     ok.
 

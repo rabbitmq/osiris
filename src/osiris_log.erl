@@ -451,13 +451,15 @@ init(#{dir := Dir,
                                                  current_epoch = Epoch}});
         [#seg_info{file = Filename,
                    index = IdxFilename,
-                   first = #chunk_info{id = FstChId},
+                   first = #chunk_info{id = _FstChId},
                    size = Size,
                    last =
                        #chunk_info{epoch = E,
                                    id = ChId,
                                    num = N}}
-         | _] ->
+         | _] = Infos ->
+            [#seg_info{first = #chunk_info{id = FstChId}} | _] =
+                lists:reverse(Infos),
             %% assert epoch is same or larger
             %% than last known epoch
             case E > Epoch of
@@ -470,11 +472,12 @@ init(#{dir := Dir,
 
             counters:put(Cnt, ?C_FIRST_OFFSET, FstChId),
             counters:put(Cnt, ?C_OFFSET, ChId + N - 1),
-            ?INFO("~s:~s/~b: next offset ~b",
+            ?INFO("~s:~s/~b: next offset ~b first offset ~b",
                   [?MODULE,
                    ?FUNCTION_NAME,
                    ?FUNCTION_ARITY,
-                   element(1, TailInfo)]),
+                   element(1, TailInfo),
+                   FstChId]),
             {ok, Fd} = open(Filename, ?FILE_OPTS_WRITE),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, Size} = file:position(Fd, Size),
@@ -1761,6 +1764,7 @@ open_new_segment(#?MODULE{cfg =
                      State0) ->
     Filename = make_file_name(NextOffset, "segment"),
     IdxFilename = make_file_name(NextOffset, "index"),
+    ?DEBUG("~s: ~s : ~s", [?MODULE, ?FUNCTION_NAME, Filename]),
     {ok, Fd} =
         file:open(
             filename:join(Dir, Filename), ?FILE_OPTS_WRITE),
