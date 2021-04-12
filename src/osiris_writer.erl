@@ -351,10 +351,13 @@ handle_command({cast, {ack, ReplicaNode, Offset}},
                 Dupes}) ->
     % ?DEBUG("osiris_writer ack from ~w at ~b", [ReplicaNode, Offset]),
     ReplicaState =
-        maps:update_with(ReplicaNode,
-                         fun(O) -> max(O, Offset) end,
-                         Offset,
-                         ReplicaState0),
+        case ReplicaState0 of
+            #{ReplicaNode := O} when Offset > O ->
+                ReplicaState0#{ReplicaNode => Offset};
+            _ ->
+                %% ignore anything else including acks from unknown replicas
+                ReplicaState0
+        end,
     State = State0#?MODULE{replica_state = ReplicaState},
     {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
 handle_command({call, From, get_reader_context},

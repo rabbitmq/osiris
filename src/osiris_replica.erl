@@ -345,7 +345,7 @@ handle_info({tcp, Socket, Bin},
                               counter = Cnt},
                      parse_state = ParseState0,
                      log = Log0} =
-                State) ->
+                State0) ->
     %% deliberately ignoring return value here as it would fail if the
     %% tcp connection has been closed and we still want to try to process
     %% any messages still in the mailbox
@@ -359,14 +359,15 @@ handle_info({tcp, Socket, Bin},
                     end,
                     {[], Log0}, OffsetChunks),
     counters:add(Cnt, ?C_PACKETS, 1),
+    State1 = State0#?MODULE{log = Log, parse_state = ParseState},
     case Acks of
         [] ->
-            ok;
+            {noreply, State1};
         _ ->
-            % ?DEBUG("replica ~w acking ~w", [node(), lists:max(Acks)]),
-            ok = osiris_writer:ack(LeaderPid, lists:max(Acks))
-    end,
-    {noreply, State#?MODULE{log = Log, parse_state = ParseState}};
+            State = notify_offset_listeners(State1),
+            ok = osiris_writer:ack(LeaderPid, lists:max(Acks)),
+            {noreply, State}
+    end;
 handle_info({tcp_passive, Socket},
             #?MODULE{cfg = #cfg{socket = Socket}} = State) ->
     %% we always top up before processing each packet so no need to do anything
@@ -484,20 +485,29 @@ notify_offset_listeners(#?MODULE{cfg =
                                      #cfg{reference = Ref,
                                           event_formatter = EvtFmt},
                                  committed_offset = COffs,
+                                 log = Log,
                                  offset_listeners = L0} =
                             State) ->
-    {Notify, L} =
-        lists:splitwith(fun({_Pid, O, _}) -> O =< COffs end, L0),
-    [begin
-         Evt =
-             wrap_osiris_event(%% the per offset listener event formatter takes precedence of
-                               %% the process scoped one
-                               select_formatter(Fmt, EvtFmt),
-                               {osiris_offset, Ref, COffs}),
-         P ! Evt
-     end
-     || {P, _, Fmt} <- Notify],
-    State#?MODULE{offset_listeners = L}.
+    case osiris_log:tail_info(Log) of
+        {_NextOffs, {_, LastChId}} ->
+            Max = min(COffs, LastChId),
+            %% do not notify offset listeners if the committed offset isn't
+            %% available locally yet
+            {Notify, L} =
+                lists:splitwith(fun({_Pid, O, _}) -> O =< Max end, L0),
+            [begin
+                 Evt =
+                 wrap_osiris_event(%% the per offset listener event formatter takes precedence of
+                   %% the process scoped one
+                   select_formatter(Fmt, EvtFmt),
+                   {osiris_offset, Ref, COffs}),
+                 P ! Evt
+             end
+             || {P, _, Fmt} <- Notify],
+            State#?MODULE{offset_listeners = L};
+        _ ->
+            State
+    end.
 
 %% INTERNAL
 
