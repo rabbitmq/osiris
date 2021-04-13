@@ -83,6 +83,7 @@ init(#{host := Host,
        reference := ExtRef,
        connection_token := Token} =
          Args) ->
+    process_flag(trap_exit, true),
     CntId = {?MODULE, ExtRef, Host, Port},
     CntSpec = {CntId, ?COUNTER_FIELDS},
     %% TODO: handle errors
@@ -202,6 +203,11 @@ handle_info({tcp_error, Socket, Error},
            "Exiting...",
            [Name, Error]),
     {stop, {tcp_error, Error}, State};
+handle_info({'EXIT', Ref, Info}, State) ->
+    ?DEBUG("osiris_replica_reader:handle_info/2: EXIT received "
+           "~w, Info: ~w",
+           [Ref, Info]),
+    {stop, normal, State};
 handle_info(Info, #state{name = Name} = State) ->
     ?DEBUG("osiris_replica_reader: '~s' unhandled message ~W",
            [Name, Info, 10]),
