@@ -152,17 +152,17 @@ fetch_writer_seq(Pid, WriterId)
 %% @returns `{ok, state()} | {error, Error}' when error can be
 %% `{offset_out_of_range, empty | {From :: offset(), To :: offset()}}'
 %% @end
--spec init_reader(pid(), offset_spec(), atom()) ->
+-spec init_reader(pid(), offset_spec(), osiris_log:counter_spec()) ->
                      {ok, osiris_log:state()} |
                      {error,
                       {offset_out_of_range, empty | {offset(), offset()}}} |
                      {error, {invalid_last_offset_epoch, offset(), offset()}}.
-init_reader(Pid, OffsetSpec, Tag)
+init_reader(Pid, OffsetSpec, {_, _} = CounterSpec)
     when is_pid(Pid) andalso node(Pid) =:= node() ->
     ?DEBUG("osiris: initialising reader. Spec: ~w", [OffsetSpec]),
-    {ok, #{reference := Ref} = Ctx0} = gen:call(Pid, '$gen_call', get_reader_context),
-    CntId = {?MODULE, Ref, Tag, Pid},
-    Ctx = Ctx0#{counter_spec => {CntId, []}},
+    {ok, Ctx0} = gen:call(Pid, '$gen_call', get_reader_context),
+    % CntId = {?MODULE, Ref, Tag, Pid},
+    Ctx = Ctx0#{counter_spec => CounterSpec},
     osiris_log:init_offset_reader(OffsetSpec, Ctx).
 
 -spec register_offset_listener(pid(), offset()) -> ok.

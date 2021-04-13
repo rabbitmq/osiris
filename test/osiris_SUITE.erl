@@ -221,12 +221,12 @@ single_node_offset_listener(Config) ->
           replica_nodes => []},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     {error, {offset_out_of_range, empty}} =
-        osiris:init_reader(Leader, {abs, 0}, 'test'),
+        osiris:init_reader(Leader, {abs, 0}, {test, []}),
     osiris:register_offset_listener(Leader, 0),
     ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
     receive
         {osiris_offset, _Name, 0} ->
-            {ok, Log0} = osiris:init_reader(Leader, {abs, 0}, 'test'),
+            {ok, Log0} = osiris:init_reader(Leader, {abs, 0}, {test, []}),
             {[{0, <<"mah-data">>}], Log} = osiris_log:read_chunk_parsed(Log0),
             {end_of_stream, _} = osiris_log:read_chunk_parsed(Log),
             ok
@@ -245,7 +245,7 @@ single_node_reader_counters(Config) ->
           leader_node => node(),
           replica_nodes => []},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-    {ok, Log0} = osiris:init_reader(Leader, next, 'test'),
+    {ok, Log0} = osiris:init_reader(Leader, next, {test, []}),
     Overview = osiris_counters:overview(),
     ?assertEqual(1, maps:get(readers, maps:get({'osiris_writer', Name}, Overview))),
     {ok, Log1} = osiris_writer:init_data_reader(Leader, {0, empty}, {'test_data', []}),
@@ -270,7 +270,7 @@ cluster_reader_counters(Config) ->
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     Overview0 = osiris_counters:overview(),
     ?assertEqual(2, maps:get(readers, maps:get({'osiris_writer', Name}, Overview0))),
-    {ok, Log0} = osiris:init_reader(Leader, next, 'test'),
+    {ok, Log0} = osiris:init_reader(Leader, next, {test, []}),
     Overview1 = osiris_counters:overview(),
     ?assertEqual(3, maps:get(readers, maps:get({'osiris_writer', Name}, Overview1))),
     {ok, Log1} = osiris_writer:init_data_reader(Leader, {0, empty}, {'test_data', []}),
@@ -292,7 +292,7 @@ single_node_offset_listener2(Config) ->
           leader_node => node(),
           replica_nodes => []},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-    {ok, Log0} = osiris:init_reader(Leader, next, 'test'),
+    {ok, Log0} = osiris:init_reader(Leader, next, {test, []}),
     Next = osiris_log:next_offset(Log0),
     ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
     wait_for_written([42]),
@@ -320,7 +320,7 @@ cluster_offset_listener(Config) ->
           leader_node => node(),
           replica_nodes => Replicas},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-    {ok, Log0} = osiris:init_reader(Leader, 0, 'test'),
+    {ok, Log0} = osiris:init_reader(Leader, 0, {test, []}),
     osiris:register_offset_listener(Leader, 0),
     ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
     receive
@@ -356,7 +356,7 @@ replica_offset_listener(Config) ->
     R = hd(ReplicaPids),
     _ = spawn(node(R),
               fun() ->
-                 {ok, Log0} = osiris:init_reader(R, 0, 'test'),
+                 {ok, Log0} = osiris:init_reader(R, 0, {test, []}),
                  osiris:register_offset_listener(R, 0),
                  receive
                      {osiris_offset, _Name, O} when O > -1 ->

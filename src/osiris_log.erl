@@ -319,6 +319,7 @@
 -type epoch() :: osiris:epoch().
 -type range() :: empty | {From :: offset(), To :: offset()}.
 -type tracking_id() :: binary(). %% max 255 bytes
+-type counter_spec() :: {Tag :: term(), Fields :: [atom()]}.
 -type chunk_type() ::
     ?CHNK_USER |
     ?CHNK_TRK_DELTA |
@@ -329,7 +330,7 @@
     #{dir := file:filename(),
       epoch => non_neg_integer(),
       max_segment_size => non_neg_integer(),
-      counter_spec => {Tag :: term(), Fields :: [atom()]}}.
+      counter_spec => counter_spec()}.
 -type record() :: {offset(), iodata()}.
 -type offset_spec() :: osiris:offset_spec().
 -type retention_spec() :: osiris:retention_spec().
@@ -396,9 +397,8 @@
 
 -export_type([state/0,
               range/0,
-              config/0]).
-
-              % record/0,
+              config/0,
+              counter_spec/0]).
 
 -spec directory(osiris:config() | list()) -> file:filename().
 directory(#{name := Name, dir := Dir}) ->
@@ -1488,7 +1488,7 @@ update_retention(Retention,
     State.
 
 -spec evaluate_retention(file:filename(), [retention_spec()]) ->
-                            range().
+    {range(), non_neg_integer()}.
 evaluate_retention(Dir, Specs) ->
     SegInfos0 = build_log_overview(Dir),
     SegInfos = evaluate_retention0(SegInfos0, Specs),
