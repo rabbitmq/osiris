@@ -11,7 +11,8 @@
          new/2,
          fetch/1,
          overview/0,
-         delete/1]).
+         delete/1
+        ]).
 
 %% holds static or rarely changing fields
 -record(cfg, {}).

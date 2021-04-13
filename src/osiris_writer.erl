@@ -15,13 +15,13 @@
 -export([start_link/1,
          start/1,
          overview/1,
-         init_data_reader/2,
          init_data_reader/3,
          register_data_listener/2,
          ack/2,
          write/5,
          write_tracking/3,
          read_tracking/2,
+         read_tracking/1,
          query_writers/2,
          init/1,
          handle_batch/2,
@@ -30,8 +30,9 @@
          stop/1,
          delete/1]).
 
--define(ADD_COUNTER_FIELDS, [committed_offset]).
+-define(ADD_COUNTER_FIELDS, [committed_offset, readers]).
 -define(C_COMMITTED_OFFSET, ?C_NUM_LOG_FIELDS + 1).
+-define(C_READERS, ?C_NUM_LOG_FIELDS + 2).
 
 %% primary osiris process
 %% batch writes incoming data
@@ -87,10 +88,6 @@ overview(Pid) when node(Pid) == node() ->
     #{dir := Dir} = gen_batch_server:call(Pid, get_reader_context),
     {ok, osiris_log:overview(Dir)}.
 
-init_data_reader(Pid, TailInfo) when node(Pid) == node() ->
-    Ctx = gen_batch_server:call(Pid, get_reader_context),
-    osiris_log:init_data_reader(TailInfo, Ctx).
-
 init_data_reader(Pid, TailInfo, {_, _} = CounterSpec)
   when node(Pid) == node() ->
     Ctx0 = gen_batch_server:call(Pid, get_reader_context),
@@ -125,6 +122,9 @@ write_tracking(Pid, TrackingId, Offset)
 
 read_tracking(Pid, TrackingId) ->
     gen_batch_server:call(Pid, {read_tracking, TrackingId}).
+
+read_tracking(Pid) ->
+    gen_batch_server:call(Pid, read_tracking).
 
 query_writers(Pid, QueryFun) ->
     gen_batch_server:call(Pid, {query_writers, QueryFun}).
@@ -318,6 +318,11 @@ handle_command({call, From, {read_tracking, TrackingId}},
     Replies =
         [{reply, From, maps:get(TrackingId, Tracking, undefined)} | Replies0],
     {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
+handle_command({call, From, read_tracking},
+               {State, Records, Replies0, Corrs, Trk, Wrt, Dupes}) ->
+    Tracking = osiris_log:tracking(State#?MODULE.log),
+    Replies = [{reply, From, Tracking} | Replies0],
+    {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
 handle_command({cast, {register_data_listener, Pid, Offset}},
                {#?MODULE{data_listeners = Listeners} = State0,
                 Records,
@@ -363,8 +368,10 @@ handle_command({cast, {ack, ReplicaNode, Offset}},
 handle_command({call, From, get_reader_context},
                {#?MODULE{cfg =
                              #cfg{offset_ref = ORef,
+                                  reference = Ref,
                                   name = Name,
-                                  directory = Dir},
+                                  directory = Dir,
+                                  counter = CntRef},
                          committed_offset = COffs} =
                     State,
                 Records,
@@ -378,7 +385,10 @@ handle_command({call, From, get_reader_context},
          #{dir => Dir,
            name => Name,
            committed_offset => max(0, COffs),
-           offset_ref => ORef}},
+           offset_ref => ORef,
+           reference => Ref,
+           readers_counter_fun => fun(Inc) -> counters:add(CntRef, ?C_READERS, Inc) end
+          }},
     {State, Records, [Reply | Replies], Corrs, Trk, Wrt, Dupes};
 handle_command({call, From, {query_writers, QueryFun}},
                {State, Records, Replies0, Corrs, Trk, Wrt, Dupes}) ->

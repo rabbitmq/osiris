@@ -12,8 +12,9 @@
 -export([write/4,
          write_tracking/3,
          read_tracking/2,
+         read_tracking/1,
          fetch_writer_seq/2,
-         init_reader/2,
+         init_reader/3,
          register_offset_listener/2,
          register_offset_listener/3,
          update_retention/2,
@@ -120,6 +121,10 @@ write_tracking(Pid, TrackingId, Offset) ->
 read_tracking(Pid, TrackingId) ->
     osiris_writer:read_tracking(Pid, TrackingId).
 
+-spec read_tracking(pid()) -> #{binary() => offset()} | undefined.
+read_tracking(Pid) ->
+    osiris_writer:read_tracking(Pid).
+
 -spec fetch_writer_seq(pid(), binary()) ->
                           non_neg_integer() | undefined.
 fetch_writer_seq(Pid, WriterId)
@@ -147,15 +152,17 @@ fetch_writer_seq(Pid, WriterId)
 %% @returns `{ok, state()} | {error, Error}' when error can be
 %% `{offset_out_of_range, empty | {From :: offset(), To :: offset()}}'
 %% @end
--spec init_reader(pid(), offset_spec()) ->
+-spec init_reader(pid(), offset_spec(), osiris_log:counter_spec()) ->
                      {ok, osiris_log:state()} |
                      {error,
                       {offset_out_of_range, empty | {offset(), offset()}}} |
                      {error, {invalid_last_offset_epoch, offset(), offset()}}.
-init_reader(Pid, OffsetSpec)
+init_reader(Pid, OffsetSpec, {_, _} = CounterSpec)
     when is_pid(Pid) andalso node(Pid) =:= node() ->
     ?DEBUG("osiris: initialising reader. Spec: ~w", [OffsetSpec]),
-    {ok, Ctx} = gen:call(Pid, '$gen_call', get_reader_context),
+    {ok, Ctx0} = gen:call(Pid, '$gen_call', get_reader_context),
+    % CntId = {?MODULE, Ref, Tag, Pid},
+    Ctx = Ctx0#{counter_spec => CounterSpec},
     osiris_log:init_offset_reader(OffsetSpec, Ctx).
 
 -spec register_offset_listener(pid(), offset()) -> ok.

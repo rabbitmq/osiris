@@ -31,6 +31,7 @@
          get_current_epoch/1,
          get_directory/1,
          get_name/1,
+         get_default_max_segment_size/0,
          counters_ref/1,
          tracking/1,
          writers/1,
@@ -60,10 +61,13 @@
          first_offset,
          %% number of chunks read or written
          %% incremented even if a reader only reads the header
-         chunks]).
+         chunks,
+         %% number of segments
+         segments]).
 -define(C_OFFSET, 1).
 -define(C_FIRST_OFFSET, 2).
 -define(C_CHUNKS, 3).
+-define(C_SEGMENTS, 4).
 
 %% Specification of the Log format.
 %%
@@ -315,6 +319,7 @@
 -type epoch() :: osiris:epoch().
 -type range() :: empty | {From :: offset(), To :: offset()}.
 -type tracking_id() :: binary(). %% max 255 bytes
+-type counter_spec() :: {Tag :: term(), Fields :: [atom()]}.
 -type chunk_type() ::
     ?CHNK_USER |
     ?CHNK_TRK_DELTA |
@@ -325,7 +330,7 @@
     #{dir := file:filename(),
       epoch => non_neg_integer(),
       max_segment_size => non_neg_integer(),
-      counter_spec => {Tag :: term(), Fields :: [atom()]}}.
+      counter_spec => counter_spec()}.
 -type record() :: {offset(), iodata()}.
 -type offset_spec() :: osiris:offset_spec().
 -type retention_spec() :: osiris:retention_spec().
@@ -352,7 +357,8 @@
          counter_id :: term(),
          %% the maximum number of active writer deduplication sessions
          %% that will be included in snapshots written to new segments
-         max_writers = 255 :: non_neg_integer()}).
+         max_writers = 255 :: non_neg_integer(),
+         readers_counter_fun = fun(_) -> ok end :: function()}).
 -record(read,
         {type :: data | offset,
          offset_ref :: undefined | atomics:atomics_ref(),
@@ -391,9 +397,8 @@
 
 -export_type([state/0,
               range/0,
-              config/0]).
-
-              % record/0,
+              config/0,
+              counter_spec/0]).
 
 -spec directory(osiris:config() | list()) -> file:filename().
 directory(#{name := Name, dir := Dir}) ->
@@ -436,6 +441,7 @@ init(#{dir := Dir,
     %% it hasn't necessarily been written yet, for an empty log the first offset
     %% is initialised to 0 however and will be updated after each retention run.
     counters:put(Cnt, ?C_OFFSET, -1),
+    counters:put(Cnt, ?C_SEGMENTS, 0),
     Cfg = #cfg{directory = Dir,
                name = Name,
                max_segment_size = MaxSize,
@@ -472,6 +478,7 @@ init(#{dir := Dir,
 
             counters:put(Cnt, ?C_FIRST_OFFSET, FstChId),
             counters:put(Cnt, ?C_OFFSET, ChId + N - 1),
+            counters:put(Cnt, ?C_SEGMENTS, length(Infos)),
             ?INFO("~s:~s/~b: next offset ~b first offset ~b",
                   [?MODULE,
                    ?FUNCTION_NAME,
@@ -783,7 +790,8 @@ truncate_to(Name, [{E, ChId} | NextEOs], SegInfos) ->
                             empty | {offset(), offset()}}} |
                           {error,
                            {invalid_last_offset_epoch, offset(), offset()}}.
-init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
+init_data_reader({StartOffset, PrevEO}, #{dir := Dir,
+                                          readers_counter_fun := Fun} = Config) ->
     SegInfos = build_log_overview(Dir),
     Range = range_from_segment_infos(SegInfos),
     ?INFO("osiris_segment:init_data_reader/2 at ~b prev "
@@ -802,7 +810,7 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
                     exit({segment_not_found, F, SegInfos});
                 {_, StartSegmentInfo} ->
                     {ok,
-                     init_data_reader_from_segment(Config, StartSegmentInfo, F)}
+                     init_data_reader_from_segment(Config, StartSegmentInfo, F, Fun)}
             end;
         empty when StartOffset > 0 ->
             {error, {offset_out_of_range, Range}};
@@ -824,7 +832,8 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
                             {ok,
                              init_data_reader_from_segment(Config,
                                                            StartSegmentInfo,
-                                                           StartOffset)}
+                                                           StartOffset,
+                                                           Fun)}
                     end;
                 {PrevE, PrevO} ->
                     case find_segment_for_offset(PrevO, SegInfos) of
@@ -859,7 +868,8 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
                                                                    element(2,
                                                                            find_segment_for_offset(StartOffset,
                                                                                                    SegInfos)),
-                                                                   StartOffset)};
+                                                                   StartOffset,
+                                                                   Fun)};
                                 {ok,
                                  <<?MAGIC:4/unsigned,
                                    ?VERSION:4/unsigned,
@@ -883,17 +893,19 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir} = Config) ->
 
 init_data_reader_from_segment(#{dir := Dir, name := Name} = Config,
                               #seg_info{file = StartSegment, index = IndexFile},
-                              NextOffs) ->
+                              NextOffs, CounterFun) ->
     {ok, Fd} = file:open(StartSegment, [raw, binary, read]),
     %% TODO: next offset needs to be a chunk offset
     {_, FilePos} = scan_index(IndexFile, Fd, NextOffs),
     {ok, _Pos} = file:position(Fd, FilePos),
     Cnt = make_counter(Config),
     counters:put(Cnt, ?C_OFFSET, NextOffs - 1),
+    CounterFun(1),
     #?MODULE{cfg =
                  #cfg{directory = Dir,
                       counter = Cnt,
-                      name = Name},
+                      name = Name,
+                      readers_counter_fun = CounterFun},
              mode =
                  #read{type = data,
                        offset_ref = maps:get(offset_ref, Config, undefined),
@@ -965,7 +977,8 @@ init_offset_reader({timestamp, Ts}, #{dir := Dir} = Conf) ->
 init_offset_reader(OffsetSpec,
                    #{dir := Dir,
                      name := Name,
-                     offset_ref := OffsetRef} =
+                     offset_ref := OffsetRef,
+                     readers_counter_fun := Fun} =
                        Conf) ->
     SegInfo = build_log_overview(Dir),
     Range = range_from_segment_infos(SegInfo),
@@ -1006,11 +1019,15 @@ init_offset_reader(OffsetSpec,
                             IdxResult
                     end,
                 {ok, _Pos} = file:position(Fd, FilePos),
+                Cnt = make_counter(Conf),
+                Fun(1),
                 {ok,
                  #?MODULE{cfg =
                               #cfg{directory = Dir,
-                                   counter = make_counter(Conf),
-                                   name = Name},
+                                   counter = Cnt,
+                                   name = Name,
+                                   readers_counter_fun = Fun
+                                  },
                           mode =
                               #read{type = offset,
                                     offset_ref = OffsetRef,
@@ -1041,6 +1058,10 @@ get_directory(#?MODULE{cfg = #cfg{directory = Dir}}) ->
 -spec get_name(state()) -> string().
 get_name(#?MODULE{cfg = #cfg{name = Name}}) ->
     Name.
+
+-spec get_default_max_segment_size() -> non_neg_integer().
+get_default_max_segment_size() ->
+    ?DEFAULT_MAX_SEGMENT_SIZE_B.
 
 -spec counters_ref(state()) -> counters:counters_ref().
 counters_ref(#?MODULE{cfg = #cfg{counter = C}}) ->
@@ -1203,8 +1224,10 @@ send_file(Sock,
     end.
 
 -spec close(state()) -> ok.
-close(#?MODULE{cfg = #cfg{counter_id = CntId}, fd = Fd}) ->
+close(#?MODULE{cfg = #cfg{counter_id = CntId,
+                          readers_counter_fun = Fun}, fd = Fd}) ->
     _ = file:close(Fd),
+    Fun(-1),
     case CntId of
         undefined ->
             ok;
@@ -1465,10 +1488,11 @@ update_retention(Retention,
     State.
 
 -spec evaluate_retention(file:filename(), [retention_spec()]) ->
-                            range().
+    {range(), non_neg_integer()}.
 evaluate_retention(Dir, Specs) ->
-    SegInfos = build_log_overview(Dir),
-    range_from_segment_infos(evaluate_retention0(SegInfos, Specs)).
+    SegInfos0 = build_log_overview(Dir),
+    SegInfos = evaluate_retention0(SegInfos0, Specs),
+    {range_from_segment_infos(SegInfos), length(SegInfos)}.
 
 evaluate_retention0(Infos, []) ->
     %% we should never hit empty infos as one should always be left
@@ -1776,6 +1800,7 @@ open_new_segment(#?MODULE{cfg =
     %% we always move to the end of the file
     {ok, _} = file:position(Fd, eof),
     {ok, _} = file:position(IdxFd, eof),
+    counters:add(Cnt, ?C_SEGMENTS, 1),
 
     FstOffs = counters:get(Cnt, ?C_FIRST_OFFSET),
     %% filter tracking ids lower than first offset
@@ -2088,8 +2113,9 @@ trigger_retention_eval(#?MODULE{cfg =
         osiris_retention:eval(Dir, RetentionSpec,
                               %% updates the first offset after retention has
                               %% been evaluated
-                              fun ({Fst, _}) when is_integer(Fst) ->
-                                      counters:put(Cnt, ?C_FIRST_OFFSET, Fst);
+                              fun ({{Fst, _}, Seg}) when is_integer(Fst) ->
+                                      counters:put(Cnt, ?C_FIRST_OFFSET, Fst),
+                                      counters:put(Cnt, ?C_SEGMENTS, Seg);
                                   (_) ->
                                       ok
                               end),

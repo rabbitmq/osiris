@@ -46,12 +46,15 @@ all_tests() ->
      update_retention_replica,
      tracking,
      tracking_many,
+     tracking_all,
      tracking_retention,
      single_node_deduplication,
      single_node_deduplication_2,
      cluster_minority_deduplication,
      cluster_deduplication,
-     writers_retention].
+     writers_retention,
+     single_node_reader_counters,
+     cluster_reader_counters].
 
 -define(BIN_SIZE, 800).
 
@@ -218,12 +221,12 @@ single_node_offset_listener(Config) ->
           replica_nodes => []},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     {error, {offset_out_of_range, empty}} =
-        osiris:init_reader(Leader, {abs, 0}),
+        osiris:init_reader(Leader, {abs, 0}, {test, []}),
     osiris:register_offset_listener(Leader, 0),
     ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
     receive
         {osiris_offset, _Name, 0} ->
-            {ok, Log0} = osiris:init_reader(Leader, {abs, 0}),
+            {ok, Log0} = osiris:init_reader(Leader, {abs, 0}, {test, []}),
             {[{0, <<"mah-data">>}], Log} = osiris_log:read_chunk_parsed(Log0),
             {end_of_stream, _} = osiris_log:read_chunk_parsed(Log),
             ok
@@ -234,6 +237,52 @@ single_node_offset_listener(Config) ->
     flush(),
     ok.
 
+single_node_reader_counters(Config) ->
+    Name = ?config(cluster_name, Config),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          replica_nodes => []},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    {ok, Log0} = osiris:init_reader(Leader, next, {test, []}),
+    Overview = osiris_counters:overview(),
+    ?assertEqual(1, maps:get(readers, maps:get({'osiris_writer', Name}, Overview))),
+    {ok, Log1} = osiris_writer:init_data_reader(Leader, {0, empty}, {'test_data', []}),
+    Overview1 = osiris_counters:overview(),
+    ?assertEqual(2, maps:get(readers, maps:get({'osiris_writer', Name}, Overview1))),
+    osiris_log:close(Log0),
+    Overview2 = osiris_counters:overview(),
+    ?assertEqual(1, maps:get(readers, maps:get({'osiris_writer', Name}, Overview2))),
+    osiris_log:close(Log1),
+    Overview3 = osiris_counters:overview(),
+    ?assertEqual(0, maps:get(readers, maps:get({'osiris_writer', Name}, Overview3))).
+
+cluster_reader_counters(Config) ->
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    [_ | Replicas] = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          replica_nodes => Replicas},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    Overview0 = osiris_counters:overview(),
+    ?assertEqual(2, maps:get(readers, maps:get({'osiris_writer', Name}, Overview0))),
+    {ok, Log0} = osiris:init_reader(Leader, next, {test, []}),
+    Overview1 = osiris_counters:overview(),
+    ?assertEqual(3, maps:get(readers, maps:get({'osiris_writer', Name}, Overview1))),
+    {ok, Log1} = osiris_writer:init_data_reader(Leader, {0, empty}, {'test_data', []}),
+    Overview2 = osiris_counters:overview(),
+    ?assertEqual(4, maps:get(readers, maps:get({'osiris_writer', Name}, Overview2))),
+    osiris_log:close(Log0),
+    Overview3 = osiris_counters:overview(),
+    ?assertEqual(3, maps:get(readers, maps:get({'osiris_writer', Name}, Overview3))),
+    osiris_log:close(Log1),
+    Overview4 = osiris_counters:overview(),
+    ?assertEqual(2, maps:get(readers, maps:get({'osiris_writer', Name}, Overview4))).
+
 single_node_offset_listener2(Config) ->
     %% writes before registering
     Name = ?config(cluster_name, Config),
@@ -243,7 +292,7 @@ single_node_offset_listener2(Config) ->
           leader_node => node(),
           replica_nodes => []},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-    {ok, Log0} = osiris:init_reader(Leader, next),
+    {ok, Log0} = osiris:init_reader(Leader, next, {test, []}),
     Next = osiris_log:next_offset(Log0),
     ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
     wait_for_written([42]),
@@ -271,7 +320,7 @@ cluster_offset_listener(Config) ->
           leader_node => node(),
           replica_nodes => Replicas},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-    {ok, Log0} = osiris:init_reader(Leader, 0),
+    {ok, Log0} = osiris:init_reader(Leader, 0, {test, []}),
     osiris:register_offset_listener(Leader, 0),
     ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
     receive
@@ -307,7 +356,7 @@ replica_offset_listener(Config) ->
     R = hd(ReplicaPids),
     _ = spawn(node(R),
               fun() ->
-                 {ok, Log0} = osiris:init_reader(R, 0),
+                 {ok, Log0} = osiris:init_reader(R, 0, {test, []}),
                  osiris:register_offset_listener(R, 0),
                  receive
                      {osiris_offset, _Name, O} when O > -1 ->
@@ -352,7 +401,7 @@ read_validate_single_node(Config) ->
     ct:pal("writing ~b", [Num]),
     write_n(Leader, Num, #{}),
     % stop_profile(Config),
-    {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
+    {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}, {'test', []}),
 
     ct:pal("~w counters ~p", [node(), osiris_counters:overview()]),
 
@@ -413,7 +462,7 @@ read_validate(Config) ->
      end
      || N <- Replicas],
 
-    {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
+    {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}, {'test', []}),
     {_, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
 
     %% test reading on slave
@@ -421,7 +470,7 @@ read_validate(Config) ->
     Self = self(),
     _ = spawn(node(R),
               fun() ->
-                 {ok, RLog0} = osiris_writer:init_data_reader(R, {0, empty}),
+                 {ok, RLog0} = osiris_writer:init_data_reader(R, {0, empty}, {'test', []}),
                  {_, _} = timer:tc(fun() -> validate_read(Num, RLog0) end),
                  Self ! validate_read_done
               end),
@@ -888,6 +937,36 @@ tracking_many(Config) ->
     ?assertEqual(3, osiris:read_tracking(Leader, TrackId)),
     ok.
 
+tracking_all(Config) ->
+    Name = ?config(cluster_name, Config),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          replica_nodes => [],
+          dir => ?config(priv_dir, Config)},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
+    receive
+        {osiris_written, _Name, _, [42]} ->
+            ok
+    after 2000 ->
+        flush(),
+        exit(osiris_written_timeout)
+    end,
+    TrackId1 = <<"tracking-id-1">>,
+    TrackId2 = <<"tracking-id-2">>,
+    TrackId3 = <<"tracking-id-3">>,
+    ?assertEqual(#{}, osiris:read_tracking(Leader)),
+    ok = osiris:write_tracking(Leader, TrackId1, 0),
+    ok = osiris:write_tracking(Leader, TrackId2, 1),
+    ok = osiris:write_tracking(Leader, TrackId3, 2),
+    timer:sleep(250),
+    ?assertEqual(#{TrackId1 => 0,
+                   TrackId2 => 1,
+                   TrackId3 => 2}, osiris:read_tracking(Leader)),
+    ok.
+
 tracking_retention(Config) ->
     _PrivDir = ?config(data_dir, Config),
     Num = 150000,
@@ -1157,7 +1236,7 @@ search_paths() ->
 validate_log(Leader, Exp) when is_pid(Leader) ->
     case node(Leader) == node() of
         true ->
-            {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}),
+            {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}, {'test', []}),
             validate_log(Log0, Exp);
         false ->
             ok = rpc:call(node(Leader), ?MODULE, ?FUNCTION_NAME, [Leader, Exp])
