@@ -329,6 +329,7 @@
     osiris:config() |
     #{dir := file:filename(),
       epoch => non_neg_integer(),
+      first_offset_fun => fun((integer()) -> ok),
       max_segment_size => non_neg_integer(),
       counter_spec => counter_spec()}.
 -type record() :: {offset(), iodata()}.
@@ -358,7 +359,8 @@
          %% the maximum number of active writer deduplication sessions
          %% that will be included in snapshots written to new segments
          max_writers = 255 :: non_neg_integer(),
-         readers_counter_fun = fun(_) -> ok end :: function()}).
+         readers_counter_fun = fun(_) -> ok end :: function(),
+         first_offset_fun :: fun ((integer()) -> ok)}).
 -record(read,
         {type :: data | offset,
          offset_ref :: undefined | atomics:atomics_ref(),
@@ -442,12 +444,14 @@ init(#{dir := Dir,
     %% is initialised to 0 however and will be updated after each retention run.
     counters:put(Cnt, ?C_OFFSET, -1),
     counters:put(Cnt, ?C_SEGMENTS, 0),
+    FirstOffsetFun = maps:get(first_offset_fun, Config, fun (_) -> ok end),
     Cfg = #cfg{directory = Dir,
                name = Name,
                max_segment_size = MaxSize,
                retention = Retention,
                counter = Cnt,
-               counter_id = counter_id(Config)},
+               counter_id = counter_id(Config),
+               first_offset_fun = FirstOffsetFun},
     case lists:reverse(build_log_overview(Dir)) of
         [] ->
             open_new_segment(#?MODULE{cfg = Cfg,
@@ -905,7 +909,8 @@ init_data_reader_from_segment(#{dir := Dir, name := Name} = Config,
                  #cfg{directory = Dir,
                       counter = Cnt,
                       name = Name,
-                      readers_counter_fun = CounterFun},
+                      readers_counter_fun = CounterFun,
+                      first_offset_fun = fun (_) -> ok end},
              mode =
                  #read{type = data,
                        offset_ref = maps:get(offset_ref, Config, undefined),
@@ -1026,7 +1031,8 @@ init_offset_reader(OffsetSpec,
                               #cfg{directory = Dir,
                                    counter = Cnt,
                                    name = Name,
-                                   readers_counter_fun = Fun
+                                   readers_counter_fun = Fun,
+                                   first_offset_fun = fun (_) -> ok end
                                   },
                           mode =
                               #read{type = offset,
@@ -2010,12 +2016,13 @@ trim_writers(Max, Writers) ->
 
 read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                                  counter = CntRef},
-                      mode = #read{next_offset = NextChId} = Read,
+                      mode = #read{offset_ref = ORef,
+                                   next_offset = NextChId0} = Read0,
                       current_file = CurFile,
                       fd = Fd} =
                  State) ->
     %% reads the next header if permitted
-    case can_read_next_offset(Read) of
+    case can_read_next_offset(Read0) of
         true ->
             {ok, Pos} = file:position(Fd, cur),
             case file:read(Fd, ?HEADER_SIZE_B) of
@@ -2027,16 +2034,16 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                    NumRecords:32/unsigned,
                    Timestamp:64/signed,
                    Epoch:64/unsigned,
-                   NextChId:64/unsigned,
+                   NextChId0:64/unsigned,
                    Crc:32/integer,
                    DataSize:32/unsigned,
                    TrailerSize:32/unsigned,
                    _Reserved:32>> =
                      HeaderData} ->
-                    counters:put(CntRef, ?C_OFFSET, NextChId + NumRecords),
+                    counters:put(CntRef, ?C_OFFSET, NextChId0 + NumRecords),
                     counters:add(CntRef, ?C_CHUNKS, 1),
                     {ok,
-                     #{chunk_id => NextChId,
+                     #{chunk_id => NextChId0,
                        epoch => Epoch,
                        type => ChType,
                        crc => Crc,
@@ -2056,7 +2063,9 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                     {ok, Pos} = file:position(Fd, Pos),
                     {end_of_stream, State};
                 eof ->
+                    FirstOffset = atomics:get(ORef, 2),
                     %% open next segment file and start there if it exists
+                    NextChId = max(FirstOffset, NextChId0),
                     SegFile = make_file_name(NextChId, "segment"),
                     case SegFile == CurFile of
                         true ->
@@ -2073,9 +2082,11 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                                     ok = file:close(Fd),
                                     {ok, _} =
                                         file:position(Fd2, ?LOG_HEADER_SIZE),
+                                    Read = Read0#read{next_offset = NextChId},
                                     read_header0(State#?MODULE{current_file =
                                                                    SegFile,
-                                                               fd = Fd2});
+                                                               fd = Fd2,
+                                                               mode = Read});
                                 {error, enoent} ->
                                     {end_of_stream, State}
                             end
@@ -2096,7 +2107,7 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                     %% TODO: we may need to return the new state here if
                     %% we've crossed segments
                     {ok, Pos} = file:position(Fd, Pos),
-                    {error, {unexpected_chunk_id, UnexpectedChId, NextChId}};
+                    {error, {unexpected_chunk_id, UnexpectedChId, NextChId0}};
                 Invalid ->
                     _ = file:position(Fd, Pos),
                     {error, {invalid_chunk_header, Invalid}}
@@ -2108,12 +2119,14 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
 trigger_retention_eval(#?MODULE{cfg =
                                     #cfg{directory = Dir,
                                          retention = RetentionSpec,
-                                         counter = Cnt}}) ->
+                                         counter = Cnt,
+                                         first_offset_fun = Fun}}) ->
     ok =
         osiris_retention:eval(Dir, RetentionSpec,
                               %% updates the first offset after retention has
                               %% been evaluated
                               fun ({{Fst, _}, Seg}) when is_integer(Fst) ->
+                                      Fun(Fst),
                                       counters:put(Cnt, ?C_FIRST_OFFSET, Fst),
                                       counters:put(Cnt, ?C_SEGMENTS, Seg);
                                   (_) ->

@@ -130,6 +130,9 @@ init(#{name := Name,
     CntName = {?MODULE, ExtRef},
     Node = node(LeaderPid),
 
+    ORef = atomics:new(2, [{signed, true}]),
+    atomics:put(ORef, 1, -1),
+    atomics:put(ORef, 2, -1),
     {ok, {_, LeaderEpochOffs}} =
         rpc:call(Node, osiris_writer, overview, [LeaderPid]),
     ?DEBUG("~s: writer epoch offset ~w", [?MODULE, LeaderEpochOffs]),
@@ -137,6 +140,10 @@ init(#{name := Name,
     Dir = osiris_log:directory(Config),
     Log = osiris_log:init_acceptor(LeaderEpochOffs,
                                    Config#{dir => Dir,
+                                           first_offset_fun =>
+                                           fun (Fst) ->
+                                                   atomics:put(ORef, 2, Fst)
+                                           end,
                                            counter_spec =>
                                                {CntName, ?ADD_COUNTER_FIELDS}}),
     CntRef = osiris_log:counters_ref(Log),
@@ -189,8 +196,7 @@ init(#{name := Name,
     true = link(RRPid),
     Interval = maps:get(replica_gc_interval, Config, 5000),
     erlang:send_after(Interval, self(), force_gc),
-    ORef = atomics:new(1, [{signed, true}]),
-    atomics:put(ORef, 1, -1),
+    counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
     EvtFmt = maps:get(event_formatter, Config, undefined),
     {ok,
      #?MODULE{cfg =
