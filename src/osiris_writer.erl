@@ -139,9 +139,13 @@ init(#{name := Name,
     Dir = osiris_log:directory(Config),
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
-    ORef = atomics:new(1, [{signed, true}]),
+    ORef = atomics:new(2, [{signed, true}]),
     CntName = {?MODULE, ExtRef},
     Log = osiris_log:init(Config#{dir => Dir,
+                                  first_offset_fun =>
+                                  fun (Fst) ->
+                                          atomics:put(ORef, 2, Fst)
+                                  end,
                                   counter_spec =>
                                       {CntName, ?ADD_COUNTER_FIELDS}}),
     CntRef = osiris_log:counters_ref(Log),

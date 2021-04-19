@@ -84,6 +84,7 @@ init_per_testcase(TestCase, Config) ->
     Dir = filename:join(PrivDir, TestCase),
     LeaderDir = filename:join(Dir, "leader"),
     Follower1Dir = filename:join(Dir, "follower1"),
+    ORef = atomics:new(2, [{signed, true}]),
     [{test_case, TestCase},
      {leader_dir, LeaderDir},
      {follower1_dir, Follower1Dir},
@@ -91,7 +92,8 @@ init_per_testcase(TestCase, Config) ->
       #{dir => Dir,
         name => atom_to_list(TestCase),
         epoch => 1,
-        readers_counter_fun => fun(_) -> ok end}},
+        readers_counter_fun => fun(_) -> ok end,
+        offset_ref => ORef}},
      {dir, Dir}
      | Config].
 
@@ -215,7 +217,7 @@ read_chunk_parsed_multiple_chunks(Config) ->
 read_header(Config) ->
     Conf = ?config(osiris_conf, Config),
     W0 = osiris_log:init(Conf),
-    OffRef = atomics:new(1, []),
+    OffRef = atomics:new(2, []),
     {ok, R0} =
         osiris_log:init_offset_reader(first, Conf#{offset_ref => OffRef}),
     {end_of_stream, R1} = osiris_log:read_header(R0),
@@ -257,7 +259,7 @@ write_multi_log(Config) ->
             filename:join(?config(dir, Config), "*.segment")),
     ?assertEqual(2, length(Segments)),
 
-    OffRef = atomics:new(1, []),
+    OffRef = atomics:new(2, []),
     atomics:put(OffRef, 1,
                 1011), %% takes a single offset tracking data into account
     %% ensure all records can be read

@@ -42,6 +42,7 @@ all_tests() ->
      restart_replica,
      diverged_replica,
      retention,
+     retention_overtakes_offset_reader,
      update_retention,
      update_retention_replica,
      tracking,
@@ -795,7 +796,7 @@ diverged_replica(Config) ->
     ok.
 
 retention(Config) ->
-    _PrivDir = ?config(data_dir, Config),
+    DataDir = ?config(data_dir, Config),
     Num = 150000,
     Name = ?config(cluster_name, Config),
     SegSize = 50000 * 1000,
@@ -811,8 +812,71 @@ retention(Config) ->
     timer:sleep(500),
     write_n(Leader, Num, 0, 1000 * 8, #{}),
     timer:sleep(1000),
-    %% assert on num segs
+    Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
+    %% one file only
+    [_] = filelib:wildcard(Wc),
     ok.
+
+retention_overtakes_offset_reader(Config) ->
+    DataDir = ?config(data_dir, Config),
+    Num = 150000,
+    Name = ?config(cluster_name, Config),
+    SegSize = 50000 * 1000,
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, DataDir) || N <- [s1, s2, s3]],
+    % [Replica1, Replica2] = Replicas,
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => LeaderNode,
+          retention => [{max_bytes, SegSize}],
+          max_segment_size => SegSize,
+          replica_nodes => Replicas},
+    {ok, #{leader_pid := Leader,
+           replica_pids := [ReplicaPid1, ReplicaPid2]}} =
+        osiris:start_cluster(Conf0),
+    ok = osiris:write(Leader, undefined, 0, <<"first">>),
+    timer:sleep(500),
+    Self = self(),
+    ReaderFun =
+        fun (P) ->
+                fun () ->
+                        {ok, Log0} = osiris:init_reader(P, first, {test, []}),
+                        {[{0, <<"first">>}], Log} = osiris_log:read_chunk_parsed(Log0),
+                        receive
+                            validate ->
+                                [{_, <<"last">>}] = read_til_end(Log, undefined),
+                                Self ! {done, self()},
+                                ok
+                        end
+                end
+        end,
+
+
+    Pid1 = spawn_link(node(Leader), ReaderFun(Leader)),
+    Pid2 = spawn_link(node(ReplicaPid1), ReaderFun(ReplicaPid1)),
+    Pid3 = spawn_link(node(ReplicaPid2), ReaderFun(ReplicaPid2)),
+
+    write_n(Leader, Num, 0, 1000 * 8, #{}),
+    ok = osiris:write(Leader, undefined, 0, <<"last">>),
+    timer:sleep(1000),
+    Pid1 ! validate,
+    Pid2 ! validate,
+    Pid3 ! validate,
+    receive {done, Pid1} -> ok
+    after 30000 -> exit({done_timeout, Pid1})
+    end,
+    receive {done, Pid2} -> ok
+    after 30000 -> exit({done_timeout, Pid2})
+    end,
+    receive {done, Pid3} -> ok
+    after 30000 -> exit({done_timeout, Pid3})
+    end,
+
+    [slave:stop(N) || N <- Nodes],
+    %% read til the end
+    ok.
+
 
 update_retention(Config) ->
     DataDir = ?config(data_dir, Config),
@@ -1258,3 +1322,14 @@ print_counters() ->
                 [N, rpc:call(N, osiris_counters, overview, [])])
      end
      || N <- nodes()].
+
+read_til_end(Log0, Last) ->
+    case osiris_log:read_chunk_parsed(Log0) of
+        {end_of_stream, Log} ->
+            osiris_log:close(Log),
+            Last;
+        {Entries, Log} ->
+            read_til_end(Log, Entries)
+    end.
+
+
