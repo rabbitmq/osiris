@@ -209,7 +209,7 @@ read_chunk_parsed_multiple_chunks(Config) ->
     ?assertMatch({[{2, <<"hi-again">>}], _},
                  osiris_log:read_chunk_parsed(R1)),
     %% open another reader at a later index
-    {ok, R2} = osiris_log:init_data_reader({2, {1, 0}}, Conf),
+    {ok, R2} = osiris_log:init_data_reader({2, {1, 0, 0}}, Conf),
     ?assertMatch({[{2, <<"hi-again">>}], _},
                  osiris_log:read_chunk_parsed(R2)),
     ok.
@@ -292,7 +292,7 @@ tail_info(Config) ->
         [{1, [<<"one">>]}, {2, [<<"two">>]}, {4, [<<"three">>, <<"four">>]}],
     Log = seed_log(?config(dir, Config), EChunks, Config),
     %% {NextOffs, {LastEpoch, LastChunkOffset}}
-    ?assertEqual({4, {4, 2}}, osiris_log:tail_info(Log)),
+    ?assertMatch({4, {4, 2, _}}, osiris_log:tail_info(Log)),
     osiris_log:close(Log),
     ok.
 
@@ -458,7 +458,7 @@ init_data_reader_empty_log(Config) ->
     osiris_log:close(RLog0),
     %% too large
     {error, {offset_out_of_range, empty}} =
-        osiris_log:init_data_reader({1, {0, 0}}, RRConf),
+        osiris_log:init_data_reader({1, {0, 0, 0}}, RRConf),
 
     LLog = osiris_log:write([<<"hi">>], LLog0),
 
@@ -498,13 +498,13 @@ init_data_reader_truncated(Config) ->
     osiris_log:close(L1),
 
     %% attaching inside the log should be ok too
-    {ok, L2} = osiris_log:init_data_reader({750, {1, 700}}, RConf),
+    {ok, L2} = osiris_log:init_data_reader({750, {1, 700, ?LINE}}, RConf),
     ?assertEqual(750, osiris_log:next_offset(L2)),
     osiris_log:close(L2),
 
     % %% however attaching with a different epoch should be disallowed
     ?assertEqual({error, {invalid_last_offset_epoch, 2, 1}},
-                 osiris_log:init_data_reader({750, {2, 700}}, RConf)),
+                 osiris_log:init_data_reader({750, {2, 700, ?LINE}}, RConf)),
     osiris_log:close(L2),
     ok.
 
@@ -549,7 +549,7 @@ init_epoch_offsets(Config) ->
                                  #{dir => LDir,
                                    name => ?config(test_case, Config),
                                    epoch => 2}),
-    {2, {1, 1}} = osiris_log:tail_info(Log0),
+    {2, {1, 1, _}} = osiris_log:tail_info(Log0),
     osiris_log:close(Log0),
     ok.
 
@@ -567,7 +567,7 @@ init_epoch_offsets_multi_segment(Config) ->
                                  #{dir => LDir,
                                    name => ?config(test_case, Config),
                                    epoch => 2}),
-    {700, {1, 650}} = osiris_log:tail_info(Log0),
+    {700, {1, 650, _}} = osiris_log:tail_info(Log0),
     osiris_log:close(Log0),
     ok.
 
@@ -585,7 +585,7 @@ init_epoch_offsets_multi_segment2(Config) ->
                                  #{dir => LDir,
                                    name => ?config(test_case, Config),
                                    epoch => 2}),
-    {700, {1, 650}} = osiris_log:tail_info(Log0),
+    {700, {1, 650, _}} = osiris_log:tail_info(Log0),
     osiris_log:close(Log0),
     ok.
 
@@ -636,8 +636,7 @@ accept_chunk_truncates_tail(Config) ->
     LDir = ?config(leader_dir, Config),
     LLog = seed_log(LDir, EpochChunks, Config),
     LTail = osiris_log:tail_info(LLog),
-    ?assertEqual({4, {3, 2}},
-                 LTail), %% {NextOffs, {LastEpoch, LastChunkOffset}}
+    ?assertMatch({4, {3, 2, _}}, LTail), %% {NextOffs, {LastEpoch, LastChunkOffset}}
     ok = osiris_log:close(LLog),
 
     FollowerEpochChunks =
@@ -671,7 +670,7 @@ accept_chunk_does_not_truncate_tail_in_same_epoch(Config) ->
     LDir = ?config(leader_dir, Config),
     LLog = seed_log(LDir, EpochChunks, Config),
     LTail = osiris_log:tail_info(LLog),
-    ?assertEqual({5, {1, 4}}, LTail), %% {NextOffs, {LastEpoch, LastChunkOffset}}
+    ?assertMatch({5, {1, 4, _}}, LTail), %% {NextOffs, {LastEpoch, LastChunkOffset}}
     ok = osiris_log:close(LLog),
     FollowerEpochChunks =
         [{1, [<<"one">>]},
@@ -685,7 +684,7 @@ accept_chunk_does_not_truncate_tail_in_same_epoch(Config) ->
     ATail = osiris_log:tail_info(ALog0),
     osiris_log:close(ALog0),
     %% ensure we don't truncate too much
-    ?assertEqual({3, {1, 1}}, ATail),
+    ?assertMatch({3, {1, 1, _}}, ATail),
     ok.
 
 accept_chunk_in_other_epoch(Config) ->
@@ -699,7 +698,7 @@ accept_chunk_in_other_epoch(Config) ->
     LDir = ?config(leader_dir, Config),
     LLog = seed_log(LDir, EpochChunks, Config),
     LTail = osiris_log:tail_info(LLog),
-    ?assertEqual({5, {2, 4}}, LTail), %% {NextOffs, {LastEpoch, LastChunkOffset}}
+    ?assertMatch({5, {2, 4, _}}, LTail), %% {NextOffs, {LastEpoch, LastChunkOffset}}
     ok = osiris_log:close(LLog),
     FollowerEpochChunks =
         [{1, [<<"one">>]},
@@ -713,7 +712,7 @@ accept_chunk_in_other_epoch(Config) ->
     ATail = osiris_log:tail_info(ALog0),
     osiris_log:close(ALog0),
     %% ensure we don't truncate too much
-    ?assertEqual({3, {1, 1}}, ATail),
+    ?assertMatch({3, {1, 1, _}}, ATail),
     ok.
 
 overview(Config) ->

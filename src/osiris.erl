@@ -42,7 +42,8 @@
 -type offset() :: non_neg_integer().
 -type epoch() :: non_neg_integer().
 -type milliseconds() :: non_neg_integer().
--type tail_info() :: {offset(), empty | {epoch(), offset()}}.
+-type tail_info() :: {NextOffset :: offset(),
+                      Last :: empty | {epoch(), offset(), osiris:milliseconds()}}.
 -type offset_spec() ::
     first |
     last |

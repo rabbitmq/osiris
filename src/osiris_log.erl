@@ -370,7 +370,7 @@
         {type = writer :: writer | acceptor,
          segment_size = 0 :: non_neg_integer(),
          current_epoch :: non_neg_integer(),
-         tail_info = {0, undefined} :: osiris:tail_info(),
+         tail_info = {0, empty} :: osiris:tail_info(),
          %% the current offset tracking state
          tracking = #{} :: #{tracking_id() => offset()},
          writers = #{} ::
@@ -461,27 +461,28 @@ init(#{dir := Dir,
                                                  current_epoch = Epoch}});
         [#seg_info{file = Filename,
                    index = IdxFilename,
-                   first = #chunk_info{id = _FstChId},
                    size = Size,
                    last =
-                       #chunk_info{epoch = E,
-                                   id = ChId,
-                                   num = N}}
+                       #chunk_info{epoch = LastEpoch,
+                                   timestamp = LastTs,
+                                   id = LastChId,
+                                   num = LastNum}}
          | _] = Infos ->
             [#seg_info{first = #chunk_info{id = FstChId}} | _] =
                 lists:reverse(Infos),
             %% assert epoch is same or larger
             %% than last known epoch
-            case E > Epoch of
+            case LastEpoch > Epoch of
                 true ->
-                    exit({invalid_epoch, E, Epoch});
+                    exit({invalid_epoch, LastEpoch, Epoch});
                 _ ->
                     ok
             end,
-            TailInfo = {ChId + N, {E, ChId}},
+            TailInfo = {LastChId + LastNum,
+                        {LastEpoch, LastChId, LastTs}},
 
             counters:put(Cnt, ?C_FIRST_OFFSET, FstChId),
-            counters:put(Cnt, ?C_OFFSET, ChId + N - 1),
+            counters:put(Cnt, ?C_OFFSET, LastChId + LastNum - 1),
             counters:put(Cnt, ?C_SEGMENTS, length(Infos)),
             ?INFO("~s:~s/~b: next offset ~b first offset ~b",
                   [?MODULE,
@@ -839,7 +840,7 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir,
                                                            StartOffset,
                                                            Fun)}
                     end;
-                {PrevE, PrevO} ->
+                {PrevE, PrevO, _PrevTs} ->
                     case find_segment_for_offset(PrevO, SegInfos) of
                         not_found ->
                             %% this is unexpected and thus an error
@@ -1694,12 +1695,14 @@ write_chunk(Chunk,
                           mode =
                               Write#write{writers = Writers,
                                           tail_info =
-                                              {NextOffset, {Epoch, Next}},
+                                              {NextOffset,
+                                               {Epoch, Next, Timestamp}},
                                           segment_size = 0}};
         {ok, _} ->
             State#?MODULE{mode =
                               Write#write{tail_info =
-                                              {NextOffset, {Epoch, Next}},
+                                              {NextOffset,
+                                               {Epoch, Next, Timestamp}},
                                           writers = Writers,
                                           segment_size = SegSize + Size}}
     end.

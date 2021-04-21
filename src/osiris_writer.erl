@@ -50,7 +50,7 @@
 -record(?MODULE,
         {cfg :: #cfg{},
          log = osiris_log:state(),
-         replica_state = #{} :: #{node() => osiris:offset()},
+         replica_state = #{} :: #{node() => {osiris:offset(), osiris:milliseconds()}},
          pending_corrs = queue:new() :: queue:queue(),
          duplicates = [] ::
              [{osiris:offset(), pid(), osiris:writer_id(), non_neg_integer()}],
@@ -98,9 +98,10 @@ register_data_listener(Pid, Offset) ->
     ok =
         gen_batch_server:cast(Pid, {register_data_listener, self(), Offset}).
 
--spec ack(identifier(), osiris:offset()) -> ok.
-ack(LeaderPid, Offset) when is_integer(Offset) andalso Offset >= 0 ->
-    gen_batch_server:cast(LeaderPid, {ack, node(), Offset}).
+-spec ack(identifier(), {osiris:offset(), osiris:milliseconds()}) -> ok.
+ack(LeaderPid, {Offset, _} = OffsetTs)
+  when is_integer(Offset) andalso Offset >= 0 ->
+    gen_batch_server:cast(LeaderPid, {ack, node(), OffsetTs}).
 
 -spec write(Pid :: pid(),
             Sender :: pid(),
@@ -153,11 +154,11 @@ init(#{name := Name,
     LastOffs = osiris_log:next_offset(Log) - 1,
     CommittedOffset =
         case osiris_log:tail_info(Log) of
-            {_, {_, BatchOffs}} when Replicas == [] ->
+            {_, {_, TailChId, _}} when Replicas == [] ->
                 %% only when there are no replicas can we
                 %% recover the committed offset from the last
                 %% batch offset in the log
-                BatchOffs;
+                TailChId;
             _ ->
                 -1
         end,
@@ -179,7 +180,7 @@ init(#{name := Name,
                        directory = Dir,
                        counter = CntRef},
               committed_offset = CommittedOffset,
-              replica_state = maps:from_list([{R, -1} || R <- Replicas]),
+              replica_state = maps:from_list([{R, {-1, 0}} || R <- Replicas]),
               log = Log}}.
 
 handle_batch(Commands,
@@ -206,14 +207,16 @@ handle_batch(Commands,
 
             LastChId =
                 case osiris_log:tail_info(State2#?MODULE.log) of
-                    {_, {_, BatchOffs}} ->
-                        BatchOffs;
+                    {_, {_, TailChId, _TailTs}} ->
+                        TailChId;
                     _ ->
                         -1
                 end,
-            COffs =
-                agreed_commit([LastChId
-                               | maps:values(State2#?MODULE.replica_state)]),
+            AllChIds = maps:fold(fun (_, {O, _}, Acc) ->
+                                         [O | Acc]
+                                     end, [LastChId], State2#?MODULE.replica_state),
+
+            COffs = agreed_commit(AllChIds),
 
             RemDupes = handle_duplicates(COffs, Dupes ++ Dupes0, Cfg),
             %% if committed offset has increased - update
@@ -350,7 +353,7 @@ handle_command({cast,
         State0#?MODULE{offset_listeners =
                            [{Pid, Offset, EvtFormatter} | Listeners]},
     {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
-handle_command({cast, {ack, ReplicaNode, Offset}},
+handle_command({cast, {ack, ReplicaNode, {Offset, _} = OffsetTs}},
                {#?MODULE{replica_state = ReplicaState0} = State0,
                 Records,
                 Replies,
@@ -361,8 +364,8 @@ handle_command({cast, {ack, ReplicaNode, Offset}},
     % ?DEBUG("osiris_writer ack from ~w at ~b", [ReplicaNode, Offset]),
     ReplicaState =
         case ReplicaState0 of
-            #{ReplicaNode := O} when Offset > O ->
-                ReplicaState0#{ReplicaNode => Offset};
+            #{ReplicaNode := {O, _}} when Offset > O ->
+                ReplicaState0#{ReplicaNode => OffsetTs};
             _ ->
                 %% ignore anything else including acks from unknown replicas
                 ReplicaState0

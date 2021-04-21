@@ -153,10 +153,10 @@ init(#{name := Name,
     case LastChunk of
         empty ->
             ok;
-        {_, LastChId} ->
+        {_, LastChId, LastTs} ->
             %% need to ack last chunk back to leader so that it can
             %% re-discover the committed offset
-            osiris_writer:ack(LeaderPid, LastChId)
+            osiris_writer:ack(LeaderPid, {LastChId, LastTs})
     end,
     ?INFO("osiris_replica:init/1: next offset ~b",
           [NextOffset]),
@@ -357,26 +357,26 @@ handle_info({tcp, Socket, Bin},
                      parse_state = ParseState0,
                      log = Log0} =
                 State0) ->
+    counters:add(Cnt, ?C_PACKETS, 1),
     %% deliberately ignoring return value here as it would fail if the
     %% tcp connection has been closed and we still want to try to process
     %% any messages still in the mailbox
     _ = inet:setopts(Socket, [{active, 1}]),
     %% validate chunk
     {ParseState, OffsetChunks} = parse_chunk(Bin, ParseState0, []),
-    {Acks, Log} =
-        lists:foldl(fun({FirstOffset, B}, {Aks, Acc0}) ->
+    {OffsetTimestamp, Log} =
+        lists:foldl(fun({OffsetTs, B}, {_OffsTs, Acc0}) ->
                        Acc = osiris_log:accept_chunk(B, Acc0),
-                       {[FirstOffset | Aks], Acc}
+                       {OffsetTs, Acc}
                     end,
-                    {[], Log0}, OffsetChunks),
-    counters:add(Cnt, ?C_PACKETS, 1),
+                    {undefined, Log0}, OffsetChunks),
     State1 = State0#?MODULE{log = Log, parse_state = ParseState},
-    case Acks of
-        [] ->
+    case OffsetTimestamp of
+        undefined ->
             {noreply, State1};
         _ ->
             State = notify_offset_listeners(State1),
-            ok = osiris_writer:ack(LeaderPid, lists:max(Acks)),
+            ok = osiris_writer:ack(LeaderPid, OffsetTimestamp),
             {noreply, State}
     end;
 handle_info({tcp_passive, Socket},
@@ -442,7 +442,7 @@ parse_chunk(<<?MAGIC:4/unsigned,
               _ChType:8/unsigned,
               _NumEntries:16/unsigned,
               _NumRecords:32/unsigned,
-              _Timestamp:64/signed,
+              Timestamp:64/signed,
               _Epoch:64/unsigned,
               FirstOffset:64/unsigned,
               _Crc:32/integer,
@@ -456,7 +456,7 @@ parse_chunk(<<?MAGIC:4/unsigned,
             undefined, Acc) ->
     TotalSize = Size + TSize + ?HEADER_SIZE_B,
     <<Chunk:TotalSize/binary, _/binary>> = All,
-    parse_chunk(Rem, undefined, [{FirstOffset, Chunk} | Acc]);
+    parse_chunk(Rem, undefined, [{{FirstOffset, Timestamp}, Chunk} | Acc]);
 parse_chunk(Bin, undefined, Acc)
     when byte_size(Bin) =< ?HEADER_SIZE_B ->
     {Bin, lists:reverse(Acc)};
@@ -465,7 +465,7 @@ parse_chunk(<<?MAGIC:4/unsigned,
               _ChType:8/unsigned,
               _NumEntries:16/unsigned,
               _NumRecords:32/unsigned,
-              _Timestamp:64/signed,
+              Timestamp:64/signed,
               _Epoch:64/unsigned,
               FirstOffset:64/unsigned,
               _Crc:32/integer,
@@ -475,21 +475,21 @@ parse_chunk(<<?MAGIC:4/unsigned,
               Partial/binary>> =
                 All,
             undefined, Acc) ->
-    {{FirstOffset, [All], Size + TSize - byte_size(Partial)},
+    {{{FirstOffset, Timestamp}, [All], Size + TSize - byte_size(Partial)},
      lists:reverse(Acc)};
 parse_chunk(Bin, PartialHeaderBin, Acc)
     when is_binary(PartialHeaderBin) ->
     %% slight inneficiency but partial headers should be relatively
     %% rare and fairly small - also ensures the header is always intact
     parse_chunk(<<PartialHeaderBin/binary, Bin/binary>>, undefined, Acc);
-parse_chunk(Bin, {FirstOffset, IOData, RemSize}, Acc)
+parse_chunk(Bin, {FirstOffsetTs, IOData, RemSize}, Acc)
     when byte_size(Bin) >= RemSize ->
     <<Final:RemSize/binary, Rem/binary>> = Bin,
     parse_chunk(Rem, undefined,
-                [{FirstOffset, lists:reverse([Final | IOData])} | Acc]);
-parse_chunk(Bin, {FirstOffset, IOData, RemSize}, Acc) ->
+                [{FirstOffsetTs, lists:reverse([Final | IOData])} | Acc]);
+parse_chunk(Bin, {FirstOffsetTs, IOData, RemSize}, Acc) ->
     %% there is not enough data to complete the partial chunk
-    {{FirstOffset, [Bin | IOData], RemSize - byte_size(Bin)},
+    {{FirstOffsetTs, [Bin | IOData], RemSize - byte_size(Bin)},
      lists:reverse(Acc)}.
 
 notify_offset_listeners(#?MODULE{cfg =
@@ -500,7 +500,7 @@ notify_offset_listeners(#?MODULE{cfg =
                                  offset_listeners = L0} =
                             State) ->
     case osiris_log:tail_info(Log) of
-        {_NextOffs, {_, LastChId}} ->
+        {_NextOffs, {_, LastChId, _LastTs}} ->
             Max = min(COffs, LastChId),
             %% do not notify offset listeners if the committed offset isn't
             %% available locally yet
