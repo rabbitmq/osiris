@@ -23,6 +23,7 @@
          read_tracking/2,
          read_tracking/1,
          query_writers/2,
+         query_replication_state/1,
          init/1,
          handle_batch/2,
          terminate/2,
@@ -129,6 +130,9 @@ read_tracking(Pid) ->
 
 query_writers(Pid, QueryFun) ->
     gen_batch_server:call(Pid, {query_writers, QueryFun}).
+
+query_replication_state(Pid) when is_pid(Pid) ->
+    gen_batch_server:call(Pid, query_replication_state).
 
 -spec init(osiris:config()) -> {ok, state()}.
 init(#{name := Name,
@@ -409,6 +413,19 @@ handle_command({call, From, {query_writers, QueryFun}},
             Err ->
                 Err
         end,
+    Replies = [{reply, From, Result} | Replies0],
+    {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
+handle_command({call, From, query_replication_state},
+               {#?MODULE{log = Log,
+                         replica_state = R} = State, Records, Replies0,
+                Corrs, Trk, Wrt, Dupes}) ->
+    %% need to merge pending tracking entries before read
+    Result = case osiris_log:tail_info(Log) of
+                 {0, empty} ->
+                     R#{node() => {-1, 0}};
+                 {_, {_E, O, T}} ->
+                     R#{node() => {O, T}}
+             end,
     Replies = [{reply, From, Result} | Replies0],
     {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
 handle_command({call, From, {update_retention, Retention}},
