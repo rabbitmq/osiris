@@ -50,6 +50,7 @@
 -define(LOG_HEADER_SIZE, 8).
 -define(TRK_DELTA, 0).
 -define(TRK_SNAP, 1).
+-define(TRK_TYPE_OFFSET, 0).
 -define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
 -define(INDEX_RECORD_SIZE_B, 28).
 -define(COUNTER_FIELDS,
@@ -211,20 +212,23 @@
 %%   |0              |1              |2              |3              | Bytes
 %%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
 %%   +---------------+---------------+---------------+---------------+
-%%   | ID size       | ID                                            |
-%%   +---------------+                                               |
+%%   | ID type       | ID size       | ID                            |
+%%   +---------------+---------------+                               |
 %%   |                                                               |
 %%   :                                                               :
 %%   +---------------------------------------------------------------+
-%%   | Offset                                                        |
-%%   | (8 bytes)                                                     |
+%%   | Type specific data                                            |
+%%   |                                                               |
 %%   +---------------------------------------------------------------+
+%%
+%% ID type = unsigned 8-bit integer (0 only currently allowed value)
 %%
 %% ID size = unsigned 8-bit integer
 %%
 %% ID = arbitrary data
 %%
-%% Offset = unsigned 64-bit integer
+%% Type specific data:
+%% When ID type = 0: Offset = unsigned 64-bit integer
 %%
 %% SimpleEntry (CHNK_WRT_SNAPSHOT)
 %% -------------------------------
@@ -319,6 +323,7 @@
 -type epoch() :: osiris:epoch().
 -type range() :: empty | {From :: offset(), To :: offset()}.
 -type tracking_id() :: binary(). %% max 255 bytes
+-type tracking_type() :: offset. %% extensible: offset | timestamp | in_flight
 -type counter_spec() :: {Tag :: term(), Fields :: [atom()]}.
 -type chunk_type() ::
     ?CHNK_USER |
@@ -372,7 +377,7 @@
          current_epoch :: non_neg_integer(),
          tail_info = {0, empty} :: osiris:tail_info(),
          %% the current offset tracking state
-         tracking = #{} :: #{tracking_id() => offset()},
+         tracking = #{} :: #{tracking_id() => {tracking_type(), offset()}},
          writers = #{} ::
              #{osiris:writer_id() =>
                    {offset(), osiris:milliseconds(), non_neg_integer()}}}).
@@ -400,7 +405,8 @@
 -export_type([state/0,
               range/0,
               config/0,
-              counter_spec/0]).
+              counter_spec/0,
+              tracking_type/0]).
 
 -spec directory(osiris:config() | list()) -> file:filename().
 directory(#{name := Name, dir := Dir}) ->
@@ -575,7 +581,8 @@ write([_ | _] = Entries,
 write([], _ChType, _Now, _Writers, State) ->
     State.
 
--spec write_tracking(#{tracking_id() := offset()}, delta | snapshot,
+-spec write_tracking(#{tracking_id() := {tracking_type(), offset()}},
+                     delta | snapshot,
                      state()) ->
                         state().
 write_tracking(Trk0, delta, State) when map_size(Trk0) == 0 ->
@@ -585,10 +592,15 @@ write_tracking(Trk0, TrkType,
                #?MODULE{cfg = #cfg{}, mode = #write{tracking = Tracking} = W0} =
                    State0) ->
     TData =
-        maps:fold(fun(Id, Offs, Acc) ->
-                     [<<(byte_size(Id)):8/unsigned, Id/binary,
-                        Offs:64/unsigned>>
-                      | Acc]
+        maps:fold(fun(Id, {Type, Offs}, Acc) ->
+                          T = case Type of
+                                  offset -> ?TRK_TYPE_OFFSET
+                              end,
+                          [<<T:8/unsigned,
+                             (byte_size(Id)):8/unsigned,
+                             Id/binary,
+                             Offs:64/unsigned>>
+                           | Acc]
                   end,
                   [], Trk0),
 
@@ -1074,7 +1086,7 @@ get_default_max_segment_size() ->
 counters_ref(#?MODULE{cfg = #cfg{counter = C}}) ->
     C.
 
--spec tracking(state()) -> #{tracking_id() => offset()}.
+-spec tracking(state()) -> #{tracking_id() => {tracking_type(), offset()}}.
 tracking(#?MODULE{mode = #write{tracking = Tracking}}) ->
     Tracking.
 
@@ -1813,7 +1825,12 @@ open_new_segment(#?MODULE{cfg =
 
     FstOffs = counters:get(Cnt, ?C_FIRST_OFFSET),
     %% filter tracking ids lower than first offset
-    Tracking = maps:filter(fun(_K, O) -> O >= FstOffs end, Tracking0),
+    Tracking = maps:filter(fun(_K, {offset, O}) ->
+                                   O >= FstOffs;
+                              (_K, _) ->
+                                   %% currently unused
+                                   true
+                           end, Tracking0),
     %% TODO: filter writers by some time based retention
     Writers = trim_writers(MaxWriters, Writers0),
 
@@ -1969,14 +1986,19 @@ recover_tracking(Fd, Trk, Wrt) ->
             {Trk, Wrt}
     end.
 
+
 parse_tracking(<<>>, Acc) ->
     Acc;
-parse_tracking(<<Size:8/unsigned,
+parse_tracking(<<TrkType:8/unsigned,
+                 Size:8/unsigned,
                  Id:Size/binary,
                  Offs:64/unsigned,
                  Rem/binary>>,
-               Acc) ->
-    parse_tracking(Rem, Acc#{Id => Offs}).
+               Acc) -> 
+    Tag = case  TrkType of
+              ?TRK_TYPE_OFFSET -> offset
+          end,
+    parse_tracking(Rem, Acc#{Id => {Tag, Offs}}).
 
 parse_writers(<<>>, _, _, Acc) ->
     Acc;

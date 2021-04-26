@@ -967,10 +967,10 @@ tracking(Config) ->
     %% batch which due to batch reversal isn't possible. This should be ok
     %% given the use case for reading tracking
     timer:sleep(100),
-    ?assertEqual(0, osiris:read_tracking(Leader, TrackId)),
+    ?assertEqual({offset, 0}, osiris:read_tracking(Leader, TrackId)),
     ok = osiris:write_tracking(Leader, TrackId, 1),
     timer:sleep(100),
-    ?assertEqual(1, osiris:read_tracking(Leader, TrackId)),
+    ?assertEqual({offset, 1}, osiris:read_tracking(Leader, TrackId)),
 
     ok.
 
@@ -998,7 +998,7 @@ tracking_many(Config) ->
     ok = osiris:write_tracking(Leader, TrackId, 2),
     ok = osiris:write_tracking(Leader, TrackId, 3),
     timer:sleep(250),
-    ?assertEqual(3, osiris:read_tracking(Leader, TrackId)),
+    ?assertEqual({offset, 3}, osiris:read_tracking(Leader, TrackId)),
     ok.
 
 tracking_all(Config) ->
@@ -1026,9 +1026,9 @@ tracking_all(Config) ->
     ok = osiris:write_tracking(Leader, TrackId2, 1),
     ok = osiris:write_tracking(Leader, TrackId3, 2),
     timer:sleep(250),
-    ?assertEqual(#{TrackId1 => 0,
-                   TrackId2 => 1,
-                   TrackId3 => 2}, osiris:read_tracking(Leader)),
+    ?assertEqual(#{TrackId1 => {offset, 0},
+                   TrackId2 => {offset, 1},
+                   TrackId3 => {offset, 2}}, osiris:read_tracking(Leader)),
     ok.
 
 tracking_retention(Config) ->
@@ -1054,7 +1054,7 @@ tracking_retention(Config) ->
     timer:sleep(1000),
     %% tracking id should be gone
     ?assertEqual(undefined, osiris:read_tracking(Leader, TrkId)),
-    ?assertEqual(Num, osiris:read_tracking(Leader, TrkId2)),
+    ?assertEqual({offset, Num}, osiris:read_tracking(Leader, TrkId2)),
     ok.
 
 single_node_deduplication(Config) ->

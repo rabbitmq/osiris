@@ -40,6 +40,7 @@
 
 -type mfarg() :: {module(), atom(), list()}.
 -type offset() :: non_neg_integer().
+-type tracking_type() :: osiris_log:tracking_type().
 -type epoch() :: non_neg_integer().
 -type milliseconds() :: non_neg_integer().
 -type tail_info() :: {NextOffset :: offset(),
@@ -118,7 +119,7 @@ write(Pid, WriterId, Corr, Data) ->
 write_tracking(Pid, TrackingId, Offset) ->
     osiris_writer:write_tracking(Pid, TrackingId, Offset).
 
--spec read_tracking(pid(), binary()) -> offset() | undefined.
+-spec read_tracking(pid(), binary()) -> {tracking_type(), offset()} | undefined.
 read_tracking(Pid, TrackingId) ->
     osiris_writer:read_tracking(Pid, TrackingId).
 

@@ -120,7 +120,7 @@ write_tracking(Pid, TrackingId, Offset)
          andalso is_binary(TrackingId)
          andalso byte_size(TrackingId) =< 255
          andalso is_integer(Offset) ->
-    gen_batch_server:cast(Pid, {write_tracking, TrackingId, Offset}).
+    gen_batch_server:cast(Pid, {write_tracking, TrackingId, offset, Offset}).
 
 read_tracking(Pid, TrackingId) ->
     gen_batch_server:call(Pid, {read_tracking, TrackingId}).
@@ -318,9 +318,9 @@ handle_command({cast, {write, Pid, WriterId, Corr, R}},
              Wrt,
              [{ChId, Pid, WriterId, Corr} | Dupes]}
     end;
-handle_command({cast, {write_tracking, TrackingId, Offset}},
+handle_command({cast, {write_tracking, TrackingId, TrackingType, TrackingData}},
                {State, Records, Replies, Corrs, Trk0, Wrt, Dupes}) ->
-    Trk = Trk0#{TrackingId => Offset},
+    Trk = Trk0#{TrackingId => {TrackingType, TrackingData}},
     {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
 handle_command({call, From, {read_tracking, TrackingId}},
                {State, Records, Replies0, Corrs, Trk, Wrt, Dupes}) ->
