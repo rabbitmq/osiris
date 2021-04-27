@@ -596,7 +596,7 @@ accept_chunk(Config) ->
     FConf = Conf#{dir => ?config(follower1_dir, Config)},
     L0 = osiris_log:init(LConf),
     %% write an entry with just tracking
-    L1 = osiris_log:write_tracking(#{<<"id1">> => 1}, delta, L0),
+    L1 = osiris_log:write_tracking(#{<<"id1">> => {offset, 1}}, delta, L0),
     timer:sleep(100),
 
     Now = 12345,
@@ -619,7 +619,7 @@ accept_chunk(Config) ->
     osiris_log:close(R2),
     osiris_log:close(F2),
     FL0 = osiris_log:init(FConf),
-    ?assertMatch(#{<<"id1">> := 1}, osiris_log:tracking(FL0)),
+    ?assertMatch(#{<<"id1">> := {offset, 1}}, osiris_log:tracking(FL0)),
     ?assertMatch(#{<<"w1">> := {_, Now, 1}}, osiris_log:writers(FL0)),
     osiris_log:close(FL0),
     ok.
@@ -781,15 +781,15 @@ offset_tracking(Config) ->
     Conf = ?config(osiris_conf, Config),
     S0 = osiris_log:init(Conf),
     ?assertEqual(0, osiris_log:next_offset(S0)),
-    S1 = osiris_log:write_tracking(#{<<"id1">> => 0}, delta,
+    S1 = osiris_log:write_tracking(#{<<"id1">> => {offset, 0}}, delta,
                                    osiris_log:write([<<"hi">>], S0)),
     ?assertEqual(2, osiris_log:next_offset(S1)),
-    ?assertMatch(#{<<"id1">> := 0}, osiris_log:tracking(S1)),
-    S2 = osiris_log:write_tracking(#{<<"id1">> => 1}, delta, S1),
+    ?assertMatch(#{<<"id1">> := {offset, 0}}, osiris_log:tracking(S1)),
+    S2 = osiris_log:write_tracking(#{<<"id1">> => {offset, 1}}, delta, S1),
     %% test recovery
     osiris_log:close(S2),
     S3 = osiris_log:init(Conf),
-    ?assertMatch(#{<<"id1">> := 1}, osiris_log:tracking(S3)),
+    ?assertMatch(#{<<"id1">> := {offset, 1}}, osiris_log:tracking(S3)),
     osiris_log:close(S3),
     ok.
 
@@ -811,12 +811,12 @@ offset_tracking_snapshot(Config) ->
                           S00),
     ?assertMatch(#{<<"wid1">> := {_, Now, 2}}, osiris_log:writers(S0)),
     %% write a tracking entry
-    S1 = osiris_log:write_tracking(#{<<"id1">> => 1}, delta, S0),
+    S1 = osiris_log:write_tracking(#{<<"id1">> => {offset, 1}}, delta, S0),
     %% this should create at least two segments
     S2 = seed_log(S1, EpochChunks, Config),
     osiris_log:close(S2),
     S3 = osiris_log:init(Conf),
-    ?assertMatch(#{<<"id1">> := 1}, osiris_log:tracking(S3)),
+    ?assertMatch(#{<<"id1">> := {offset, 1}}, osiris_log:tracking(S3)),
     ?assertMatch(#{<<"wid1">> := {_, Now, 2}}, osiris_log:writers(S3)),
     osiris_log:close(S3),
     ok.
