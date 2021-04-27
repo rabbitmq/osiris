@@ -123,7 +123,7 @@ write_tracking(Pid, TrackingId, Offset) ->
 read_tracking(Pid, TrackingId) ->
     osiris_writer:read_tracking(Pid, TrackingId).
 
--spec read_tracking(pid()) -> #{binary() => offset()} | undefined.
+-spec read_tracking(pid()) -> #{binary() => {tracking_type(), offset()}} | undefined.
 read_tracking(Pid) ->
     osiris_writer:read_tracking(Pid).
 
