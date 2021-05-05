@@ -48,7 +48,7 @@ maybe_connect([], _Port, _Options) ->
 maybe_connect([H | T], Port, Options) ->
   case gen_tcp:connect(H, Port, Options) of
     {ok, Sock} ->
-      {ok, Sock};
+      {ok, Sock, H};
     {error, _} ->
       ?ERROR("replica connection refused, host:~s ",
         [H]),
@@ -97,21 +97,25 @@ init(#{hosts := Hosts,
        connection_token := Token} =
          Args) ->
     process_flag(trap_exit, true),
-    CntId = {?MODULE, ExtRef, Hosts, Port},
-    CntSpec = {CntId, ?COUNTER_FIELDS},
-    %% TODO: handle errors
-    {ok, Log} = osiris_writer:init_data_reader(LeaderPid, TailInfo, CntSpec),
-    CntRef = osiris_log:counters_ref(Log),
-    ?INFO("starting replica reader ~s at offset ~b Args: ~p",
-          [Name, osiris_log:next_offset(Log), Args]),
+
+
+
     SndBuf = 146988 * 10,
 
-    {ok, Sock} =
+    {ok, Sock, Host} =
       maybe_connect(Hosts, Port,
                         [binary,
                          {packet, 0},
                          {nodelay, true},
                          {sndbuf, SndBuf}]),
+
+  CntId = {?MODULE, ExtRef, Host, Port},
+  CntSpec = {CntId, ?COUNTER_FIELDS},
+  %% TODO: handle errors
+  {ok, Log} = osiris_writer:init_data_reader(LeaderPid, TailInfo, CntSpec),
+  CntRef = osiris_log:counters_ref(Log),
+  ?INFO("starting replica reader ~s at offset ~b Args: ~p",
+    [Name, osiris_log:next_offset(Log), Args]),
 
     ok = gen_tcp:send(Sock, Token),
     %% register data listener with osiris_proc
