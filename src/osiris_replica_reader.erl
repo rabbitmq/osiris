@@ -42,6 +42,19 @@
 -define(COUNTER_FIELDS, [offset_listeners]).
 -define(C_OFFSET_LISTENERS, ?C_NUM_LOG_FIELDS + 1).
 
+-spec maybe_connect(list(),integer(),list()) -> {ok, term()} | {error, term()} .
+maybe_connect([], _Port, _Options) ->
+  {error, connection_refused};
+maybe_connect([H | T], Port, Options) ->
+  case gen_tcp:connect(H, Port, Options) of
+    {ok, Sock} ->
+      {ok, Sock};
+    {error, _} ->
+      ?ERROR("replica connection refused, host:~s ",
+        [H]),
+      maybe_connect(T, Port, Options)
+  end.
+
 %%%===================================================================
 %%% API functions
 %%%===================================================================
@@ -74,7 +87,7 @@ stop(Pid) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init(#{host := Host,
+init(#{hosts := Hosts,
        port := Port,
        name := Name,
        replica_pid := ReplicaPid,
@@ -84,7 +97,7 @@ init(#{host := Host,
        connection_token := Token} =
          Args) ->
     process_flag(trap_exit, true),
-    CntId = {?MODULE, ExtRef, Host, Port},
+    CntId = {?MODULE, ExtRef, Hosts, Port},
     CntSpec = {CntId, ?COUNTER_FIELDS},
     %% TODO: handle errors
     {ok, Log} = osiris_writer:init_data_reader(LeaderPid, TailInfo, CntSpec),
@@ -92,12 +105,14 @@ init(#{host := Host,
     ?INFO("starting replica reader ~s at offset ~b Args: ~p",
           [Name, osiris_log:next_offset(Log), Args]),
     SndBuf = 146988 * 10,
+
     {ok, Sock} =
-        gen_tcp:connect(Host, Port,
+      maybe_connect(Hosts, Port,
                         [binary,
                          {packet, 0},
                          {nodelay, true},
                          {sndbuf, SndBuf}]),
+
     ok = gen_tcp:send(Sock, Token),
     %% register data listener with osiris_proc
     ok = osiris_writer:register_data_listener(LeaderPid, StartOffset),
