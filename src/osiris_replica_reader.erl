@@ -42,18 +42,18 @@
 -define(COUNTER_FIELDS, [offset_listeners]).
 -define(C_OFFSET_LISTENERS, ?C_NUM_LOG_FIELDS + 1).
 
--spec maybe_connect(list(),integer(),list()) -> {ok, term(), term()} | {error, term()} .
+-spec maybe_connect(list(), integer(), list()) ->
+                       {ok, term(), term()} | {error, term()}.
 maybe_connect([], _Port, _Options) ->
-  {error, connection_refused};
+    {error, connection_refused};
 maybe_connect([H | T], Port, Options) ->
-  case gen_tcp:connect(H, Port, Options) of
-    {ok, Sock} ->
-      {ok, Sock, H};
-    {error, _} ->
-      ?WARN("osiris replica connection refused, host:~p ",
-        [H]),
-      maybe_connect(T, Port, Options)
-  end.
+    case gen_tcp:connect(H, Port, Options) of
+        {ok, Sock} ->
+            {ok, Sock, H};
+        {error, _} ->
+            ?WARN("osiris replica connection refused, host:~p ", [H]),
+            maybe_connect(T, Port, Options)
+    end.
 
 %%%===================================================================
 %%% API functions
@@ -98,39 +98,38 @@ init(#{hosts := Hosts,
          Args) ->
     process_flag(trap_exit, true),
 
-
-
     SndBuf = 146988 * 10,
 
-    {ok, Sock, Host} =
-      maybe_connect(Hosts, Port,
-                        [binary,
-                         {packet, 0},
-                         {nodelay, true},
-                         {sndbuf, SndBuf}]),
+    case maybe_connect(Hosts, Port,
+                       [binary, {packet, 0}, {nodelay, true}, {sndbuf, SndBuf}])
+    of
+        {ok, Sock, Host} ->
+            CntId = {?MODULE, ExtRef, Host, Port},
+            CntSpec = {CntId, ?COUNTER_FIELDS},
+            %% TODO: handle errors
+            {ok, Log} =
+                osiris_writer:init_data_reader(LeaderPid, TailInfo, CntSpec),
+            CntRef = osiris_log:counters_ref(Log),
+            ?INFO("starting replica reader ~s at offset ~b Args: ~p",
+                  [Name, osiris_log:next_offset(Log), Args]),
 
-  CntId = {?MODULE, ExtRef, Host, Port},
-  CntSpec = {CntId, ?COUNTER_FIELDS},
-  %% TODO: handle errors
-  {ok, Log} = osiris_writer:init_data_reader(LeaderPid, TailInfo, CntSpec),
-  CntRef = osiris_log:counters_ref(Log),
-  ?INFO("starting replica reader ~s at offset ~b Args: ~p",
-    [Name, osiris_log:next_offset(Log), Args]),
-
-    ok = gen_tcp:send(Sock, Token),
-    %% register data listener with osiris_proc
-    ok = osiris_writer:register_data_listener(LeaderPid, StartOffset),
-    MRef = monitor(process, LeaderPid),
-    State =
-        maybe_send_committed_offset(#state{log = Log,
-                                           name = Name,
-                                           socket = Sock,
-                                           replica_pid = ReplicaPid,
-                                           leader_pid = LeaderPid,
-                                           leader_monitor_ref = MRef,
-                                           counter = CntRef,
-                                           counter_id = CntId}),
-    {ok, State}.
+            ok = gen_tcp:send(Sock, Token),
+            %% register data listener with osiris_proc
+            ok = osiris_writer:register_data_listener(LeaderPid, StartOffset),
+            MRef = monitor(process, LeaderPid),
+            State =
+                maybe_send_committed_offset(#state{log = Log,
+                                                   name = Name,
+                                                   socket = Sock,
+                                                   replica_pid = ReplicaPid,
+                                                   leader_pid = LeaderPid,
+                                                   leader_monitor_ref = MRef,
+                                                   counter = CntRef,
+                                                   counter_id = CntId}),
+            {ok, State};
+        {error, Reason} ->
+            {stop, Reason}
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -262,9 +261,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-do_sendfile(#state{socket = Sock,
-                   log = Log0} =
-                State0) ->
+do_sendfile(#state{socket = Sock, log = Log0} = State0) ->
     State = maybe_send_committed_offset(State0),
     case osiris_log:send_file(Sock, Log0) of
         {ok, Log} ->
