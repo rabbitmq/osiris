@@ -50,7 +50,7 @@ maybe_connect([H | T], Port, Options) ->
     {ok, Sock} ->
       {ok, Sock, H};
     {error, _} ->
-      ?WARN("replica connection refused, host:~s ",
+      ?WARN("osiris replica connection refused, host:~p ",
         [H]),
       maybe_connect(T, Port, Options)
   end.
