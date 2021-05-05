@@ -42,7 +42,7 @@
 -define(COUNTER_FIELDS, [offset_listeners]).
 -define(C_OFFSET_LISTENERS, ?C_NUM_LOG_FIELDS + 1).
 
--spec maybe_connect(list(),integer(),list()) -> {ok, term()} | {error, term()} .
+-spec maybe_connect(list(),integer(),list()) -> {ok, term(), term()} | {error, term()} .
 maybe_connect([], _Port, _Options) ->
   {error, connection_refused};
 maybe_connect([H | T], Port, Options) ->
