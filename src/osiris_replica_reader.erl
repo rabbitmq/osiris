@@ -50,7 +50,7 @@ maybe_connect([H | T], Port, Options) ->
     {ok, Sock} ->
       {ok, Sock, H};
     {error, _} ->
-      ?ERROR("replica connection refused, host:~s ",
+      ?WARN("replica connection refused, host:~s ",
         [H]),
       maybe_connect(T, Port, Options)
   end.
