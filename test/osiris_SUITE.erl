@@ -249,16 +249,16 @@ single_node_reader_counters(Config) ->
           replica_nodes => []},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     {ok, Log0} = osiris:init_reader(Leader, next, {test, []}),
-    Overview = osiris_counters:overview(),
+    Overview = seshat_counters:overview(osiris),
     ?assertEqual(1, maps:get(readers, maps:get({'osiris_writer', Name}, Overview))),
     {ok, Log1} = osiris_writer:init_data_reader(Leader, {0, empty}, {'test_data', []}),
-    Overview1 = osiris_counters:overview(),
+    Overview1 = seshat_counters:overview(osiris),
     ?assertEqual(2, maps:get(readers, maps:get({'osiris_writer', Name}, Overview1))),
     osiris_log:close(Log0),
-    Overview2 = osiris_counters:overview(),
+    Overview2 = seshat_counters:overview(osiris),
     ?assertEqual(1, maps:get(readers, maps:get({'osiris_writer', Name}, Overview2))),
     osiris_log:close(Log1),
-    Overview3 = osiris_counters:overview(),
+    Overview3 = seshat_counters:overview(osiris),
     ?assertEqual(0, maps:get(readers, maps:get({'osiris_writer', Name}, Overview3))).
 
 cluster_reader_counters(Config) ->
@@ -271,19 +271,19 @@ cluster_reader_counters(Config) ->
           leader_node => node(),
           replica_nodes => Replicas},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-    Overview0 = osiris_counters:overview(),
+    Overview0 = seshat_counters:overview(osiris),
     ?assertEqual(2, maps:get(readers, maps:get({'osiris_writer', Name}, Overview0))),
     {ok, Log0} = osiris:init_reader(Leader, next, {test, []}),
-    Overview1 = osiris_counters:overview(),
+    Overview1 = seshat_counters:overview(osiris),
     ?assertEqual(3, maps:get(readers, maps:get({'osiris_writer', Name}, Overview1))),
     {ok, Log1} = osiris_writer:init_data_reader(Leader, {0, empty}, {'test_data', []}),
-    Overview2 = osiris_counters:overview(),
+    Overview2 = seshat_counters:overview(osiris),
     ?assertEqual(4, maps:get(readers, maps:get({'osiris_writer', Name}, Overview2))),
     osiris_log:close(Log0),
-    Overview3 = osiris_counters:overview(),
+    Overview3 = seshat_counters:overview(osiris),
     ?assertEqual(3, maps:get(readers, maps:get({'osiris_writer', Name}, Overview3))),
     osiris_log:close(Log1),
-    Overview4 = osiris_counters:overview(),
+    Overview4 = seshat_counters:overview(osiris),
     ?assertEqual(2, maps:get(readers, maps:get({'osiris_writer', Name}, Overview4))).
 
 single_node_offset_listener2(Config) ->
@@ -406,7 +406,7 @@ read_validate_single_node(Config) ->
     % stop_profile(Config),
     {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}, {'test', []}),
 
-    ct:pal("~w counters ~p", [node(), osiris_counters:overview()]),
+    ct:pal("~w counters ~p", [node(), seshat_counters:overview(osiris)]),
 
     ct:pal("validating....", []),
     {Time, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
@@ -458,10 +458,10 @@ read_validate(Config) ->
     MsgSec = Num / (Time / 1000 / 1000),
     ct:pal("~b writes took ~wms ~w msg/s",
            [Num, trunc(Time div 1000), trunc(MsgSec)]),
-    ct:pal("~w counters ~p", [node(), osiris_counters:overview()]),
+    ct:pal("~w counters ~p", [node(), seshat_counters:overview(osiris)]),
     [begin
          ct:pal("~w counters ~p",
-                [N, rpc:call(N, osiris_counters, overview, [])])
+                [N, rpc:call(N, seshat_counters, overview, [osiris])])
      end
      || N <- Replicas],
 
@@ -544,14 +544,14 @@ cluster_restart_large(Config) ->
           leader_node => LeaderNode},
     {ok, #{leader_pid := Leader} = Conf} = osiris:start_cluster(Conf0),
     write_n(Leader, 255, 0, 1000000, #{}),
-    CountersPre = rpc:call(LeaderNode, osiris_counters, overview, []),
+    CountersPre = rpc:call(LeaderNode, seshat_counters, overview, [osiris]),
 
     osiris:stop_cluster(Conf),
     {ok, #{leader_pid := _Leader1}} =
         osiris:start_cluster(Conf0#{epoch => 2}),
     %% give leader some time to discover the committed offset
     timer:sleep(1000),
-    CountersPost = rpc:call(LeaderNode, osiris_counters, overview, []),
+    CountersPost = rpc:call(LeaderNode, seshat_counters, overview, [osiris]),
     %% assert key countesr are recovered
     ct:pal("Counters ~p", [CountersPost]),
     Keys = [first_offset, offset],
@@ -1412,7 +1412,7 @@ validate_log(Log0, Expected) ->
 print_counters() ->
     [begin
          ct:pal("~w counters ~p",
-                [N, rpc:call(N, osiris_counters, overview, [])])
+                [N, rpc:call(N, seshat_counters, overview, [osiris])])
      end
      || N <- nodes()].
 

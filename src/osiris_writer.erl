@@ -32,9 +32,14 @@
          stop/1,
          delete/1]).
 
--define(ADD_COUNTER_FIELDS, [committed_offset, readers]).
 -define(C_COMMITTED_OFFSET, ?C_NUM_LOG_FIELDS + 1).
 -define(C_READERS, ?C_NUM_LOG_FIELDS + 2).
+-define(ADD_COUNTER_FIELDS,
+        [
+         {committed_offset, ?C_COMMITTED_OFFSET, counter, "Last committed offset"},
+         {readers, ?C_READERS, counter, "Number of readers"}
+        ]
+       ).
 
 %% primary osiris process
 %% batch writes incoming data

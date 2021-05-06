@@ -52,22 +52,19 @@
 % maximum number of chunks per segment
 -define(DEFAULT_MAX_SEGMENT_SIZE_C, 256_000).
 -define(INDEX_RECORD_SIZE_B, 29).
--define(COUNTER_FIELDS,
-        [
-         %% the last offset (not chunk id) in the log (writers)
-         %% the last offset read (readers)
-         offset,
-         %% not updated for readers
-         first_offset,
-         %% number of chunks read or written
-         %% incremented even if a reader only reads the header
-         chunks,
-         %% number of segments
-         segments]).
 -define(C_OFFSET, 1).
 -define(C_FIRST_OFFSET, 2).
 -define(C_CHUNKS, 3).
 -define(C_SEGMENTS, 4).
+-define(COUNTER_FIELDS,
+        [
+         {offset, ?C_OFFSET, counter, "The last offset (not chunk id) in the log for writers. The last offset read for readers"
+         },
+         {first_offset, ?C_FIRST_OFFSET, counter, "First offset, not updated for readers"},
+         {chunks, ?C_CHUNKS, counter, "Number of chunks read or written, incremented even if a reader only reads the header"},
+         {segments, ?C_SEGMENTS, counter, "Number of segments"}
+        ]
+       ).
 
 %% Specification of the Log format.
 %%
@@ -1306,7 +1303,7 @@ close(#?MODULE{cfg = #cfg{counter_id = CntId,
         undefined ->
             ok;
         _ ->
-            osiris_counters:delete(CntId)
+            seshat_counters:delete(osiris, CntId)
     end.
 
 delete_directory(#{name := Name} = Config) when is_map(Config) ->
@@ -1986,7 +1983,7 @@ validate_crc(ChunkId, Crc, IOData) ->
 
 make_counter(#{counter_spec := {Name, Fields}}) ->
     %% create a registered counter
-    osiris_counters:new(Name, ?COUNTER_FIELDS ++ Fields);
+    seshat_counters:new(osiris, Name, ?COUNTER_FIELDS ++ Fields);
 make_counter(_) ->
     %% if no spec is provided we create a local counter only
     counters:new(?C_NUM_LOG_FIELDS, []).

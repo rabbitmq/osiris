@@ -16,7 +16,7 @@ start_link() ->
     supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
 init([]) ->
-    osiris_counters:init(),
+    seshat_counters:new_group(osiris),
     SupFlags =
         #{strategy => one_for_all,
           intensity => 5,
