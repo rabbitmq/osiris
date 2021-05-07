@@ -162,10 +162,10 @@ init(#{name := Name,
           [NextOffset]),
     %% spawn reader process on leader node
     {ok, HostName} = inet:gethostname(),
-    {ok, Ip} = inet:getaddr(HostName, inet),
+    {ok, Ips} = inet:getaddrs(HostName, inet),
     Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
     ReplicaReaderConf =
-        #{host => Ip,
+        #{hosts => Ips,
           port => Port,
           name => Name,
           replica_pid => self(),
