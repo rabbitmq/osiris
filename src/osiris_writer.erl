@@ -50,7 +50,7 @@
          event_formatter :: undefined | mfa()}).
 -record(?MODULE,
         {cfg :: #cfg{},
-         log = osiris_log:state(),
+         log :: osiris_log:state(),
          replica_state = #{} :: #{node() => {osiris:offset(), osiris:milliseconds()}},
          pending_corrs = queue:new() :: queue:queue(),
          duplicates = [] ::
