@@ -193,6 +193,7 @@ handle_batch(Commands,
                       committed_offset = COffs0,
                       log = Log0} =
                  State0) ->
+
     %% process commands in reverse order
     case catch lists:foldr(fun handle_command/2,
                            {State0, [], [], #{}, #{}, #{}, []}, Commands)
@@ -218,7 +219,7 @@ handle_batch(Commands,
                 end,
             AllChIds = maps:fold(fun (_, {O, _}, Acc) ->
                                          [O | Acc]
-                                     end, [LastChId], State2#?MODULE.replica_state),
+                                 end, [LastChId], State2#?MODULE.replica_state),
 
             COffs = agreed_commit(AllChIds),
 

@@ -7,7 +7,7 @@
 
 -module(osiris_log).
 
--include_lib("kernel/include/file.hrl").
+% -include_lib("kernel/include/file.hrl").
 
 -include("osiris.hrl").
 
@@ -48,8 +48,8 @@
 -define(LOG_HEADER, <<"OSIL", ?LOG_VERSION:32/unsigned>>).
 -define(IDX_HEADER_SIZE, 8).
 -define(LOG_HEADER_SIZE, 8).
--define(TRK_DELTA, 0).
--define(TRK_SNAP, 1).
+% -define(TRK_DELTA, 0).
+% -define(TRK_SNAP, 1).
 -define(TRK_TYPE_OFFSET, 0).
 -define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
 -define(INDEX_RECORD_SIZE_B, 28).
@@ -464,7 +464,8 @@ init(#{dir := Dir,
                                       mode =
                                           #write{type = WriterType,
                                                  tail_info = {0, empty},
-                                                 current_epoch = Epoch}});
+                                                 current_epoch = Epoch}}, 
+                            erlang:system_time(millisecond));
         [#seg_info{file = Filename,
                    index = IdxFilename,
                    size = Size,
@@ -560,7 +561,7 @@ write([_ | _] = Entries,
           State0) ->
     %% we need to open a new segment here to ensure tracking chunk
     %% is made before the one that triggers the new segment to be created
-    write(Entries, ChType, Now, Writers, open_new_segment(State0));
+    write(Entries, ChType, Now, Writers, open_new_segment(State0, Now));
 write([_ | _] = Entries,
       ChType,
       Now,
@@ -585,10 +586,14 @@ write([], _ChType, _Now, _Writers, State) ->
                      delta | snapshot,
                      state()) ->
                         state().
-write_tracking(Trk0, delta, State) when map_size(Trk0) == 0 ->
+write_tracking(Trk, Kind, State)  ->
+    Now = erlang:system_time(millisecond),
+    write_tracking(Trk, Kind, Now, State).
+
+write_tracking(Trk0, delta, _Ts, State) when map_size(Trk0) == 0 ->
     %% empty deltas do not need to be written
     State;
-write_tracking(Trk0, TrkType,
+write_tracking(Trk0, TrkType, Now,
                #?MODULE{cfg = #cfg{}, mode = #write{tracking = Tracking} = W0} =
                    State0) ->
     TData =
@@ -604,7 +609,6 @@ write_tracking(Trk0, TrkType,
                   end,
                   [], Trk0),
 
-    Now = erlang:system_time(millisecond),
     case TrkType of
         delta ->
             Trk = maps:merge(Tracking, Trk0),
@@ -615,9 +619,9 @@ write_tracking(Trk0, TrkType,
             write([TData], ?CHNK_TRK_SNAPSHOT, Now, #{}, State)
     end.
 
-write_wrt_snapshot(Writers, State) when map_size(Writers) == 0 ->
+write_wrt_snapshot(Writers, _Ts, State) when map_size(Writers) == 0 ->
     State;
-write_wrt_snapshot(Writers,
+write_wrt_snapshot(Writers, Now,
                    #?MODULE{cfg = #cfg{}, mode = #write{} = W0} = State0) ->
     WData =
         maps:fold(fun(W, {_O, T, S}, Acc) ->
@@ -628,8 +632,6 @@ write_wrt_snapshot(Writers,
                       | Acc]
                   end,
                   [], Writers),
-    Now = erlang:system_time(millisecond),
-
     State = State0#?MODULE{mode = W0#write{writers = Writers}},
     write([WData], ?CHNK_WRT_SNAPSHOT, Now, #{}, State).
 
@@ -659,7 +661,7 @@ accept_chunk([<<?MAGIC:4/unsigned,
     %% the empty map here instead of parsing the trailer
     case write_chunk(Chunk, #{}, Timestamp, Epoch, NumRecords, State0) of
         full ->
-            accept_chunk(Chunk, open_new_segment(State0));
+            accept_chunk(Chunk, open_new_segment(State0, Timestamp));
         State ->
             State
     end;
@@ -996,7 +998,7 @@ init_offset_reader(OffsetSpec,
                    #{dir := Dir,
                      name := Name,
                      offset_ref := OffsetRef,
-                     readers_counter_fun := Fun} =
+                     readers_counter_fun := ReaderCounterFun} =
                        Conf) ->
     SegInfo = build_log_overview(Dir),
     Range = range_from_segment_infos(SegInfo),
@@ -1038,13 +1040,13 @@ init_offset_reader(OffsetSpec,
                     end,
                 {ok, _Pos} = file:position(Fd, FilePos),
                 Cnt = make_counter(Conf),
-                Fun(1),
+                ReaderCounterFun(1),
                 {ok,
                  #?MODULE{cfg =
                               #cfg{directory = Dir,
                                    counter = Cnt,
                                    name = Name,
-                                   readers_counter_fun = Fun,
+                                   readers_counter_fun = ReaderCounterFun,
                                    first_offset_fun = fun (_) -> ok end
                                   },
                           mode =
@@ -1806,7 +1808,7 @@ open_new_segment(#?MODULE{cfg =
                                      writers = Writers0,
                                      segment_size = _SegSize,
                                      tail_info = {NextOffset, _}}} =
-                     State0) ->
+                     State0, Timestamp) ->
     Filename = make_file_name(NextOffset, "segment"),
     IdxFilename = make_file_name(NextOffset, "index"),
     ?DEBUG("~s: ~s : ~s", [?MODULE, ?FUNCTION_NAME, Filename]),
@@ -1842,8 +1844,8 @@ open_new_segment(#?MODULE{cfg =
         case WriterType of
             writer when NextOffset > 0 ->
                 %% if we are a writer then we should write snapshots
-                State2 = write_tracking(Tracking, snapshot, State1),
-                write_wrt_snapshot(Writers, State2);
+                State2 = write_tracking(Tracking, snapshot, Timestamp, State1),
+                write_wrt_snapshot(Writers, Timestamp, State2);
             writer ->
                 State1;
             acceptor ->
@@ -2161,7 +2163,7 @@ trigger_retention_eval(#?MODULE{cfg =
 
 -ifdef(TEST).
 
--include_lib("eunit/include/eunit.hrl").
+% -include_lib("eunit/include/eunit.hrl").
 
 part_test() ->
     [<<"ABCD">>] = part(4, [<<"ABCDEF">>]),
