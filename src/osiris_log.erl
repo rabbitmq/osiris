@@ -336,7 +336,9 @@
       epoch => non_neg_integer(),
       first_offset_fun => fun((integer()) -> ok),
       max_segment_size => non_neg_integer(),
-      counter_spec => counter_spec()}.
+      counter_spec => counter_spec(),
+      %% used when initialising a log from an offset other than 0
+      initial_offset => osiris:offset()}.
 -type record() :: {offset(), iodata()}.
 -type offset_spec() :: osiris:offset_spec().
 -type retention_spec() :: osiris:retention_spec().
@@ -460,12 +462,19 @@ init(#{dir := Dir,
                first_offset_fun = FirstOffsetFun},
     case lists:reverse(build_log_overview(Dir)) of
         [] ->
+            NextOffset = case Config of
+                             #{initial_offset := IO}
+                               when WriterType == acceptor ->
+                                 IO;
+                             _ ->
+                                 0
+                         end,
             open_new_segment(#?MODULE{cfg = Cfg,
                                       mode =
                                           #write{type = WriterType,
-                                                 tail_info = {0, empty},
+                                                 tail_info = {NextOffset, empty},
                                                  current_epoch = Epoch}}, 
-                            erlang:system_time(millisecond));
+                             erlang:system_time(millisecond));
         [#seg_info{file = Filename,
                    index = IdxFilename,
                    size = Size,
@@ -842,7 +851,8 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir,
             %% this assumes the offset is in range
             %% first we need to validate PrevEO
             case PrevEO of
-                empty when StartOffset == 0 ->
+                empty ->
+                % empty when StartOffset == 0 ->
                     case find_segment_for_offset(StartOffset, SegInfos) of
                         not_found ->
                             %% this is unexpected and thus an error
@@ -1569,6 +1579,7 @@ eval_max_bytes(SegInfos, MaxSize) ->
             end
     end.
 
+%% returns a list of the last offset in each epoch
 last_offset_epochs([#seg_info{first = undefined,
                               last = undefined}]) ->
     [];

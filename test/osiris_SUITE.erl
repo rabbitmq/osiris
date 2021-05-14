@@ -42,6 +42,7 @@ all_tests() ->
      restart_replica,
      diverged_replica,
      retention,
+     retention_add_replica_after,
      retention_overtakes_offset_reader,
      update_retention,
      update_retention_replica,
@@ -807,7 +808,7 @@ retention(Config) ->
           retention => [{max_bytes, SegSize}],
           max_segment_size => SegSize,
           replica_nodes => []},
-    {ok, #{leader_pid := Leader, replica_pids := []}} =
+    {ok, #{leader_pid := Leader, replica_pids := []} = Conf1} =
         osiris:start_cluster(Conf0),
     timer:sleep(500),
     write_n(Leader, Num, 0, 1000 * 8, #{}),
@@ -815,6 +816,70 @@ retention(Config) ->
     Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
     %% one file only
     [_] = filelib:wildcard(Wc),
+    osiris:stop_cluster(Conf1),
+    ok.
+
+retention_add_replica_after(Config) ->
+    DataDir = ?config(data_dir, Config),
+    Num = 150000,
+    Name = ?config(cluster_name, Config),
+    SegSize = 50000 * 1000,
+    [LeaderNode, Replica1, Replica2]  =
+        Nodes = [start_child_node(N, DataDir) || N <- [s1, s2, s3]],
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => LeaderNode,
+          retention => [{max_bytes, SegSize}],
+          max_segment_size => SegSize,
+          replica_nodes => [Replica1]},
+    {ok, #{leader_pid := Leader,
+           replica_pids := [ReplicaPid]} = Conf1} =
+        osiris:start_cluster(Conf0),
+    ok = osiris:write(Leader, undefined, 0, <<"first">>),
+    write_n(Leader, Num, 0, 1000 * 8, #{}),
+    ok = osiris:write(Leader, undefined, 0, <<"last">>),
+
+    ct:pal("checking 1", []),
+    check_last_entry(Leader, <<"last">>),
+    check_last_entry(ReplicaPid, <<"last">>),
+
+    ct:pal("stop cluster", []),
+    ok = osiris:stop_cluster(Conf1),
+    ct:pal("stopped cluster", []),
+
+    {ok, #{leader_pid := Leader2,
+           replica_pids := [ReplicaPid1, ReplicaPid2]} = Conf2} =
+        osiris:start_cluster(Conf0#{replica_nodes => [Replica1, Replica2],
+                                    epoch => 2}),
+    timer:sleep(2000),
+
+    %% validate all members have the same last entry
+    ct:pal("checking 2", []),
+    check_last_entry(Leader2, <<"last">>),
+    check_last_entry(ReplicaPid1, <<"last">>),
+    check_last_entry(ReplicaPid2, <<"last">>),
+    ok = osiris:stop_cluster(Conf2),
+    [slave:stop(N) || N <- Nodes],
+    ok.
+
+check_last_entry(Pid, Entry) when is_pid(Pid) ->
+    Self = self(),
+    ct:pal("checking last entry for node ~s ~w", [node(Pid), Pid]),
+    X = spawn(node(Pid),
+               fun () ->
+                       {ok, Log0} = osiris:init_reader(Pid, last, {test, []}),
+                       [{_, Entry}] = read_til_end(Log0, undefined),
+                       Self ! {self(), done},
+                       ok
+               end),
+    receive
+        {X, done} ->
+            ct:pal("checking last entry done ~w", [node(Pid)]),
+            ok
+    after 10000 ->
+              exit({done_timeout, X})
+    end,
     ok.
 
 retention_overtakes_offset_reader(Config) ->
@@ -1240,7 +1305,9 @@ validate_read(Max, Next, Log0) ->
     end.
 
 start_child_node(N, PrivDir) ->
+    _ = file:make_dir(PrivDir),
     Dir0 = filename:join(PrivDir, N),
+    ok = file:make_dir(Dir0),
     Host = get_current_host(),
     Dir = "'\"" ++ Dir0 ++ "\"'",
     Pa = string:join(["-pa" | search_paths()]
@@ -1249,6 +1316,7 @@ start_child_node(N, PrivDir) ->
     ct:pal("starting child node with ~s~n", [Pa]),
     {ok, S} = slave:start_link(Host, N, Pa),
     ct:pal("started child node ~w ~w~n", [S, Host]),
+    ok = rpc:call(S, ?MODULE, node_setup, [Dir0]),
     ok = rpc:call(S, osiris, configure_logger, [logger]),
     Res = rpc:call(S, application, ensure_all_started, [osiris]),
     ok = rpc:call(S, logger, set_primary_config, [level, all]),
@@ -1333,3 +1401,15 @@ read_til_end(Log0, Last) ->
     end.
 
 
+node_setup(DataDir) ->
+    LogFile = filename:join([DataDir, "osiris.log"]),
+    SaslFile = filename:join([DataDir, "osiris_sasl.log"]),
+    logger:set_primary_config(level, debug),
+    Config = #{config => #{type => {file, LogFile}}, level => debug},
+    logger:add_handler(ra_handler, logger_std_h, Config),
+    application:load(sasl),
+    application:set_env(sasl, sasl_error_logger, {file, SaslFile}),
+    application:stop(sasl),
+    application:start(sasl),
+    _ = error_logger:tty(false),
+    ok.

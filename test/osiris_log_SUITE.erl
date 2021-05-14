@@ -46,6 +46,7 @@ all_tests() ->
      init_data_reader_truncated,
      init_epoch_offsets_empty,
      init_epoch_offsets_empty_writer,
+     init_epoch_offsets_truncated_writer,
      init_epoch_offsets,
      init_epoch_offsets_multi_segment,
      init_epoch_offsets_multi_segment2,
@@ -535,6 +536,22 @@ init_epoch_offsets_empty_writer(Config) ->
         osiris_log:init_acceptor(EOffs, Conf#{dir => LDir, epoch => 2}),
     {0, empty} = osiris_log:tail_info(Log0),
     osiris_log:close(Log0),
+    ok.
+
+init_epoch_offsets_truncated_writer(Config) ->
+    %% test acceptor initialisation where the acceptor has no log and the writer
+    %% has had retention remove the head of it's log
+    Conf = ?config(osiris_conf, Config),
+    LDir = ?config(leader_dir, Config),
+    EOffs = [{3, 100}],
+    Log0 =
+        osiris_log:init_acceptor(EOffs, Conf#{dir => LDir,
+                                              epoch => 2,
+                                              initial_offset => 100}),
+    {100, empty} = osiris_log:tail_info(Log0),
+    osiris_log:close(Log0),
+
+    ?assert(filelib:is_file(filename:join(LDir, "00000000000000000100.index"))),
     ok.
 
 init_epoch_offsets(Config) ->

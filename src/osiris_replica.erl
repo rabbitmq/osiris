@@ -133,13 +133,20 @@ init(#{name := Name,
     ORef = atomics:new(2, [{signed, true}]),
     atomics:put(ORef, 1, -1),
     atomics:put(ORef, 2, -1),
-    {ok, {_, LeaderEpochOffs}} =
+    {ok, {LeaderRange, LeaderEpochOffs}} =
         rpc:call(Node, osiris_writer, overview, [LeaderPid]),
     ?DEBUG("~s: writer epoch offset ~w", [?MODULE, LeaderEpochOffs]),
+    InitOffset = case LeaderRange  of
+                     empty ->
+                         0;
+                     {FirstLeaderOffset, _} ->
+                         FirstLeaderOffset
+                 end,
 
     Dir = osiris_log:directory(Config),
     Log = osiris_log:init_acceptor(LeaderEpochOffs,
                                    Config#{dir => Dir,
+                                           initial_offset => InitOffset,
                                            first_offset_fun =>
                                            fun (Fst) ->
                                                    atomics:put(ORef, 2, Fst)
@@ -532,8 +539,3 @@ select_formatter(undefined, Fmt) ->
 select_formatter(Fmt, _) ->
     Fmt.
 
--ifdef(TEST).
-
--include_lib("eunit/include/eunit.hrl").
-
--endif.

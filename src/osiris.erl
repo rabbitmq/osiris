@@ -233,8 +233,3 @@ start_replicas(Config, [Node | Nodes], ReplicaPids) ->
 configure_logger(Module) ->
     persistent_term:put('$osiris_logger', Module).
 
--ifdef(TEST).
-
--include_lib("eunit/include/eunit.hrl").
-
--endif.
