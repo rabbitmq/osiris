@@ -1212,8 +1212,9 @@ send_file(Sock,
             case ChType == ?CHNK_USER orelse RType == data of
                 true ->
                     _ = Callback(Header, ToSend),
-                    case sendfile(Transport, Fd, Sock, Pos, NextFilePos, ToSend) of
+                    case sendfile(Transport, Fd, Sock, Pos, ToSend) of
                         ok ->
+                            {ok, _} = file:position(Fd, NextFilePos),
                             {ok, State};
                         Err ->
                             Err
@@ -1702,23 +1703,20 @@ write_chunk(Chunk,
                                           segment_size = SegSize + Size}}
     end.
 
-sendfile(_Transport, Fd, _Sock, _Pos, NextPos, 0) ->
-    {ok, _} = file:position(Fd, NextPos),
+sendfile(_Transport, _Fd, _Sock, _Pos, 0) ->
     ok;
-sendfile(tcp = Transport, Fd, Sock, Pos, NextPos, ToSend) ->
-    {ok, _} = file:position(Fd, NextPos),
+sendfile(tcp = Transport, Fd, Sock, Pos, ToSend) ->
     case file:sendfile(Fd, Sock, Pos, ToSend, []) of
         {ok, 0} ->
             %% TODO add counter for this?
-            sendfile(Transport, Fd, Sock, Pos, NextPos, ToSend);
+            sendfile(Transport, Fd, Sock, Pos, ToSend);
         {ok, BytesSent} ->
-            sendfile(Transport, Fd, Sock, Pos + BytesSent, NextPos, ToSend - BytesSent);
+            sendfile(Transport, Fd, Sock, Pos + BytesSent, ToSend - BytesSent);
         {error, _} = Err ->
             Err
     end;
-sendfile(ssl, Fd, Sock, Pos, NextPos, ToSend) ->
+sendfile(ssl, Fd, Sock, Pos, ToSend) ->
     {ok, Data} = file:pread(Fd, Pos, ToSend),
-    {ok, _} = file:position(Fd, NextPos),
     ssl:send(Sock, Data).
 
 range_from_segment_infos([#seg_info{first = undefined,
