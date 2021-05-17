@@ -372,7 +372,8 @@
         {type :: data | offset,
          offset_ref :: undefined | atomics:atomics_ref(),
          last_offset = 0 :: offset(),
-         next_offset = 0 :: offset()}).
+         next_offset = 0 :: offset(),
+         transport :: tcp | ssl}).
 -record(write,
         {type = writer :: writer | acceptor,
          segment_size = 0 :: non_neg_integer(),
@@ -939,7 +940,8 @@ init_data_reader_from_segment(#{dir := Dir, name := Name} = Config,
              mode =
                  #read{type = data,
                        offset_ref = maps:get(offset_ref, Config, undefined),
-                       next_offset = NextOffs},
+                       next_offset = NextOffs,
+                       transport = maps:get(transport, Config, tcp)},
              fd = Fd}.
 
 %% @doc Initialise a new offset reader
@@ -1062,7 +1064,8 @@ init_offset_reader(OffsetSpec,
                           mode =
                               #read{type = offset,
                                     offset_ref = OffsetRef,
-                                    next_offset = ChOffs},
+                                    next_offset = ChOffs,
+                                    transport = maps:get(transport, Conf, tcp)},
                           fd = Fd}}
             catch
                 missing_file ->
@@ -1202,7 +1205,8 @@ send_file(Sock, State) ->
                    {error, term()} |
                    {end_of_stream, state()}.
 send_file(Sock,
-          #?MODULE{cfg = #cfg{}, mode = #read{type = RType}} = State0,
+          #?MODULE{cfg = #cfg{}, mode = #read{type = RType,
+                                              transport = Transport}} = State0,
           Callback) ->
     case read_header0(State0) of
         {ok,
@@ -1233,20 +1237,21 @@ send_file(Sock,
             %% sendfile doesn't increment the file descriptor position
             %% so we have to do this manually
             NextFilePos = Pos + DataSize + TrailerSize + ?HEADER_SIZE_B,
-            {ok, _} = file:position(Fd, NextFilePos),
             State = State1#?MODULE{mode = incr_next_offset(NumRecords, Read)},
             %% only sendfile if either the reader is a data reader
             %% or the chunk is a user type (for offset readers)
             case ChType == ?CHNK_USER orelse RType == data of
                 true ->
                     _ = Callback(Header, ToSend),
-                    case sendfile(Fd, Sock, Pos, ToSend) of
+                    case sendfile(Transport, Fd, Sock, Pos, ToSend) of
                         ok ->
+                            {ok, _} = file:position(Fd, NextFilePos),
                             {ok, State};
                         Err ->
                             Err
                     end;
                 false ->
+                    {ok, _} = file:position(Fd, NextFilePos),
                     %% skip chunk and recurse
                     send_file(Sock, State, Callback)
             end;
@@ -1732,18 +1737,21 @@ write_chunk(Chunk,
                                           segment_size = SegSize + Size}}
     end.
 
-sendfile(_Fd, _Sock, _Pos, 0) ->
+sendfile(_Transport, _Fd, _Sock, _Pos, 0) ->
     ok;
-sendfile(Fd, Sock, Pos, ToSend) ->
+sendfile(tcp = Transport, Fd, Sock, Pos, ToSend) ->
     case file:sendfile(Fd, Sock, Pos, ToSend, []) of
         {ok, 0} ->
             %% TODO add counter for this?
-            sendfile(Fd, Sock, Pos, ToSend);
+            sendfile(Transport, Fd, Sock, Pos, ToSend);
         {ok, BytesSent} ->
-            sendfile(Fd, Sock, Pos + BytesSent, ToSend - BytesSent);
+            sendfile(Transport, Fd, Sock, Pos + BytesSent, ToSend - BytesSent);
         {error, _} = Err ->
             Err
-    end.
+    end;
+sendfile(ssl, Fd, Sock, Pos, ToSend) ->
+    {ok, Data} = file:pread(Fd, Pos, ToSend),
+    ssl:send(Sock, Data).
 
 range_from_segment_infos([#seg_info{first = undefined,
                                     last = undefined}]) ->
