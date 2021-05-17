@@ -860,12 +860,12 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir,
                             %% this is unexpected and thus an error
                             {error,
                              {invalid_last_offset_epoch, PrevE, unknown}};
-                        {_, #seg_info{file = PrevSeg, index = PrevIdxFile}} ->
+                        {_, #seg_info{file = PrevSeg, index = PrevIdxFile, last = LastChunk}} ->
                             %% prev segment exists, does it have the correct
                             %% epoch?
                             {ok, Fd} = file:open(PrevSeg, [raw, binary, read]),
                             %% TODO: next offset needs to be a chunk offset
-                            {_, FilePos} = scan_idx(PrevIdxFile, PrevO),
+                            {_, FilePos} = scan_idx(PrevIdxFile, PrevO, LastChunk),
                             {ok, FilePos} = file:position(Fd, FilePos),
                             case file:read(Fd, ?HEADER_SIZE_B) of
                                 {ok,
@@ -911,12 +911,11 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir,
     end.
 
 init_data_reader_from_segment(#{dir := Dir, name := Name} = Config,
-                              #seg_info{file = StartSegment, index = IndexFile},
+                              #seg_info{file = StartSegment, index = IndexFile, last = LastChunk},
                               NextOffs, CounterFun) ->
     {ok, Fd} = file:open(StartSegment, [raw, binary, read]),
     %% TODO: next offset needs to be a chunk offset
-	{ok, IdxFd} = open_index_read(IndexFile),
-    {_, FilePos} = scan_idx(IdxFd, NextOffs),
+    {_, FilePos} = scan_idx(IndexFile, NextOffs, LastChunk),
     {ok, _Pos} = file:position(Fd, FilePos),
     Cnt = make_counter(Config),
     counters:put(Cnt, ?C_OFFSET, NextOffs - 1),
@@ -1024,12 +1023,11 @@ init_offset_reader(OffsetSpec,
     case find_segment_for_offset(StartOffset, SegInfo) of
         not_found ->
             {error, {offset_out_of_range, Range}};
-        {_, #seg_info{file = StartSegment, index = IndexFile}} ->
+        {_, #seg_info{file = StartSegment, index = IndexFile, last = LastChunk}} ->
             try
                 {ok, Fd} = open(StartSegment, [raw, binary, read]),
-				IdxFd = open_index_read(IndexFile),
                 {ChOffs, FilePos} =
-                    case scan_idx(IdxFd, StartOffset) of
+                    case scan_idx(IndexFile, StartOffset, LastChunk) of
                         eof ->
                             {StartOffset, 0};
                         enoent ->
@@ -1804,23 +1802,59 @@ open_index_read(File) ->
     _ = file:read(Fd, ?IDX_HEADER_SIZE),
     Fd.
 
-scan_idx(Fd, Offset) ->
+scan_idx(IndexFile, Offset, LastChunkInSegment) when is_list(IndexFile) ->
+    IndexFd = open_index_read(IndexFile),
+    Result = scan_idx(IndexFd, Offset, LastChunkInSegment),
+    file:close(IndexFd),
+    Result;
+
+%% no known last chunk -> return the first chunk
+scan_idx(_Fd, _Offset, undefined) ->
+    {0, ?LOG_HEADER_SIZE};
+
+scan_idx(Fd, Offset, LastChunkInSegment) when is_record(LastChunkInSegment, chunk_info) ->
     case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
         {ok,
          <<ChunkId:64/unsigned,
            _Timestamp:64/signed,
            _Epoch:64/unsigned,
            FilePos:32/unsigned>>} ->
-            case Offset =< ChunkId of
+            case Offset < ChunkId of
                 true ->
-                    % ok = file:close(Fd),
+                    %% offset is lower than the first chunk in this segment
                     {ChunkId, FilePos};
                 false ->
-                    scan_idx(Fd, Offset)
+                    case Offset > (LastChunkInSegment#chunk_info.id + LastChunkInSegment#chunk_info.num - 1) of
+                        true ->
+                            %% offset higher than the last chunk in this segment
+                            {LastChunkInSegment#chunk_info.id + LastChunkInSegment#chunk_info.num, eof};
+                        false ->
+                            %% offset is in this segment
+                            scan_idx(Fd, Offset, {ChunkId, FilePos})
+                    end
+            end;
+        {error, Posix} ->
+            Posix
+    end;
+
+scan_idx(Fd, Offset, {PreviousChunkId, PreviousChunkFilePos}) ->
+    case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
+        {ok,
+         <<ChunkId:64/unsigned,
+           _Timestamp:64/signed,
+           _Epoch:64/unsigned,
+           FilePos:32/unsigned>>} ->
+            case Offset < ChunkId of
+                true ->
+                    %% offset we are looking for is higher or equal to the start of the previous chunk
+                    %% but lower than the start of the current chunk -> return the previous chunk
+                    {PreviousChunkId, PreviousChunkFilePos};
+                false ->
+                    scan_idx(Fd, Offset, {ChunkId, FilePos})
             end;
         eof ->
-            ok = file:close(Fd),
-            eof
+            %% Offset is in the last chunk
+            {PreviousChunkId, PreviousChunkFilePos}
     end.
 
 throw_missing({error, enoent}) ->
