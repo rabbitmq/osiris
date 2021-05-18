@@ -871,12 +871,12 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir,
                             %% this is unexpected and thus an error
                             {error,
                              {invalid_last_offset_epoch, PrevE, unknown}};
-                        {_, #seg_info{file = PrevSeg, index = PrevIdxFile, last = LastChunk}} ->
+                        {_, SegmentInfo = #seg_info{file = PrevSeg}} ->
                             %% prev segment exists, does it have the correct
                             %% epoch?
                             {ok, Fd} = file:open(PrevSeg, [raw, binary, read]),
                             %% TODO: next offset needs to be a chunk offset
-                            {_, FilePos} = scan_idx(PrevIdxFile, PrevO, LastChunk),
+                            {_, FilePos} = scan_idx(PrevO, SegmentInfo),
                             {ok, FilePos} = file:position(Fd, FilePos),
                             case file:read(Fd, ?HEADER_SIZE_B) of
                                 {ok,
@@ -922,11 +922,11 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir,
     end.
 
 init_data_reader_from_segment(#{dir := Dir, name := Name} = Config,
-                              #seg_info{file = StartSegment, index = IndexFile, last = LastChunk},
+                              SegmentInfo = #seg_info{file = StartSegment},
                               NextOffs, CounterFun) ->
     {ok, Fd} = file:open(StartSegment, [raw, binary, read]),
     %% TODO: next offset needs to be a chunk offset
-    {_, FilePos} = scan_idx(IndexFile, NextOffs, LastChunk),
+    {_, FilePos} = scan_idx(NextOffs, SegmentInfo),
     {ok, _Pos} = file:position(Fd, FilePos),
     Cnt = make_counter(Config),
     counters:put(Cnt, ?C_OFFSET, NextOffs - 1),
@@ -1035,11 +1035,11 @@ init_offset_reader(OffsetSpec,
     case find_segment_for_offset(StartOffset, SegInfo) of
         not_found ->
             {error, {offset_out_of_range, Range}};
-        {_, #seg_info{file = StartSegment, index = IndexFile, last = LastChunk}} ->
+        {_, SegmentInfo = #seg_info{file = StartSegment}} ->
             try
                 {ok, Fd} = open(StartSegment, [raw, binary, read]),
                 {ChOffs, FilePos} =
-                    case scan_idx(IndexFile, StartOffset, LastChunk) of
+                    case scan_idx(StartOffset, SegmentInfo) of
                         eof ->
                             {StartOffset, 0};
                         enoent ->
@@ -1821,17 +1821,24 @@ open_index_read(File) ->
     _ = file:read(Fd, ?IDX_HEADER_SIZE),
     Fd.
 
-scan_idx(IndexFile, Offset, LastChunkInSegment) when is_list(IndexFile) ->
-    IndexFd = open_index_read(IndexFile),
-    Result = scan_idx(IndexFd, Offset, LastChunkInSegment),
-    file:close(IndexFd),
-    Result;
+scan_idx(Offset, SegmentInfo = #seg_info{index = IndexFile, last = LastChunkInSegment}) ->
+    case range_from_segment_infos([SegmentInfo]) of
+        empty -> 
+            %% if the index is empty do we really know the offset will be next
+            %% this relies on us always reducing the Offset to within the log range
+            {0, ?LOG_HEADER_SIZE};
+        {SegmentStart, SegmentEnd} ->
+            case Offset < SegmentStart orelse Offset > SegmentEnd + 1 of
+                true -> offset_out_of_range;
+                false ->
+                    IndexFd = open_index_read(IndexFile),
+                    Result = scan_idx(IndexFd, Offset, LastChunkInSegment),
+                    file:close(IndexFd),
+                    Result
+            end
+    end.
 
-%% no known last chunk -> return the first chunk
-scan_idx(_Fd, _Offset, undefined) ->
-    {0, ?LOG_HEADER_SIZE};
-
-scan_idx(Fd, Offset, LastChunkInSegment) when is_record(LastChunkInSegment, chunk_info) ->
+scan_idx(Fd, Offset, #chunk_info{id = LastChunkInSegmentId, num = LastChunkInSegmentNum}) ->
     case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
         {ok,
          <<ChunkId:64/unsigned,
@@ -1841,22 +1848,26 @@ scan_idx(Fd, Offset, LastChunkInSegment) when is_record(LastChunkInSegment, chun
             case Offset < ChunkId of
                 true ->
                     %% offset is lower than the first chunk in this segment
-                    {ChunkId, FilePos};
+                    %% shouldn't really happen as we check the range above
+                    offset_out_of_range;
                 false ->
-                    case Offset > (LastChunkInSegment#chunk_info.id + LastChunkInSegment#chunk_info.num - 1) of
+                    case Offset > (LastChunkInSegmentId + LastChunkInSegmentNum - 1) of
                         true ->
                             %% offset higher than the last chunk in this segment
-                            {LastChunkInSegment#chunk_info.id + LastChunkInSegment#chunk_info.num, eof};
+                            {LastChunkInSegmentId + LastChunkInSegmentNum, eof};
                         false ->
                             %% offset is in this segment
                             scan_idx(Fd, Offset, {ChunkId, FilePos})
                     end
             end;
+        eof ->
+            %% this should never happen - offset is in the range and we are raeding the first record
+            {error, eof};
         {error, Posix} ->
             Posix
     end;
 
-scan_idx(Fd, Offset, {PreviousChunkId, PreviousChunkFilePos}) ->
+scan_idx(Fd, Offset, PreviousChunk) ->
     case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
         {ok,
          <<ChunkId:64/unsigned,
@@ -1867,13 +1878,13 @@ scan_idx(Fd, Offset, {PreviousChunkId, PreviousChunkFilePos}) ->
                 true ->
                     %% offset we are looking for is higher or equal to the start of the previous chunk
                     %% but lower than the start of the current chunk -> return the previous chunk
-                    {PreviousChunkId, PreviousChunkFilePos};
+                    PreviousChunk;
                 false ->
                     scan_idx(Fd, Offset, {ChunkId, FilePos})
             end;
         eof ->
             %% Offset is in the last chunk
-            {PreviousChunkId, PreviousChunkFilePos}
+            PreviousChunk
     end.
 
 throw_missing({error, enoent}) ->
