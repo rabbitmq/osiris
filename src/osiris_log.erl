@@ -1861,12 +1861,11 @@ scan_idx(Fd, Offset, #chunk_info{id = LastChunkInSegmentId, num = LastChunkInSeg
                     end
             end;
         eof ->
-            %% this should never happen - offset is in the range and we are raeding the first record
-            {error, eof};
+            %% this should never happen - offset is in the range and we are reading the first record
+            eof;
         {error, Posix} ->
             Posix
     end;
-
 scan_idx(Fd, Offset, PreviousChunk) ->
     case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
         {ok,
