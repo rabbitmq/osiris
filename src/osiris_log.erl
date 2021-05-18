@@ -391,9 +391,9 @@
          fd :: undefined | file:io_device(),
          index_fd :: undefined | file:io_device()}).
 -record(chunk_info,
-        {epoch :: epoch(),
+		{id :: offset(),
          timestamp :: non_neg_integer(),
-         id :: offset(),
+		 epoch :: epoch(),
          num :: non_neg_integer()
          }).
 -record(seg_info,
@@ -871,12 +871,12 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir,
                             %% this is unexpected and thus an error
                             {error,
                              {invalid_last_offset_epoch, PrevE, unknown}};
-                        {_, #seg_info{file = PrevSeg, index = PrevIdxFile}} ->
+                        {_, SegmentInfo = #seg_info{file = PrevSeg}} ->
                             %% prev segment exists, does it have the correct
                             %% epoch?
                             {ok, Fd} = file:open(PrevSeg, [raw, binary, read]),
                             %% TODO: next offset needs to be a chunk offset
-                            {_, FilePos} = scan_index(PrevIdxFile, Fd, PrevO),
+                            {_, FilePos} = scan_idx(PrevO, SegmentInfo),
                             {ok, FilePos} = file:position(Fd, FilePos),
                             case file:read(Fd, ?HEADER_SIZE_B) of
                                 {ok,
@@ -922,11 +922,11 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir,
     end.
 
 init_data_reader_from_segment(#{dir := Dir, name := Name} = Config,
-                              #seg_info{file = StartSegment, index = IndexFile},
+                              SegmentInfo = #seg_info{file = StartSegment},
                               NextOffs, CounterFun) ->
     {ok, Fd} = file:open(StartSegment, [raw, binary, read]),
     %% TODO: next offset needs to be a chunk offset
-    {_, FilePos} = scan_index(IndexFile, Fd, NextOffs),
+    {_, FilePos} = scan_idx(NextOffs, SegmentInfo),
     {ok, _Pos} = file:position(Fd, FilePos),
     Cnt = make_counter(Config),
     counters:put(Cnt, ?C_OFFSET, NextOffs - 1),
@@ -1035,11 +1035,11 @@ init_offset_reader(OffsetSpec,
     case find_segment_for_offset(StartOffset, SegInfo) of
         not_found ->
             {error, {offset_out_of_range, Range}};
-        {_, #seg_info{file = StartSegment, index = IndexFile}} ->
+        {_, SegmentInfo = #seg_info{file = StartSegment}} ->
             try
                 {ok, Fd} = open(StartSegment, [raw, binary, read]),
                 {ChOffs, FilePos} =
-                    case scan_index(IndexFile, Fd, StartOffset) of
+                    case scan_idx(StartOffset, SegmentInfo) of
                         eof ->
                             {StartOffset, 0};
                         enoent ->
@@ -1306,69 +1306,6 @@ header_info(Fd, Pos) ->
        _Reserved:32>>} =
         file:read(Fd, ?HEADER_SIZE_B),
     {ChType, Offset, Epoch, Num, Size, TSize}.
-
-scan_index(IdxFile, SegFd, Offs) when is_list(IdxFile) ->
-    case file:open(IdxFile, [read, raw, binary, read_ahead]) of
-        {ok, Fd} ->
-            case file:read(Fd, ?IDX_HEADER_SIZE) of
-                {ok, ?IDX_HEADER} ->
-                    scan_index(file:read(Fd, ?INDEX_RECORD_SIZE_B * 2),
-                               Fd,
-                               SegFd,
-                               Offs);
-                eof ->
-                    eof;
-                {error, Posix} ->
-                    Posix
-            end;
-        {error, Posix} ->
-            Posix
-    end.
-
-scan_index(eof, IdxFd, _Fd, 0) ->
-    ok = file:close(IdxFd),
-    %% if the index is empty do we really know the offset will be next
-    %% this relies on us always reducing the Offset to within the log range
-    {0, ?LOG_HEADER_SIZE};
-scan_index(eof, IdxFd, _Fd, _) ->
-    ok = file:close(IdxFd),
-    eof;
-scan_index({ok,
-            <<O:64/unsigned, _T:64/signed, E:64/unsigned, Pos:32/unsigned>>},
-           IdxFd,
-           Fd,
-           Offset) ->
-    ok = file:close(IdxFd),
-    {_ChType, O, E, Num, _, _} = header_info(Fd, Pos),
-    case Offset >= O andalso Offset < O + Num of
-        true ->
-            {O, Pos};
-        false ->
-            {O + Num, eof}
-    end;
-scan_index({ok,
-            <<O:64/unsigned,
-              _T:64/signed,
-              _E:64/unsigned,
-              Pos:32/unsigned,
-              ONext:64/unsigned,
-              _:64/signed,
-              _:64/unsigned,
-              _:32/unsigned>>},
-           IdxFd,
-           Fd,
-           Offset) ->
-    case Offset >= O andalso Offset < ONext of
-        true ->
-            ok = file:close(IdxFd),
-            {O, Pos};
-        false ->
-            {ok, _} = file:position(IdxFd, {cur, -?INDEX_RECORD_SIZE_B}),
-            scan_index(file:read(IdxFd, ?INDEX_RECORD_SIZE_B * 2),
-                       IdxFd,
-                       Fd,
-                       Offset)
-    end.
 
 parse_records(_Offs, <<>>, Acc) ->
     %% TODO: this could probably be changed to body recursive
@@ -1883,6 +1820,71 @@ open_index_read(File) ->
     %% {ok, ?IDX_HEADER} = file:read(Fd, ?IDX_HEADER_SIZE)
     _ = file:read(Fd, ?IDX_HEADER_SIZE),
     Fd.
+
+scan_idx(Offset, SegmentInfo = #seg_info{index = IndexFile, last = LastChunkInSegment}) ->
+    case range_from_segment_infos([SegmentInfo]) of
+        empty -> 
+            %% if the index is empty do we really know the offset will be next
+            %% this relies on us always reducing the Offset to within the log range
+            {0, ?LOG_HEADER_SIZE};
+        {SegmentStart, SegmentEnd} ->
+            case Offset < SegmentStart orelse Offset > SegmentEnd + 1 of
+                true -> offset_out_of_range;
+                false ->
+                    IndexFd = open_index_read(IndexFile),
+                    Result = scan_idx(IndexFd, Offset, LastChunkInSegment),
+                    file:close(IndexFd),
+                    Result
+            end
+    end.
+
+scan_idx(Fd, Offset, #chunk_info{id = LastChunkInSegmentId, num = LastChunkInSegmentNum}) ->
+    case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
+        {ok,
+         <<ChunkId:64/unsigned,
+           _Timestamp:64/signed,
+           _Epoch:64/unsigned,
+           FilePos:32/unsigned>>} ->
+            case Offset < ChunkId of
+                true ->
+                    %% offset is lower than the first chunk in this segment
+                    %% shouldn't really happen as we check the range above
+                    offset_out_of_range;
+                false ->
+                    case Offset > (LastChunkInSegmentId + LastChunkInSegmentNum - 1) of
+                        true ->
+                            %% offset higher than the last chunk in this segment
+                            {LastChunkInSegmentId + LastChunkInSegmentNum, eof};
+                        false ->
+                            %% offset is in this segment
+                            scan_idx(Fd, Offset, {ChunkId, FilePos})
+                    end
+            end;
+        eof ->
+            %% this should never happen - offset is in the range and we are reading the first record
+            eof;
+        {error, Posix} ->
+            Posix
+    end;
+scan_idx(Fd, Offset, PreviousChunk) ->
+    case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
+        {ok,
+         <<ChunkId:64/unsigned,
+           _Timestamp:64/signed,
+           _Epoch:64/unsigned,
+           FilePos:32/unsigned>>} ->
+            case Offset < ChunkId of
+                true ->
+                    %% offset we are looking for is higher or equal to the start of the previous chunk
+                    %% but lower than the start of the current chunk -> return the previous chunk
+                    PreviousChunk;
+                false ->
+                    scan_idx(Fd, Offset, {ChunkId, FilePos})
+            end;
+        eof ->
+            %% Offset is in the last chunk
+            PreviousChunk
+    end.
 
 throw_missing({error, enoent}) ->
     throw(missing_file);
