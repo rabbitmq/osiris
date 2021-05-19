@@ -1245,9 +1245,13 @@ send_file(Sock,
                     _ = Callback(Header, ToSend),
                     case sendfile(Transport, Fd, Sock, Pos, ToSend) of
                         ok ->
+                            %% TODO: this position call is superflous
+                            %% when the Transport is ssl as it would already
+                            %% be in the correct position
                             {ok, _} = file:position(Fd, NextFilePos),
                             {ok, State};
                         Err ->
+                            {ok, _} = file:position(Fd, Pos),
                             Err
                     end;
                 false ->
