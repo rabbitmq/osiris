@@ -122,103 +122,107 @@ init(#{name := Name,
          Config) ->
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
-    {ok, {Min, Max}} = application:get_env(port_range),
-    RecBuf = application:get_env(osiris, replica_recbuf, ?DEF_REC_BUF),
-    {Port, LSock} = open_tcp_port(RecBuf, Min, Max),
-    Self = self(),
-    spawn_link(fun() -> accept(LSock, Self) end),
-    CntName = {?MODULE, ExtRef},
     Node = node(LeaderPid),
 
-    ORef = atomics:new(2, [{signed, true}]),
-    atomics:put(ORef, 1, -1),
-    atomics:put(ORef, 2, -1),
-    {ok, {LeaderRange, LeaderEpochOffs}} =
-        rpc:call(Node, osiris_writer, overview, [LeaderPid]),
-    ?DEBUG("~s: writer epoch offset ~w", [?MODULE, LeaderEpochOffs]),
-    InitOffset = case LeaderRange  of
-                     empty ->
-                         0;
-                     {FirstLeaderOffset, _} ->
-                         FirstLeaderOffset
-                 end,
+    case rpc:call(Node, osiris_writer, overview, [LeaderPid]) of
+        {error, _} = Err ->
+            {stop, Err};
+        {ok, {LeaderRange, LeaderEpochOffs}}  ->
+            {ok, {Min, Max}} = application:get_env(port_range),
+            RecBuf = application:get_env(osiris, replica_recbuf, ?DEF_REC_BUF),
+            {Port, LSock} = open_tcp_port(RecBuf, Min, Max),
+            Self = self(),
+            spawn_link(fun() -> accept(LSock, Self) end),
+            CntName = {?MODULE, ExtRef},
 
-    Dir = osiris_log:directory(Config),
-    Log = osiris_log:init_acceptor(LeaderEpochOffs,
-                                   Config#{dir => Dir,
-                                           initial_offset => InitOffset,
-                                           first_offset_fun =>
-                                           fun (Fst) ->
-                                                   atomics:put(ORef, 2, Fst)
-                                           end,
-                                           counter_spec =>
-                                               {CntName, ?ADD_COUNTER_FIELDS}}),
-    CntRef = osiris_log:counters_ref(Log),
-    {NextOffset, LastChunk} = TailInfo = osiris_log:tail_info(Log),
+            ORef = atomics:new(2, [{signed, true}]),
+            atomics:put(ORef, 1, -1),
+            atomics:put(ORef, 2, -1),
+            ?DEBUG("~s: writer epoch offset ~w", [?MODULE, LeaderEpochOffs]),
+            InitOffset = case LeaderRange  of
+                             empty ->
+                                 0;
+                             {FirstLeaderOffset, _} ->
+                                 FirstLeaderOffset
+                         end,
 
-    ?DEBUG("~s: tail info: ~w", [Name, TailInfo]),
-    case LastChunk of
-        empty ->
-            ok;
-        {_, LastChId, LastTs} ->
-            %% need to ack last chunk back to leader so that it can
-            %% re-discover the committed offset
-            osiris_writer:ack(LeaderPid, {LastChId, LastTs})
-    end,
-    ?INFO("osiris_replica:init/1: next offset ~b",
-          [NextOffset]),
-    %% spawn reader process on leader node
-    {ok, HostName} = inet:gethostname(),
-    {ok, Ips} = inet:getaddrs(HostName, inet),
-    Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
-    ReplicaReaderConf =
-        #{hosts => Ips,
-          port => Port,
-          name => Name,
-          replica_pid => self(),
-          leader_pid => LeaderPid,
-          start_offset => TailInfo,
-          reference => ExtRef,
-          connection_token => Token},
-    RRPid =
-        case supervisor:start_child({osiris_replica_reader_sup, Node},
-                                    #{id => make_ref(),
-                                      start =>
+            Dir = osiris_log:directory(Config),
+            Log = osiris_log:init_acceptor(LeaderEpochOffs,
+                                           Config#{dir => Dir,
+                                                   initial_offset => InitOffset,
+                                                   first_offset_fun =>
+                                                   fun (Fst) ->
+                                                           atomics:put(ORef, 2, Fst)
+                                                   end,
+                                                   counter_spec =>
+                                                   {CntName, ?ADD_COUNTER_FIELDS}}),
+            CntRef = osiris_log:counters_ref(Log),
+            {NextOffset, LastChunk} = TailInfo = osiris_log:tail_info(Log),
+
+            ?DEBUG("~s: tail info: ~w", [Name, TailInfo]),
+            case LastChunk of
+                empty ->
+                    ok;
+                {_, LastChId, LastTs} ->
+                    %% need to ack last chunk back to leader so that it can
+                    %% re-discover the committed offset
+                    osiris_writer:ack(LeaderPid, {LastChId, LastTs})
+            end,
+            ?INFO("osiris_replica:init/1: next offset ~b",
+                  [NextOffset]),
+            %% spawn reader process on leader node
+            {ok, HostName} = inet:gethostname(),
+            {ok, Ips} = inet:getaddrs(HostName, inet),
+            Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
+            ReplicaReaderConf =
+            #{hosts => Ips,
+              port => Port,
+              name => Name,
+              replica_pid => self(),
+              leader_pid => LeaderPid,
+              start_offset => TailInfo,
+              reference => ExtRef,
+              connection_token => Token},
+            RRPid =
+            case supervisor:start_child({osiris_replica_reader_sup, Node},
+                                        #{id => make_ref(),
+                                          start =>
                                           {osiris_replica_reader, start_link,
                                            [ReplicaReaderConf]},
-                                      %% replica readers should never be
-                                      %% restarted by their sups
-                                      %% instead they need to be re-started
-                                      %% by their replica
-                                      restart => temporary,
-                                      shutdown => 5000,
-                                      type => worker,
-                                      modules => [osiris_replica_reader]})
-        of
-            {ok, Pid} ->
-                Pid;
-            {ok, Pid, _} ->
-                Pid
-        end,
-    true = link(RRPid),
-    Interval = maps:get(replica_gc_interval, Config, 5000),
-    erlang:send_after(Interval, self(), force_gc),
-    counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
-    EvtFmt = maps:get(event_formatter, Config, undefined),
-    {ok,
-     #?MODULE{cfg =
-                  #cfg{name = Name,
-                       leader_pid = LeaderPid,
-                       directory = Dir,
-                       port = Port,
-                       gc_interval = Interval,
-                       reference = ExtRef,
-                       offset_ref = ORef,
-                       event_formatter = EvtFmt,
-                       counter = CntRef,
-                       token = Token},
-              log = Log,
-              parse_state = undefined}}.
+                                          %% replica readers should never be
+                                          %% restarted by their sups
+                                          %% instead they need to be re-started
+                                          %% by their replica
+                                          restart => temporary,
+                                          shutdown => 5000,
+                                          type => worker,
+                                          modules => [osiris_replica_reader]})
+            of
+                {ok, Pid} ->
+                    Pid;
+                {ok, Pid, _} ->
+                    Pid
+            end,
+            true = link(RRPid),
+            Interval = maps:get(replica_gc_interval, Config, 5000),
+            erlang:send_after(Interval, self(), force_gc),
+            counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
+            EvtFmt = maps:get(event_formatter, Config, undefined),
+            {ok,
+             #?MODULE{cfg =
+                      #cfg{name = Name,
+                           leader_pid = LeaderPid,
+                           directory = Dir,
+                           port = Port,
+                           gc_interval = Interval,
+                           reference = ExtRef,
+                           offset_ref = ORef,
+                           event_formatter = EvtFmt,
+                           counter = CntRef,
+                           token = Token},
+                      log = Log,
+                      parse_state = undefined}}
+    end.
 
 open_tcp_port(_RcvBuf, M, M) ->
     throw({error, all_busy});

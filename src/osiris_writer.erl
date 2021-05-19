@@ -86,8 +86,13 @@ start_link(Config) ->
     gen_batch_server:start_link(undefined, Mod, Config, Opts).
 
 overview(Pid) when node(Pid) == node() ->
-    #{dir := Dir} = gen_batch_server:call(Pid, get_reader_context),
-    {ok, osiris_log:overview(Dir)}.
+    case erlang:is_process_alive(Pid) of
+        true ->
+            #{dir := Dir} = gen_batch_server:call(Pid, get_reader_context),
+            {ok, osiris_log:overview(Dir)};
+        false ->
+            {error, no_process}
+    end.
 
 init_data_reader(Pid, TailInfo, {_, _} = CounterSpec)
   when node(Pid) == node() ->

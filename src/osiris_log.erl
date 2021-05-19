@@ -2026,7 +2026,7 @@ parse_tracking(<<TrkType:8/unsigned,
                  Id:Size/binary,
                  Offs:64/unsigned,
                  Rem/binary>>,
-               Acc) -> 
+               Acc) ->
     Tag = case  TrkType of
               ?TRK_TYPE_OFFSET -> offset
           end,
