@@ -1244,13 +1244,14 @@ send_file(Sock,
                 true ->
                     _ = Callback(Header, ToSend),
                     case sendfile(Transport, Fd, Sock, Pos, ToSend) of
-                        ok ->
-                            %% TODO: this position call is superflous
-                            %% when the Transport is ssl as it would already
-                            %% be in the correct position
+                        ok when Transport == tcp ->
                             {ok, _} = file:position(Fd, NextFilePos),
                             {ok, State};
+                        ok when Transport == ssl ->
+                            {ok, State};
                         Err ->
+                            %% reset the position to the start of the current
+                            %% chunk so that subsequent reads won't error
                             {ok, _} = file:position(Fd, Pos),
                             Err
                     end;
@@ -1691,8 +1692,12 @@ sendfile(tcp = Transport, Fd, Sock, Pos, ToSend) ->
             Err
     end;
 sendfile(ssl, Fd, Sock, Pos, ToSend) ->
-    {ok, Data} = file:pread(Fd, Pos, ToSend),
-    ssl:send(Sock, Data).
+    case file:pread(Fd, Pos, ToSend) of
+        {ok, Data} ->
+            ssl:send(Sock, Data);
+        {error, _} = Err ->
+            Err
+    end.
 
 range_from_segment_infos([#seg_info{first = undefined,
                                     last = undefined}]) ->
