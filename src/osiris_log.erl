@@ -31,7 +31,7 @@
          get_current_epoch/1,
          get_directory/1,
          get_name/1,
-         get_default_max_segment_size/0,
+         get_default_max_segment_size_bytes/0,
          counters_ref/1,
          tracking/1,
          writers/1,
@@ -335,7 +335,7 @@
     #{dir := file:filename(),
       epoch => non_neg_integer(),
       first_offset_fun => fun((integer()) -> ok),
-      max_segment_size => non_neg_integer(),
+      max_segment_size_bytes => non_neg_integer(),
       counter_spec => counter_spec(),
       %% used when initialising a log from an offset other than 0
       initial_offset => osiris:offset()}.
@@ -359,7 +359,7 @@
 -record(cfg,
         {directory :: file:filename(),
          name :: string(),
-         max_segment_size = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer(),
+         max_segment_size_bytes = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer(),
          retention = [] :: [osiris:retention_spec()],
          counter :: counters:counters_ref(),
          counter_id :: term(),
@@ -433,9 +433,9 @@ init(#{dir := Dir,
      WriterType) ->
     %% scan directory for segments if in write mode
     MaxSize =
-        maps:get(max_segment_size, Config, ?DEFAULT_MAX_SEGMENT_SIZE_B),
+        maps:get(max_segment_size_bytes, Config, ?DEFAULT_MAX_SEGMENT_SIZE_B),
     Retention = maps:get(retention, Config, []),
-    ?INFO("osiris_log:init/1 max_segment_size: ~b, retention ~w",
+    ?INFO("osiris_log:init/1 max_segment_size_bytes: ~b, retention ~w",
           [MaxSize, Retention]),
     ok = filelib:ensure_dir(Dir),
     case file:make_dir(Dir) of
@@ -456,7 +456,7 @@ init(#{dir := Dir,
     FirstOffsetFun = maps:get(first_offset_fun, Config, fun (_) -> ok end),
     Cfg = #cfg{directory = Dir,
                name = Name,
-               max_segment_size = MaxSize,
+               max_segment_size_bytes = MaxSize,
                retention = Retention,
                counter = Cnt,
                counter_id = counter_id(Config),
@@ -1093,8 +1093,8 @@ get_directory(#?MODULE{cfg = #cfg{directory = Dir}}) ->
 get_name(#?MODULE{cfg = #cfg{name = Name}}) ->
     Name.
 
--spec get_default_max_segment_size() -> non_neg_integer().
-get_default_max_segment_size() ->
+-spec get_default_max_segment_size_bytes() -> non_neg_integer().
+get_default_max_segment_size_bytes() ->
     ?DEFAULT_MAX_SEGMENT_SIZE_B.
 
 -spec counters_ref(state()) -> counters:counters_ref().
@@ -1630,7 +1630,7 @@ write_chunk(Chunk,
             Timestamp,
             Epoch,
             NumRecords,
-            #?MODULE{cfg = #cfg{max_segment_size = MaxSize, counter = CntRef},
+            #?MODULE{cfg = #cfg{max_segment_size_bytes = MaxSize, counter = CntRef},
                      fd = Fd,
                      index_fd = IdxFd,
                      mode =

@@ -139,7 +139,7 @@ init_recover_with_writers(Config) ->
 
 init_with_lower_epoch(Config) ->
     Conf = ?config(osiris_conf, Config),
-    S0 = osiris_log:init(Conf#{max_segment_size => 10 * 1000 * 1000}),
+    S0 = osiris_log:init(Conf#{max_segment_size_bytes => 10 * 1000 * 1000}),
     S1 = osiris_log:write([<<"hi">>, <<"hi-there">>], S0),
     %% same is ok
     osiris_log:close(S1),
@@ -250,7 +250,7 @@ read_header(Config) ->
 
 write_multi_log(Config) ->
     Conf = ?config(osiris_conf, Config),
-    S0 = osiris_log:init(Conf#{max_segment_size => 10 * 1000 * 1000}),
+    S0 = osiris_log:init(Conf#{max_segment_size_bytes => 10 * 1000 * 1000}),
     Data = crypto:strong_rand_bytes(10000),
     BatchOf10 = [Data || _ <- lists:seq(1, 10)],
     _S1 = lists:foldl(fun(_, Acc) -> osiris_log:write(BatchOf10, Acc) end,
@@ -775,7 +775,7 @@ evaluate_retention_max_age(Config) ->
          || _ <- lists:seq(1, 20)],
     LDir = ?config(dir, Config),
     %% this should create at least two segments
-    Log = seed_log(Conf#{max_segment_size => 1000 * 1000}, EpochChunks,
+    Log = seed_log(Conf#{max_segment_size_bytes => 1000 * 1000}, EpochChunks,
                    Config),
     osiris_log:close(Log),
     SegFilesPre =
@@ -812,7 +812,7 @@ offset_tracking(Config) ->
 
 offset_tracking_snapshot(Config) ->
     Conf0 = ?config(osiris_conf, Config),
-    Conf = Conf0#{max_segment_size => 1000 * 1000},
+    Conf = Conf0#{max_segment_size_bytes => 1000 * 1000},
     Data = crypto:strong_rand_bytes(1500),
     %% all chunks are at least 2000ms old
     Ts = now_ms() - 2000,
@@ -857,7 +857,7 @@ seed_log(Conf, EpochChunks, Config) when is_map(Conf) ->
 seed_log(Dir, EpochChunks, Config) when is_list(Dir) ->
     seed_log(#{dir => Dir,
                epoch => 1,
-               max_segment_size => 1000 * 1000,
+               max_segment_size_bytes => 1000 * 1000,
                name => ?config(test_case, Config)},
              EpochChunks, Config);
 seed_log(Log, EpochChunks, _Config) ->
