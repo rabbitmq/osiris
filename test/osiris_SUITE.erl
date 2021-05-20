@@ -539,7 +539,7 @@ cluster_restart_large(Config) ->
         #{name => Name,
           epoch => 1,
           replica_nodes => Replicas,
-          max_segment_size => 100 * 1000,
+          max_segment_size_bytes => 100 * 1000,
           leader_node => LeaderNode},
     {ok, #{leader_pid := Leader} = Conf} = osiris:start_cluster(Conf0),
     write_n(Leader, 255, 0, 1000000, #{}),
@@ -806,7 +806,7 @@ retention(Config) ->
           epoch => 1,
           leader_node => node(),
           retention => [{max_bytes, SegSize}],
-          max_segment_size => SegSize,
+          max_segment_size_bytes => SegSize,
           replica_nodes => []},
     {ok, #{leader_pid := Leader, replica_pids := []} = Conf1} =
         osiris:start_cluster(Conf0),
@@ -831,7 +831,7 @@ retention_add_replica_after(Config) ->
           epoch => 1,
           leader_node => LeaderNode,
           retention => [{max_bytes, SegSize}],
-          max_segment_size => SegSize,
+          max_segment_size_bytes => SegSize,
           replica_nodes => [Replica1]},
     {ok, #{leader_pid := Leader,
            replica_pids := [ReplicaPid]} = Conf1} =
@@ -895,7 +895,7 @@ retention_overtakes_offset_reader(Config) ->
           epoch => 1,
           leader_node => LeaderNode,
           retention => [{max_bytes, SegSize}],
-          max_segment_size => SegSize,
+          max_segment_size_bytes => SegSize,
           replica_nodes => Replicas},
     {ok, #{leader_pid := Leader,
            replica_pids := [ReplicaPid1, ReplicaPid2]}} =
@@ -953,7 +953,7 @@ update_retention(Config) ->
           epoch => 1,
           leader_node => node(),
           % retention => [{max_bytes, SegSize}],
-          max_segment_size => SegSize,
+          max_segment_size_bytes => SegSize,
           replica_nodes => []},
     {ok, #{leader_pid := Leader, replica_pids := []}} =
         osiris:start_cluster(Conf0),
@@ -979,7 +979,7 @@ update_retention_replica(Config) ->
     Conf0 =
         #{name => Name,
           epoch => 1,
-          max_segment_size => SegSize,
+          max_segment_size_bytes => SegSize,
           leader_node => LeaderNode,
           replica_nodes => Replicas},
     {ok, #{leader_pid := Leader, replica_pids := [R1, R2]}} =
@@ -1106,7 +1106,7 @@ tracking_retention(Config) ->
           epoch => 1,
           leader_node => node(),
           retention => [{max_bytes, SegSize}],
-          max_segment_size => SegSize,
+          max_segment_size_bytes => SegSize,
           replica_nodes => []},
     {ok, #{leader_pid := Leader, replica_pids := []}} =
         osiris:start_cluster(Conf0),
@@ -1228,7 +1228,7 @@ writers_retention(Config) ->
           epoch => 1,
           leader_node => node(),
           replica_nodes => [],
-          max_segment_size => SegSize,
+          max_segment_size_bytes => SegSize,
           dir => ?config(priv_dir, Config)},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     %% perform writes from 255 unique writers
