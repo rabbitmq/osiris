@@ -53,6 +53,8 @@
 -define(TRK_TYPE_OFFSET, 0).
 % maximum size of a segment in bytes
 -define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
+% maximum number of chunks per segment
+-define(DEFAULT_MAX_SEGMENT_SIZE_C, 256 * 1000).
 -define(INDEX_RECORD_SIZE_B, 28).
 -define(COUNTER_FIELDS,
         [
@@ -361,7 +363,7 @@
         {directory :: file:filename(),
          name :: string(),
          max_segment_size_bytes = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer(),
-         max_segment_size_chunks :: non_neg_integer(),
+         max_segment_size_chunks = ?DEFAULT_MAX_SEGMENT_SIZE_C :: non_neg_integer(),
          retention = [] :: [osiris:retention_spec()],
          counter :: counters:counters_ref(),
          counter_id :: term(),
@@ -437,7 +439,7 @@ init(#{dir := Dir,
     %% scan directory for segments if in write mode
     MaxSizeBytes =
         maps:get(max_segment_size_bytes, Config, ?DEFAULT_MAX_SEGMENT_SIZE_B),
-    {ok,  MaxSizeChunks} = application:get_env(max_segment_size_chunks),
+    MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks, ?DEFAULT_MAX_SEGMENT_SIZE_C),
     Retention = maps:get(retention, Config, []),
     ?INFO("osiris_log:init/1 max_segment_size_bytes: ~b, max_segment_size_chunks ~b, retention ~w",
           [MaxSizeBytes, MaxSizeChunks, Retention]),
