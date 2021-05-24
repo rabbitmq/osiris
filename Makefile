@@ -5,7 +5,8 @@ PROJECT_VERSION = 0.1.0
 define PROJECT_ENV
 [
 	{data_dir, "/tmp/osiris"},
-	{port_range, {6000, 6500}}
+	{port_range, {6000, 6500}},
+	{max_segment_size_chunks, 256000}
 ]
 endef
 

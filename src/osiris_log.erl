@@ -51,6 +51,7 @@
 % -define(TRK_DELTA, 0).
 % -define(TRK_SNAP, 1).
 -define(TRK_TYPE_OFFSET, 0).
+% maximum size of a segment in bytes
 -define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
 -define(INDEX_RECORD_SIZE_B, 28).
 -define(COUNTER_FIELDS,
@@ -360,6 +361,7 @@
         {directory :: file:filename(),
          name :: string(),
          max_segment_size_bytes = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer(),
+         max_segment_size_chunks :: non_neg_integer(),
          retention = [] :: [osiris:retention_spec()],
          counter :: counters:counters_ref(),
          counter_id :: term(),
@@ -376,7 +378,8 @@
          transport :: tcp | ssl}).
 -record(write,
         {type = writer :: writer | acceptor,
-         segment_size = 0 :: non_neg_integer(),
+         segment_size_bytes = 0 :: non_neg_integer(),
+         segment_size_chunks = 0 :: non_neg_integer(),
          current_epoch :: non_neg_integer(),
          tail_info = {0, empty} :: osiris:tail_info(),
          %% the current offset tracking state
@@ -432,11 +435,12 @@ init(#{dir := Dir,
          Config,
      WriterType) ->
     %% scan directory for segments if in write mode
-    MaxSize =
+    MaxSizeBytes =
         maps:get(max_segment_size_bytes, Config, ?DEFAULT_MAX_SEGMENT_SIZE_B),
+    {ok,  MaxSizeChunks} = application:get_env(max_segment_size_chunks),
     Retention = maps:get(retention, Config, []),
-    ?INFO("osiris_log:init/1 max_segment_size_bytes: ~b, retention ~w",
-          [MaxSize, Retention]),
+    ?INFO("osiris_log:init/1 max_segment_size_bytes: ~b, max_segment_size_chunks ~b, retention ~w",
+          [MaxSizeBytes, MaxSizeChunks, Retention]),
     ok = filelib:ensure_dir(Dir),
     case file:make_dir(Dir) of
         ok ->
@@ -456,7 +460,8 @@ init(#{dir := Dir,
     FirstOffsetFun = maps:get(first_offset_fun, Config, fun (_) -> ok end),
     Cfg = #cfg{directory = Dir,
                name = Name,
-               max_segment_size_bytes = MaxSize,
+               max_segment_size_bytes = MaxSizeBytes,
+               max_segment_size_chunks = MaxSizeChunks,
                retention = Retention,
                counter = Cnt,
                counter_id = counter_id(Config),
@@ -1517,7 +1522,7 @@ eval_max_bytes(SegInfos, MaxSize) ->
         _ ->
             case TotalSize > MaxSize of
                 true ->
-                    %% we can delete at least one segment segment
+                    %% we can delete at least one segment
                     [Old | Rem] = SegInfos,
                     ok = delete_segment(Old),
                     eval_max_bytes(Rem, MaxSize);
@@ -1630,11 +1635,14 @@ write_chunk(Chunk,
             Timestamp,
             Epoch,
             NumRecords,
-            #?MODULE{cfg = #cfg{max_segment_size_bytes = MaxSize, counter = CntRef},
+            #?MODULE{cfg = #cfg{max_segment_size_bytes = MaxSizeBytes,
+                     max_segment_size_chunks = MaxSizeChunks,
+                     counter = CntRef},
                      fd = Fd,
                      index_fd = IdxFd,
                      mode =
-                         #write{segment_size = SegSize,
+                         #write{segment_size_bytes = SegSizeBytes,
+                                segment_size_chunks = SegSizeChunks,
                                 writers = Writers0,
                                 tail_info = {Next, _}} =
                              Write} =
@@ -1657,8 +1665,8 @@ write_chunk(Chunk,
         maps:fold(fun(K, V, Acc) -> maps:put(K, {Next, Timestamp, V}, Acc)
                   end,
                   Writers0, NewWriters),
-    case file:position(Fd, cur) of
-        {ok, After} when After >= MaxSize ->
+        case max_segment_size_reached(file:position(Fd, cur), MaxSizeBytes, SegSizeChunks, MaxSizeChunks) of
+        true ->
             %% close the current file
             ok = file:close(Fd),
             ok = file:close(IdxFd),
@@ -1669,15 +1677,20 @@ write_chunk(Chunk,
                                           tail_info =
                                               {NextOffset,
                                                {Epoch, Next, Timestamp}},
-                                          segment_size = 0}};
-        {ok, _} ->
+                                          segment_size_bytes = 0,
+                                          segment_size_chunks = 0}};
+        false ->
             State#?MODULE{mode =
                               Write#write{tail_info =
                                               {NextOffset,
                                                {Epoch, Next, Timestamp}},
                                           writers = Writers,
-                                          segment_size = SegSize + Size}}
+                                          segment_size_bytes = SegSizeBytes + Size,
+                                          segment_size_chunks = SegSizeChunks + 1}}
     end.
+
+max_segment_size_reached({ok, CurrentSizeBytes}, MaxSizeBytes, CurrentSizeChunks, MaxSizeChunks) ->
+    CurrentSizeBytes >= MaxSizeBytes orelse CurrentSizeChunks >= MaxSizeChunks - 1.
 
 sendfile(_Transport, _Fd, _Sock, _Pos, 0) ->
     ok;
@@ -1771,7 +1784,8 @@ open_new_segment(#?MODULE{cfg =
                               #write{type = WriterType,
                                      tracking = Tracking0,
                                      writers = Writers0,
-                                     segment_size = _SegSize,
+                                     segment_size_bytes = _SegSizeBytes,
+                                     segment_size_chunks = _SegSizeChunks,
                                      tail_info = {NextOffset, _}}} =
                      State0, Timestamp) ->
     Filename = make_file_name(NextOffset, "segment"),
