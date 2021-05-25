@@ -54,7 +54,7 @@
 % maximum size of a segment in bytes
 -define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
 % maximum number of chunks per segment
--define(DEFAULT_MAX_SEGMENT_SIZE_C, 256 * 1000).
+-define(DEFAULT_MAX_SEGMENT_SIZE_C, 256_000).
 -define(INDEX_RECORD_SIZE_B, 28).
 -define(COUNTER_FIELDS,
         [
@@ -380,8 +380,7 @@
          transport :: tcp | ssl}).
 -record(write,
         {type = writer :: writer | acceptor,
-         segment_size_bytes = 0 :: non_neg_integer(),
-         segment_size_chunks = 0 :: non_neg_integer(),
+         segment_size = {0, 0} :: {non_neg_integer(), non_neg_integer()},
          current_epoch :: non_neg_integer(),
          tail_info = {0, empty} :: osiris:tail_info(),
          %% the current offset tracking state
@@ -1637,14 +1636,11 @@ write_chunk(Chunk,
             Timestamp,
             Epoch,
             NumRecords,
-            #?MODULE{cfg = #cfg{max_segment_size_bytes = MaxSizeBytes,
-                     max_segment_size_chunks = MaxSizeChunks,
-                     counter = CntRef},
+            #?MODULE{cfg = #cfg{counter = CntRef} = Cfg,
                      fd = Fd,
                      index_fd = IdxFd,
                      mode =
-                         #write{segment_size_bytes = SegSizeBytes,
-                                segment_size_chunks = SegSizeChunks,
+                         #write{segment_size = {SegSizeBytes, SegSizeChunks},
                                 writers = Writers0,
                                 tail_info = {Next, _}} =
                              Write} =
@@ -1667,7 +1663,7 @@ write_chunk(Chunk,
         maps:fold(fun(K, V, Acc) -> maps:put(K, {Next, Timestamp, V}, Acc)
                   end,
                   Writers0, NewWriters),
-        case max_segment_size_reached(file:position(Fd, cur), MaxSizeBytes, SegSizeChunks, MaxSizeChunks) of
+        case max_segment_size_reached(Fd, SegSizeChunks, Cfg) of
         true ->
             %% close the current file
             ok = file:close(Fd),
@@ -1679,19 +1675,20 @@ write_chunk(Chunk,
                                           tail_info =
                                               {NextOffset,
                                                {Epoch, Next, Timestamp}},
-                                          segment_size_bytes = 0,
-                                          segment_size_chunks = 0}};
+                                          segment_size = {0, 0}}};
         false ->
             State#?MODULE{mode =
                               Write#write{tail_info =
                                               {NextOffset,
                                                {Epoch, Next, Timestamp}},
                                           writers = Writers,
-                                          segment_size_bytes = SegSizeBytes + Size,
-                                          segment_size_chunks = SegSizeChunks + 1}}
+                                          segment_size = {SegSizeBytes + Size, SegSizeChunks + 1}}}
     end.
 
-max_segment_size_reached({ok, CurrentSizeBytes}, MaxSizeBytes, CurrentSizeChunks, MaxSizeChunks) ->
+max_segment_size_reached(SegFd, CurrentSizeChunks,
+            #cfg{max_segment_size_bytes = MaxSizeBytes,
+                 max_segment_size_chunks = MaxSizeChunks}) ->
+    {ok, CurrentSizeBytes} = file:position(SegFd, cur),
     CurrentSizeBytes >= MaxSizeBytes orelse CurrentSizeChunks >= MaxSizeChunks - 1.
 
 sendfile(_Transport, _Fd, _Sock, _Pos, 0) ->
@@ -1786,8 +1783,7 @@ open_new_segment(#?MODULE{cfg =
                               #write{type = WriterType,
                                      tracking = Tracking0,
                                      writers = Writers0,
-                                     segment_size_bytes = _SegSizeBytes,
-                                     segment_size_chunks = _SegSizeChunks,
+                                     segment_size = {_SegSizeBytes, _SegSizeChunks},
                                      tail_info = {NextOffset, _}}} =
                      State0, Timestamp) ->
     Filename = make_file_name(NextOffset, "segment"),
