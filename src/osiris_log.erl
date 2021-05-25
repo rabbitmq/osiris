@@ -1244,10 +1244,8 @@ send_file(Sock,
                 true ->
                     _ = Callback(Header, ToSend),
                     case sendfile(Transport, Fd, Sock, Pos, ToSend) of
-                        ok when Transport == tcp ->
+                        ok ->
                             {ok, _} = file:position(Fd, NextFilePos),
-                            {ok, State};
-                        ok when Transport == ssl ->
                             {ok, State};
                         Err ->
                             %% reset the position to the start of the current
