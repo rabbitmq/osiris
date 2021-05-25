@@ -838,7 +838,8 @@ retention_add_replica_after(Config) ->
         osiris:start_cluster(Conf0),
     ok = osiris:write(Leader, undefined, 0, <<"first">>),
     write_n(Leader, Num, 0, 1000 * 8, #{}),
-    ok = osiris:write(Leader, undefined, 0, <<"last">>),
+    ok = osiris:write(Leader, undefined, Num + 1, <<"last">>),
+    wait_for_written([Num + 1]),
 
     ct:pal("checking 1", []),
     check_last_entry(Leader, <<"last">>),
@@ -878,7 +879,7 @@ check_last_entry(Pid, Entry) when is_pid(Pid) ->
             ct:pal("checking last entry done ~w", [node(Pid)]),
             ok
     after 10000 ->
-              exit({done_timeout, X})
+              exit({done_timeout, node(X)})
     end,
     ok.
 
