@@ -12,8 +12,14 @@ jobs:
 
     runs-on: ubuntu-latest
 
+    strategy:
+      matrix:
+        erlang_version:
+        - "23"
+        - "24"
+
     container:
-      image: erlang:22.3.4
+      image: erlang:${{ matrix.erlang_version }}
 
     steps:
     - uses: actions/checkout@v2
