@@ -1339,18 +1339,19 @@ parse_records(Offs,
     parse_records(Offs + NumRecs, Rem, lists:reverse(Recs) ++ Acc).
 
 build_log_overview(Dir) when is_list(Dir) ->
-    {Time, Result} = timer:tc(fun() ->
-        try
-            IdxFiles =
-                lists:sort(
-                    filelib:wildcard(
-                        filename:join(Dir, "*.index"))),
-            build_log_overview0(IdxFiles, [])
-        catch
-            missing_file ->
-                build_log_overview(Dir)
-        end
-      end),
+    {Time, Result} = timer:tc(
+                       fun() ->
+                               try
+                                   IdxFiles =
+                                   lists:sort(
+                                     filelib:wildcard(
+                                       filename:join(Dir, "*.index"))),
+                                   build_log_overview0(IdxFiles, [])
+                               catch
+                                   missing_file ->
+                                       build_log_overview(Dir)
+                               end
+                       end),
     ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1000000]),
     Result.
 
@@ -1476,10 +1477,12 @@ update_retention(Retention,
 -spec evaluate_retention(file:filename(), [retention_spec()]) ->
     {range(), non_neg_integer()}.
 evaluate_retention(Dir, Specs) ->
-    {Time, Result} = timer:tc(fun() ->
-        SegInfos0 = build_log_overview(Dir),
-        SegInfos = evaluate_retention0(SegInfos0, Specs),
-        {range_from_segment_infos(SegInfos), length(SegInfos)} end),
+    {Time, Result} = timer:tc(
+                       fun() ->
+                               SegInfos0 = build_log_overview(Dir),
+                               SegInfos = evaluate_retention0(SegInfos0, Specs),
+                               {range_from_segment_infos(SegInfos), length(SegInfos)}
+                       end),
     ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1000000]),
     Result.
 
@@ -1544,18 +1547,20 @@ last_offset_epochs([#seg_info{first = undefined,
 last_offset_epochs([#seg_info{index = IdxFile,
                               first = #chunk_info{epoch = FstE, id = FstChId}}
                     | SegInfos]) ->
-    {Time, Result} = timer:tc(fun() -> 
-        FstFd = open_index_read(IdxFile),
-        {LastE, LastO, Res} =
-            lists:foldl(fun(#seg_info{index = I}, Acc) ->
-                           Fd = open_index_read(I),
-                           last_offset_epoch(file:read(Fd, ?INDEX_RECORD_SIZE_B),
-                                             Fd, Acc)
-                        end,
-                        last_offset_epoch(file:read(FstFd, ?INDEX_RECORD_SIZE_B),
-                                          FstFd, {FstE, FstChId, []}),
-                        SegInfos),
-        lists:reverse([{LastE, LastO} | Res]) end),
+    {Time, Result} = timer:tc(
+                       fun() -> 
+                               FstFd = open_index_read(IdxFile),
+                               {LastE, LastO, Res} =
+                               lists:foldl(fun(#seg_info{index = I}, Acc) ->
+                                                   Fd = open_index_read(I),
+                                                   last_offset_epoch(file:read(Fd, ?INDEX_RECORD_SIZE_B),
+                                                                     Fd, Acc)
+                                           end,
+                                           last_offset_epoch(file:read(FstFd, ?INDEX_RECORD_SIZE_B),
+                                                             FstFd, {FstE, FstChId, []}),
+                                           SegInfos),
+                               lists:reverse([{LastE, LastO} | Res])
+                       end),
     ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1000000]),
     Result.
 
@@ -1851,23 +1856,24 @@ open_index_read(File) ->
     Fd.
 
 scan_idx(Offset, SegmentInfo = #seg_info{index = IndexFile, last = LastChunkInSegment}) ->
-    {Time, Result} = timer:tc(fun() ->
-        case range_from_segment_infos([SegmentInfo]) of
-            empty ->
-                %% if the index is empty do we really know the offset will be next
-                %% this relies on us always reducing the Offset to within the log range
-                {0, ?LOG_HEADER_SIZE};
-            {SegmentStart, SegmentEnd} ->
-                case Offset < SegmentStart orelse Offset > SegmentEnd + 1 of
-                    true -> offset_out_of_range;
-                    false ->
-                        IndexFd = open_index_read(IndexFile),
-                        Result = scan_idx(IndexFd, Offset, LastChunkInSegment),
-                        file:close(IndexFd),
-                        Result
-                end
-        end
-    end),
+    {Time, Result} = timer:tc(
+                       fun() ->
+                               case range_from_segment_infos([SegmentInfo]) of
+                                   empty ->
+                                       %% if the index is empty do we really know the offset will be next
+                                       %% this relies on us always reducing the Offset to within the log range
+                                       {0, ?LOG_HEADER_SIZE};
+                                   {SegmentStart, SegmentEnd} ->
+                                       case Offset < SegmentStart orelse Offset > SegmentEnd + 1 of
+                                           true -> offset_out_of_range;
+                                           false ->
+                                               IndexFd = open_index_read(IndexFile),
+                                               Result = scan_idx(IndexFd, Offset, LastChunkInSegment),
+                                               file:close(IndexFd),
+                                               Result
+                                       end
+                               end
+                       end),
     ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1000000]),
     Result.
 
