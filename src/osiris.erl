@@ -41,6 +41,7 @@
 
 -type mfarg() :: {module(), atom(), list()}.
 -type offset() :: non_neg_integer().
+-type tracking_id() :: osiris_tracking:tracking_id().
 -type tracking_type() :: osiris_log:tracking_type().
 -type epoch() :: non_neg_integer().
 -type milliseconds() :: non_neg_integer().
@@ -63,6 +64,7 @@
               offset/0,
               epoch/0,
               tail_info/0,
+              tracking_id/0,
               offset_spec/0,
               retention_spec/0,
               milliseconds/0,
@@ -124,7 +126,7 @@ write_tracking(Pid, TrackingId, Offset) ->
 read_tracking(Pid, TrackingId) ->
     osiris_writer:read_tracking(Pid, TrackingId).
 
--spec read_tracking(pid()) -> #{binary() => {tracking_type(), offset()}} | undefined.
+-spec read_tracking(pid()) -> map().
 read_tracking(Pid) ->
     osiris_writer:read_tracking(Pid).
 
@@ -134,10 +136,10 @@ fetch_writer_seq(Pid, WriterId)
     when is_pid(Pid) andalso is_binary(WriterId) ->
     osiris_writer:query_writers(Pid,
                                 fun(W) ->
-                                   case maps:get(WriterId, W, undefined) of
-                                       undefined -> undefined;
-                                       {_, _, Seq} -> Seq
-                                   end
+                                        case maps:get(WriterId, W, undefined) of
+                                            undefined -> undefined;
+                                            {_, Seq} -> Seq
+                                        end
                                 end).
 
 %% @doc Initialise a new offset reader

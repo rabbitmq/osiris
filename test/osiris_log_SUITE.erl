@@ -60,8 +60,8 @@ all_tests() ->
      evaluate_retention_max_bytes,
      evaluate_retention_max_age,
      offset_tracking,
-     offset_tracking_snapshot,
-     offset_tracking_empty].
+     offset_tracking_snapshot
+    ].
 
 groups() ->
     [{tests, [], all_tests()}].
@@ -128,12 +128,13 @@ init_recover(Config) ->
 init_recover_with_writers(Config) ->
     S0 = osiris_log:init(?config(osiris_conf, Config)),
     Now = erlang:system_time(millisecond),
-    Writers = #{<<"wid1">> => 1},
+    Writers = make_trailer(sequence, <<"wid1">>, 1),
     S1 = osiris_log:write([<<"hi">>], ?CHNK_USER, Now, Writers, S0),
     ?assertEqual(1, osiris_log:next_offset(S1)),
     ok = osiris_log:close(S1),
     S2 = osiris_log:init(?config(osiris_conf, Config)),
-    ?assertMatch(#{<<"wid1">> := {0, Now, 1}}, osiris_log:writers(S2)),
+    Trk = osiris_log:recover_tracking(S2),
+    ?assertMatch(#{sequences := #{<<"wid1">> := {_, 1}}}, osiris_tracking:overview(Trk)),
     ?assertEqual(1, osiris_log:next_offset(S2)),
     ok.
 
@@ -277,7 +278,7 @@ write_multi_log(Config) ->
                         Acc
                      end,
                      R0, lists:seq(1, 101)),
-    ?assertEqual(1011, osiris_log:next_offset(R1)),
+    ?assertEqual(1010, osiris_log:next_offset(R1)),
     ok.
 
 tail_info_empty(Config) ->
@@ -423,18 +424,17 @@ init_offset_reader_truncated(Config) ->
 
     {ok, L2} = osiris_log:init_offset_reader(last, RConf),
     %% the last batch offset should be 949 given 50 records per batch
-    %% + 1 offset for the tracking snapshot
-    ?assertEqual(951, osiris_log:next_offset(L2)),
+    ?assertEqual(950, osiris_log:next_offset(L2)),
     osiris_log:close(L2),
 
     {ok, L3} = osiris_log:init_offset_reader(next, RConf),
     %% the last offset should be 999 + 1
-    ?assertEqual(1001, osiris_log:next_offset(L3)),
+    ?assertEqual(1000, osiris_log:next_offset(L3)),
     osiris_log:close(L3),
 
-    {ok, L4} = osiris_log:init_offset_reader(1001, RConf),
+    {ok, L4} = osiris_log:init_offset_reader(1000, RConf),
     %% higher = next
-    ?assertEqual(1001, osiris_log:next_offset(L4)),
+    ?assertEqual(1000, osiris_log:next_offset(L4)),
     osiris_log:close(L4),
 
     {ok, L5} = osiris_log:init_offset_reader(5, RConf),
@@ -613,13 +613,13 @@ accept_chunk(Config) ->
     FConf = Conf#{dir => ?config(follower1_dir, Config)},
     L0 = osiris_log:init(LConf),
     %% write an entry with just tracking
-    L1 = osiris_log:write_tracking(#{<<"id1">> => {offset, 1}}, delta, L0),
+    L1 = osiris_log:write([<<"hi">>], ?CHNK_USER, ?LINE, <<>>, L0),
+    % L1 = osiris_log:write_tracking(#{<<"id1">> => {offset, 1}}, delta, L0),
     timer:sleep(100),
 
-    Now = 12345,
-    Writers = #{<<"w1">> => 1},
-    L2 = osiris_log:write([<<"hi">>], ?CHNK_USER, Now, Writers, L1),
-    ?assertMatch(#{<<"w1">> := {_, Now, 1}}, osiris_log:writers(L2)),
+    Now = ?LINE,
+    L2 = osiris_log:write([<<"hi">>], ?CHNK_USER, Now, <<>>, L1),
+    % ?assertMatch(#{<<"w1">> := {_, Now, 1}}, osiris_log:writers(L2)),
 
     F0 = osiris_log:init(FConf),
 
@@ -636,8 +636,8 @@ accept_chunk(Config) ->
     osiris_log:close(R2),
     osiris_log:close(F2),
     FL0 = osiris_log:init(FConf),
-    ?assertMatch(#{<<"id1">> := {offset, 1}}, osiris_log:tracking(FL0)),
-    ?assertMatch(#{<<"w1">> := {_, Now, 1}}, osiris_log:writers(FL0)),
+    % ?assertMatch(#{<<"id1">> := {offset, 1}}, osiris_log:tracking(FL0)),
+    % ?assertMatch(#{<<"w1">> := {_, Now, 1}}, osiris_log:writers(FL0)),
     osiris_log:close(FL0),
     ok.
 
@@ -797,16 +797,21 @@ evaluate_retention_max_age(Config) ->
 offset_tracking(Config) ->
     Conf = ?config(osiris_conf, Config),
     S0 = osiris_log:init(Conf),
+    T0 = osiris_tracking:add(<<"id1">>, offset, 0, undefined,
+                             osiris_tracking:init(undefined)),
+    {Trailer, T1} = osiris_tracking:flush(T0),
     ?assertEqual(0, osiris_log:next_offset(S0)),
-    S1 = osiris_log:write_tracking(#{<<"id1">> => {offset, 0}}, delta,
-                                   osiris_log:write([<<"hi">>], S0)),
-    ?assertEqual(2, osiris_log:next_offset(S1)),
-    ?assertMatch(#{<<"id1">> := {offset, 0}}, osiris_log:tracking(S1)),
-    S2 = osiris_log:write_tracking(#{<<"id1">> => {offset, 1}}, delta, S1),
+    S1 = osiris_log:write([<<"hi">>], ?CHNK_USER, ?LINE, Trailer, S0),
+    ?assertEqual(1, osiris_log:next_offset(S1)),
+    % ?assertMatch(#{<<"id1">> := {offset, 0}}, osiris_log:tracking(S1)),
+    T2 = osiris_tracking:add(<<"id1">>, offset, 1, osiris_log:next_offset(S1), T1),
+    {Trailer2, _T3} = osiris_tracking:flush(T2),
+    S2 = osiris_log:write([<<"hi">>], ?CHNK_USER, ?LINE, Trailer2, S1),
     %% test recovery
     osiris_log:close(S2),
     S3 = osiris_log:init(Conf),
-    ?assertMatch(#{<<"id1">> := {offset, 1}}, osiris_log:tracking(S3)),
+    T = osiris_log:recover_tracking(S3),
+    ?assertMatch(#{offsets := #{<<"id1">> := 1}}, osiris_tracking:overview(T)),
     osiris_log:close(S3),
     ok.
 
@@ -819,69 +824,94 @@ offset_tracking_snapshot(Config) ->
     EpochChunks =
         [begin {1, Ts, [Data || _ <- lists:seq(1, 50)]} end
          || _ <- lists:seq(1, 20)],
-    Now = erlang:system_time(millisecond),
     S00 = osiris_log:init(Conf),
+
+    T0 = osiris_tracking:add(<<"wid1">>, sequence, 2, 0,
+           osiris_tracking:add(<<"id1">>, offset, 1, undefined,
+                             osiris_tracking:init(undefined))),
     S0 = osiris_log:write([<<"hi">>],
                           ?CHNK_USER,
-                          Now,
-                          #{<<"wid1">> => 2},
+                          ?LINE,
+                          make_trailer(sequence, <<"wid1">>, 2),
                           S00),
-    ?assertMatch(#{<<"wid1">> := {_, Now, 2}}, osiris_log:writers(S0)),
     %% write a tracking entry
-    S1 = osiris_log:write_tracking(#{<<"id1">> => {offset, 1}}, delta, S0),
+    S1 = osiris_log:write([],
+                          ?CHNK_TRK_DELTA,
+                          ?LINE,
+                          make_trailer(offset, <<"id1">>, 1),
+                          S0),
     %% this should create at least two segments
-    S2 = seed_log(S1, EpochChunks, Config),
+    {_, S2} = seed_log(S1, EpochChunks, Config, T0),
     osiris_log:close(S2),
     S3 = osiris_log:init(Conf),
-    ?assertMatch(#{<<"id1">> := {offset, 1}}, osiris_log:tracking(S3)),
-    ?assertMatch(#{<<"wid1">> := {_, Now, 2}}, osiris_log:writers(S3)),
+    T = osiris_log:recover_tracking(S3),
+    ?assertMatch(#{offsets := #{<<"id1">> := 1},
+                   sequences := #{<<"wid1">> := {_, 2}}},
+                 osiris_tracking:overview(T)),
     osiris_log:close(S3),
-    ok.
-
-offset_tracking_empty(Config) ->
-    Conf = ?config(osiris_conf, Config),
-    S0 = osiris_log:init(Conf),
-    ?assertEqual(0, osiris_log:next_offset(S0)),
-    S1 = osiris_log:write_tracking(#{}, snapshot, S0),
-    ?assertEqual(1, osiris_log:next_offset(S1)),
-    S2 = osiris_log:write([<<"hi">>], S1),
-    ?assertEqual(2, osiris_log:next_offset(S2)),
-    osiris_log:close(S2),
     ok.
 
 %% Utility
 
-seed_log(Conf, EpochChunks, Config) when is_map(Conf) ->
+seed_log(Conf, EpochChunks, Config) ->
+    Trk = osiris_tracking:init(undefined),
+    element(2, seed_log(Conf, EpochChunks, Config, Trk)).
+
+seed_log(Conf, EpochChunks, Config, Trk) when is_map(Conf) ->
     Log0 = osiris_log:init(Conf),
-    seed_log(Log0, EpochChunks, Config);
-seed_log(Dir, EpochChunks, Config) when is_list(Dir) ->
+    seed_log(Log0, EpochChunks, Config, Trk);
+seed_log(Dir, EpochChunks, Config, Trk) when is_list(Dir) ->
     seed_log(#{dir => Dir,
                epoch => 1,
                max_segment_size_bytes => 1000 * 1000,
                name => ?config(test_case, Config)},
-             EpochChunks, Config);
-seed_log(Log, EpochChunks, _Config) ->
-    lists:foldl(fun ({Epoch, Records}, Acc0) ->
-                        write_chunk(Epoch, now_ms(), Records, Acc0);
-                    ({Epoch, Ts, Records}, Acc0) ->
-                        write_chunk(Epoch, Ts, Records, Acc0)
+             EpochChunks, Config, Trk);
+seed_log(Log, EpochChunks, _Config, Trk) ->
+    lists:foldl(fun ({Epoch, Records}, {T, L}) ->
+                        write_chunk(Epoch, now_ms(), Records, T, L);
+                    ({Epoch, Ts, Records}, {T, L}) ->
+                        write_chunk(Epoch, Ts, Records, T, L)
                 end,
-                Log, EpochChunks).
+                {Trk, Log}, EpochChunks).
 
-write_chunk(Epoch, Now, Records, Log0) ->
-    case osiris_log:get_current_epoch(Log0) of
-        Epoch ->
-            osiris_log:write(Records, Now, Log0);
+write_chunk(Epoch, Now, Records, Trk0, Log0) ->
+    HasTracking = not osiris_tracking:is_empty(Trk0),
+    case osiris_log:is_open(Log0) of
+        false when HasTracking ->
+            ct:pal("writing tracking snapshot ~w", [osiris_log:next_offset(Log0)]),
+            FirstOffset = osiris_log:first_offset(Log0),
+            {SnapBin, Trk} = osiris_tracking:snapshot(FirstOffset, Trk0),
+            write_chunk(Epoch, Now, Records, Trk,
+                        osiris_log:write([SnapBin],
+                                         ?CHNK_TRK_SNAPSHOT,
+                                         Now,
+                                         <<>>,
+                                         Log0));
         _ ->
-            %% need to re=init
-            Dir = osiris_log:get_directory(Log0),
-            Name = osiris_log:get_name(Log0),
-            osiris_log:close(Log0),
-            Log = osiris_log:init(#{dir => Dir,
-                                    epoch => Epoch,
-                                    name => Name}),
-            osiris_log:write(Records, Log)
+            case osiris_log:get_current_epoch(Log0) of
+                Epoch ->
+                    {Trk0, osiris_log:write(Records, Now, Log0)};
+                _ ->
+                    %% need to re=init
+                    Dir = osiris_log:get_directory(Log0),
+                    Name = osiris_log:get_name(Log0),
+                    osiris_log:close(Log0),
+                    Log = osiris_log:init(#{dir => Dir,
+                                            epoch => Epoch,
+                                            name => Name}),
+                    {Trk0, osiris_log:write(Records, Log)}
+            end
     end.
 
 now_ms() ->
     erlang:system_time(millisecond).
+
+make_trailer(Type, K, V) ->
+    T = case Type of
+            sequence -> 0;
+            offset -> 1
+        end,
+    <<T:8/unsigned,
+      (byte_size(K)):8/unsigned,
+      K/binary,
+      V:64/unsigned>>.
