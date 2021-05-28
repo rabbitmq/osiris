@@ -20,6 +20,7 @@
          accept_chunk/2,
          next_offset/1,
          tail_info/1,
+         is_open/1,
          send_file/2,
          send_file/3,
          init_data_reader/2,
@@ -480,7 +481,7 @@ init(#{dir := Dir,
                                       mode =
                                           #write{type = WriterType,
                                                  tail_info = {NextOffset, empty},
-                                                 current_epoch = Epoch}}, 
+                                                 current_epoch = Epoch}},
                              erlang:system_time(millisecond));
         [#seg_info{file = Filename,
                    index = IdxFilename,
@@ -640,11 +641,11 @@ write_wrt_snapshot(Writers, _Ts, State) when map_size(Writers) == 0 ->
 write_wrt_snapshot(Writers, Now,
                    #?MODULE{cfg = #cfg{}, mode = #write{} = W0} = State0) ->
     WData =
-        maps:fold(fun(W, {_O, T, S}, Acc) ->
-                     [<<(byte_size(W)):8/unsigned,
-                        W/binary,
-                        T:64/unsigned,
-                        S:64/unsigned>>
+        maps:fold(fun(WriteId, {_O, Ts, Seq}, Acc) ->
+                     [<<(byte_size(WriteId)):8/unsigned,
+                        WriteId/binary,
+                        Ts:64/unsigned,
+                        Seq:64/unsigned>>
                       | Acc]
                   end,
                   [], Writers),
@@ -708,6 +709,10 @@ next_offset(#?MODULE{mode = #read{next_offset = Next}}) ->
 -spec tail_info(state()) -> osiris:tail_info().
 tail_info(#?MODULE{mode = #write{tail_info = TailInfo}}) ->
     TailInfo.
+
+-spec is_open(state()) -> boolean().
+is_open(#?MODULE{mode = #write{}, fd = Fd}) ->
+    Fd =/= undefined.
 
 % -spec
 init_acceptor(EpochOffsets0, #{name := Name, dir := Dir} = Conf) ->
@@ -1676,7 +1681,7 @@ write_chunk(Chunk,
         maps:fold(fun(K, V, Acc) -> maps:put(K, {Next, Timestamp, V}, Acc)
                   end,
                   Writers0, NewWriters),
-        case max_segment_size_reached(Fd, SegSizeChunks, Cfg) of
+    case max_segment_size_reached(Fd, SegSizeChunks, Cfg) of
         true ->
             %% close the current file
             ok = file:close(Fd),
