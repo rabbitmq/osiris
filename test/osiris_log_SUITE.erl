@@ -277,7 +277,7 @@ write_multi_log(Config) ->
                         Acc
                      end,
                      R0, lists:seq(1, 101)),
-    ?assertEqual(1011, osiris_log:next_offset(R1)),
+    ?assertEqual(1010, osiris_log:next_offset(R1)),
     ok.
 
 tail_info_empty(Config) ->
@@ -423,18 +423,17 @@ init_offset_reader_truncated(Config) ->
 
     {ok, L2} = osiris_log:init_offset_reader(last, RConf),
     %% the last batch offset should be 949 given 50 records per batch
-    %% + 1 offset for the tracking snapshot
-    ?assertEqual(951, osiris_log:next_offset(L2)),
+    ?assertEqual(950, osiris_log:next_offset(L2)),
     osiris_log:close(L2),
 
     {ok, L3} = osiris_log:init_offset_reader(next, RConf),
     %% the last offset should be 999 + 1
-    ?assertEqual(1001, osiris_log:next_offset(L3)),
+    ?assertEqual(1000, osiris_log:next_offset(L3)),
     osiris_log:close(L3),
 
-    {ok, L4} = osiris_log:init_offset_reader(1001, RConf),
+    {ok, L4} = osiris_log:init_offset_reader(1000, RConf),
     %% higher = next
-    ?assertEqual(1001, osiris_log:next_offset(L4)),
+    ?assertEqual(1000, osiris_log:next_offset(L4)),
     osiris_log:close(L4),
 
     {ok, L5} = osiris_log:init_offset_reader(5, RConf),
@@ -613,13 +612,13 @@ accept_chunk(Config) ->
     FConf = Conf#{dir => ?config(follower1_dir, Config)},
     L0 = osiris_log:init(LConf),
     %% write an entry with just tracking
-    L1 = osiris_log:write_tracking(#{<<"id1">> => {offset, 1}}, delta, L0),
+    L1 = osiris_log:write([<<"hi">>], ?CHNK_USER, ?LINE, <<>>, L0),
+    % L1 = osiris_log:write_tracking(#{<<"id1">> => {offset, 1}}, delta, L0),
     timer:sleep(100),
 
-    Now = 12345,
-    Writers = #{<<"w1">> => 1},
-    L2 = osiris_log:write([<<"hi">>], ?CHNK_USER, Now, Writers, L1),
-    ?assertMatch(#{<<"w1">> := {_, Now, 1}}, osiris_log:writers(L2)),
+    Now = ?LINE,
+    L2 = osiris_log:write([<<"hi">>], ?CHNK_USER, Now, <<>>, L1),
+    % ?assertMatch(#{<<"w1">> := {_, Now, 1}}, osiris_log:writers(L2)),
 
     F0 = osiris_log:init(FConf),
 
@@ -636,8 +635,8 @@ accept_chunk(Config) ->
     osiris_log:close(R2),
     osiris_log:close(F2),
     FL0 = osiris_log:init(FConf),
-    ?assertMatch(#{<<"id1">> := {offset, 1}}, osiris_log:tracking(FL0)),
-    ?assertMatch(#{<<"w1">> := {_, Now, 1}}, osiris_log:writers(FL0)),
+    % ?assertMatch(#{<<"id1">> := {offset, 1}}, osiris_log:tracking(FL0)),
+    % ?assertMatch(#{<<"w1">> := {_, Now, 1}}, osiris_log:writers(FL0)),
     osiris_log:close(FL0),
     ok.
 

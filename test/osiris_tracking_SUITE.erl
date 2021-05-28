@@ -54,10 +54,10 @@ end_per_testcase(_TestCase, _Config) ->
 
 basics(_Config) ->
     T0 = osiris_tracking:init(undefined),
-    Ts1 = ?LINE,
-    T1 = osiris_tracking:add(<<"w1">>, sequence, 55, Ts1, T0),
+    ChId1 = ?LINE,
+    T1 = osiris_tracking:add(<<"w1">>, sequence, 55, ChId1, T0),
     ?assert(osiris_tracking:needs_flush(T1)),
-    ?assertEqual({ok, 55}, osiris_tracking:query(<<"w1">>, sequence, T1)),
+    ?assertEqual({ok, {ChId1, 55}}, osiris_tracking:query(<<"w1">>, sequence, T1)),
     ?assertEqual({error, not_found}, osiris_tracking:query(<<"w2">>, sequence, T1)),
     {Trailer1, T2} = osiris_tracking:flush(T1),
     ?assert(false == osiris_tracking:needs_flush(T2)),
@@ -66,8 +66,8 @@ basics(_Config) ->
                    "w1", 55:64/unsigned>>,
                  iolist_to_binary(Trailer1)),
 
-    Ts2 = ?LINE,
-    T3 = osiris_tracking:add(<<"t1">>, offset, 99, Ts2, T2),
+    ChId2 = ?LINE,
+    T3 = osiris_tracking:add(<<"t1">>, offset, 99, ChId2, T2),
     ?assertEqual({ok, 99}, osiris_tracking:query(<<"t1">>, offset, T3)),
     {Trailer2, T4} = osiris_tracking:flush(T3),
     ?assertMatch(<<?TRK_TYPE_OFFSET:8,
@@ -83,20 +83,20 @@ basics(_Config) ->
                    ?TRK_TYPE_SEQUENCE:8/unsigned,
                    2:8/unsigned,
                    "w1",
-                   Ts1:64/unsigned,
+                   ChId1:64/unsigned,
                    55:64/unsigned>>, iolist_to_binary(Snap1)),
     %% passing a first offset lower than the tracking id should discard it
     {Snap2, _T6} = osiris_tracking:snapshot(100, T4),
     ?assertMatch(<<?TRK_TYPE_SEQUENCE:8/unsigned,
                    2:8/unsigned,
                    "w1",
-                   Ts1:64/unsigned,
+                   ChId1:64/unsigned,
                    55:64/unsigned>>, iolist_to_binary(Snap2)),
     ok.
 
 
 recover(_Config) ->
-    Ts1 = ?LINE,
+    ChId1 = ?LINE,
     SnapBin = <<?TRK_TYPE_OFFSET:8/unsigned,
                 2:8/unsigned,
                 "t1",
@@ -104,11 +104,11 @@ recover(_Config) ->
                 ?TRK_TYPE_SEQUENCE:8/unsigned,
                 2:8/unsigned,
                 "w1",
-                Ts1:64/unsigned,
+                ChId1 :64/unsigned,
                 55:64/unsigned>>,
 
     T0 = osiris_tracking:init(SnapBin),
-    ?assertEqual({ok, 55}, osiris_tracking:query(<<"w1">>, sequence, T0)),
+    ?assertEqual({ok, {ChId1, 55}}, osiris_tracking:query(<<"w1">>, sequence, T0)),
     ?assertEqual({ok, 99}, osiris_tracking:query(<<"t1">>, offset, T0)),
 
     Trailer = <<?TRK_TYPE_OFFSET:8/unsigned,
@@ -120,10 +120,10 @@ recover(_Config) ->
                 "w2",
                 77:64/unsigned>>,
 
-    Ts = ?LINE,
-    T1 = osiris_tracking:append_trailer(Ts, Trailer, T0),
-    ?assertEqual({ok, 55}, osiris_tracking:query(<<"w1">>, sequence, T1)),
-    ?assertEqual({ok, 77}, osiris_tracking:query(<<"w2">>, sequence, T1)),
+    ChId2 = ?LINE,
+    T1 = osiris_tracking:append_trailer(ChId2, Trailer, T0),
+    ?assertEqual({ok, {ChId1, 55}}, osiris_tracking:query(<<"w1">>, sequence, T1)),
+    ?assertEqual({ok, {ChId2, 77}}, osiris_tracking:query(<<"w2">>, sequence, T1)),
     ?assertEqual({ok, 99}, osiris_tracking:query(<<"t1">>, offset, T1)),
     ?assertEqual({ok, 103}, osiris_tracking:query(<<"t2">>, offset, T1)),
     ok.

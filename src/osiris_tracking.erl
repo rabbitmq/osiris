@@ -7,12 +7,14 @@
          snapshot/2,
          query/3,
          append_trailer/3,
-         needs_flush/1
+         needs_flush/1,
+         overview/1
          ]).
 
 
 -define(TRK_TYPE_SEQUENCE, 0).
 -define(TRK_TYPE_OFFSET, 1).
+-define(MAX_WRITERS, 255).
 %% holds static or rarely changing fields
 -record(cfg, {}).
 
@@ -24,7 +26,7 @@
                   pending = #{} :: #{sequences | offsets =>
                                      #{tracking_id() =>
                                        {tracking_type(), tracking()}}},
-                  sequences = #{} :: #{osiris:writer_id() => {osiris:milliseconds(),
+                  sequences = #{} :: #{osiris:writer_id() => {osiris:offset(),
                                                               non_neg_integer()}},
                   offsets = #{} :: #{osiris:tracking_id() => osiris:offset()}
                  }).
@@ -42,15 +44,15 @@ init(undefined) ->
 init(Bin) when is_binary(Bin) ->
     parse_snapshot(Bin, #?MODULE{}).
 
--spec add(tracking_id(), tracking_type(), tracking(), osiris:milliseconds(),
+-spec add(tracking_id(), tracking_type(), tracking(), osiris:offset(),
           state()) -> state().
-add(TrkId, TrkType, Tracking, Timestamp,
+add(TrkId, TrkType, Tracking, ChunkId,
     #?MODULE{pending = Pend0} = State)
   when is_integer(Tracking) andalso
        byte_size(TrkId) =< 256 ->
     Pend = Pend0#{TrkId => {TrkType, Tracking}},
     update_tracking(TrkId, TrkType, Tracking,
-                    Timestamp, State#?MODULE{pending = Pend}).
+                    ChunkId, State#?MODULE{pending = Pend}).
 
 
 -spec flush(state()) -> {iodata(), state()}.
@@ -72,11 +74,12 @@ flush(#?MODULE{pending = Pending} = State) ->
 
 -spec snapshot(osiris:offset(), state()) ->
     {iodata(), state()}.
-snapshot(FirstOffset, #?MODULE{sequences = Seqs,
+snapshot(FirstOffset, #?MODULE{sequences = Seqs0,
                                offsets = Offsets0} = State) ->
     %% discard any tracking info with offsets lower than the first offset
     %% in the stream
     Offsets = maps:filter(fun(_, O) -> O >= FirstOffset end, Offsets0),
+    Seqs = trim_writers(?MAX_WRITERS, Seqs0),
 
     SeqData = maps:fold(fun(TrkId, {Ts, Seq} , Acc) ->
                                 [<<?TRK_TYPE_SEQUENCE:8/unsigned,
@@ -94,21 +97,24 @@ snapshot(FirstOffset, #?MODULE{sequences = Seqs,
                               | Acc]
                      end, SeqData, Offsets),
     {Data, State#?MODULE{pending = #{},
+                         sequences = Seqs,
                          offsets = Offsets}}.
 
--spec query(tracking_id(), tracking_type(), state()) ->
-    {ok, tracking()} | {error, not_found}.
-query(TrkId, sequence, #?MODULE{sequences = Seqs}) ->
+-spec query(tracking_id(), TrkType :: tracking_type(), state()) ->
+    {ok, term()} | {error, not_found}.
+query(TrkId, sequence, #?MODULE{sequences = Seqs})
+  when is_binary(TrkId) ->
     case Seqs of
-        #{TrkId := {_Ts, Seq}} ->
-            {ok, Seq};
+        #{TrkId := Tracking} ->
+            {ok, Tracking};
         _ ->
             {error, not_found}
     end;
-query(TrkId, offset, #?MODULE{offsets = Offs}) ->
+query(TrkId, offset, #?MODULE{offsets = Offs})
+  when is_binary(TrkId) ->
     case Offs of
-        #{TrkId := O} ->
-            {ok, O};
+        #{TrkId := Tracking} ->
+            {ok, Tracking};
         _ ->
             {error, not_found}
     end.
@@ -122,12 +128,16 @@ append_trailer(Ts, Bin, State) ->
 needs_flush(#?MODULE{pending = Pend}) ->
     map_size(Pend) > 0.
 
+-spec overview(state()) -> map(). %% TODO refine
+overview(#?MODULE{sequences = Seqs, offsets = Offs}) ->
+    #{offsets => Offs,
+      sequences => Seqs}.
 
 %% INTERNAL
-update_tracking(TrkId, sequence, Tracking, Ts,
+update_tracking(TrkId, sequence, Tracking, ChId,
                 #?MODULE{sequences = Seqs0} = State) ->
-    State#?MODULE{sequences = Seqs0#{TrkId => {Ts, Tracking}}};
-update_tracking(TrkId, offset, Tracking, _Ts,
+    State#?MODULE{sequences = Seqs0#{TrkId => {ChId, Tracking}}};
+update_tracking(TrkId, offset, Tracking, _ChId,
                 #?MODULE{offsets = Offs} = State) ->
     State#?MODULE{offsets = Offs#{TrkId => Tracking}}.
 
@@ -161,3 +171,11 @@ parse_trailer(<<?TRK_TYPE_OFFSET:8/unsigned,
                 Offs:64/unsigned, Rem/binary>>,
               Ts, #?MODULE{offsets = Offsets} = State) ->
     parse_trailer(Rem, Ts, State#?MODULE{offsets = Offsets#{TrkId => Offs}}).
+
+trim_writers(Max, Writers) when map_size(Writers) =< Max ->
+    Writers;
+trim_writers(Max, Writers) ->
+    Sorted = lists:sort(fun ({_, {C0, _}}, {_, {C1, _}}) ->
+                                C0 < C1
+                        end, maps:to_list(Writers)),
+    maps:from_list(lists:nthtail(map_size(Writers) - Max, Sorted)).

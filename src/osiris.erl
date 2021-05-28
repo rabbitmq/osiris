@@ -134,10 +134,10 @@ fetch_writer_seq(Pid, WriterId)
     when is_pid(Pid) andalso is_binary(WriterId) ->
     osiris_writer:query_writers(Pid,
                                 fun(W) ->
-                                   case maps:get(WriterId, W, undefined) of
-                                       undefined -> undefined;
-                                       {_, _, Seq} -> Seq
-                                   end
+                                        case maps:get(WriterId, W, undefined) of
+                                            undefined -> undefined;
+                                            {_, Seq} -> Seq
+                                        end
                                 end).
 
 %% @doc Initialise a new offset reader
