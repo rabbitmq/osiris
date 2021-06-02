@@ -210,7 +210,7 @@ handle_batch(Commands,
                                  ?CHNK_USER,
                                  erlang:system_time(millisecond),
                                  Wrt,
-                                 Log0),
+                                 State1#?MODULE.log),
             Log = osiris_log:write_tracking(Trk, delta, Log1),
             State2 =
                 update_pending(ThisBatchOffs, Corrs, State1#?MODULE{log = Log}),

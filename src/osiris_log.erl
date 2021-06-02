@@ -1483,7 +1483,7 @@ evaluate_retention(Dir, Specs) ->
                                SegInfos = evaluate_retention0(SegInfos0, Specs),
                                {range_from_segment_infos(SegInfos), length(SegInfos)}
                        end),
-    ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1000000]),
+    ?DEBUG("~s:~s/~b (~w) completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Specs, Time/1000000]),
     Result.
 
 evaluate_retention0(Infos, []) ->
