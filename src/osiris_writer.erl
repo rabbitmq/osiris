@@ -207,16 +207,15 @@ handle_batch(Commands,
     case catch lists:foldr(fun handle_command/2,
                            {State0, [], [], #{}, Trk0, []}, Commands) of
         {#?MODULE{log = Log0} = State1, Entries, Replies, Corrs, Trk1, Dupes} ->
-            ThisBatchOffs = osiris_log:next_offset(Log0),
-            {Trailer, Trk2} = osiris_tracking:flush(Trk1),
             Now = erlang:system_time(millisecond),
+            ThisBatchOffs = osiris_log:next_offset(Log0),
+            {TrkBin, Trk2} = osiris_tracking:flush(Trk1),
+            NeedsFlush = osiris_tracking:needs_flush(Trk1),
             Log1 = case Entries of
-                       [] ->
-                           %% if there are no entries write the tracking as a delta
-                           %% chunk.
+                       [] when NeedsFlush ->
                            %% TODO: we could set a timer for explicit tracking delta
                            %% chunks in order to writer fewer of them
-                           osiris_log:write(Entries,
+                           osiris_log:write([TrkBin],
                                             ?CHNK_TRK_DELTA,
                                             Now,
                                             <<>>,
@@ -225,21 +224,22 @@ handle_batch(Commands,
                            osiris_log:write(Entries,
                                             ?CHNK_USER,
                                             Now,
-                                            Trailer,
+                                            TrkBin,
                                             Log0)
                    end,
+            HasTracking = not osiris_tracking:is_empty(Trk2),
             {Log, Trk} = case osiris_log:is_open(Log1) of
-                             false ->
+                             false when HasTracking ->
                                  %% the log was closed, i.e. full
                                  %% now we need to write a tracking snapshot
                                  FstOffs = osiris_log:first_offset(Log1),
-                                 {SnapBin, Trk_} = osiris_tracking:snapshot(FstOffs, Trk2),
+                                 {SnapBin, Trk3} = osiris_tracking:snapshot(FstOffs, Trk2),
                                  {osiris_log:write([SnapBin],
                                                    ?CHNK_TRK_SNAPSHOT,
                                                    Now,
                                                    <<>>,
-                                                   Log1), Trk_};
-                             true ->
+                                                   Log1), Trk3};
+                             _ ->
                                  {Log1, Trk2}
                          end,
             State2 =
@@ -347,6 +347,7 @@ handle_command({cast, {write, Pid, WriterId, Corr, R}},
              put_writer(WriterId, ChId, Corr, Trk),
              Dupes};
         {true, ChId} ->
+            ?INFO("DUPE ~w", [Corr]),
             %% add write to duplications list
             {State,
              Records,
@@ -562,14 +563,7 @@ is_duplicate(undefined, _, _, _) ->
 is_duplicate(WriterId, Corr, #?MODULE{log = _Log}, Trk) ->
     case osiris_tracking:query(WriterId, sequence, Trk) of
         {ok, {ChunkId, Seq}} ->
-            % ChunkId = osiris_log:next_offset(Log),
             {Corr =< Seq, ChunkId};
         {error, not_found} ->
             {false, 0}
-            % Writers = osiris_log:writers(Log),
-            % case Writers of
-            %     #{WriterId := {ChunkId, _, Seq}} ->
-            %         {Corr =< Seq, ChunkId};
-            %     _ ->
-            % end
     end.

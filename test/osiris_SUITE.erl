@@ -1037,7 +1037,9 @@ tracking(Config) ->
     ok = osiris:write_tracking(Leader, TrackId, 1),
     timer:sleep(100),
     ?assertEqual({offset, 1}, osiris:read_tracking(Leader, TrackId)),
-
+    ok = osiris:stop_cluster(Conf0),
+    {ok, #{leader_pid := Leader2}} = osiris:start_cluster(Conf0#{epoch => 2}),
+    ?assertEqual({offset, 1}, osiris:read_tracking(Leader2, TrackId)),
     ok.
 
 tracking_many(Config) ->
