@@ -1425,7 +1425,7 @@ evaluate_retention0(Infos, [{max_age, Age} | Specs]) ->
     RemSegs = eval_age(Infos, Age),
     evaluate_retention0(RemSegs, Specs).
 
-eval_age([#seg_info{first = #chunk_info{timestamp = Ts},
+eval_age([#seg_info{last = #chunk_info{timestamp = Ts},
                     size = Size} =
               Old
           | Rem] =

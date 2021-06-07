@@ -199,8 +199,7 @@ handle_batch(Commands,
              #?MODULE{cfg = #cfg{counter = Cnt, offset_ref = ORef} = Cfg,
                       duplicates = Dupes0,
                       committed_offset = COffs0,
-                      tracking = Trk0,
-                      log = _Log0} =
+                      tracking = Trk0} =
                  State0) ->
 
     %% process commands in reverse order
@@ -209,8 +208,8 @@ handle_batch(Commands,
         {#?MODULE{log = Log0} = State1, Entries, Replies, Corrs, Trk1, Dupes} ->
             Now = erlang:system_time(millisecond),
             ThisBatchOffs = osiris_log:next_offset(Log0),
-            {TrkBin, Trk2} = osiris_tracking:flush(Trk1),
             NeedsFlush = osiris_tracking:needs_flush(Trk1),
+            {TrkBin, Trk2} = osiris_tracking:flush(Trk1),
             Log1 = case Entries of
                        [] when NeedsFlush ->
                            %% TODO: we could set a timer for explicit tracking delta
@@ -234,6 +233,7 @@ handle_batch(Commands,
                                  %% now we need to write a tracking snapshot
                                  FstOffs = osiris_log:first_offset(Log1),
                                  {SnapBin, Trk3} = osiris_tracking:snapshot(FstOffs, Trk2),
+
                                  {osiris_log:write([SnapBin],
                                                    ?CHNK_TRK_SNAPSHOT,
                                                    Now,
