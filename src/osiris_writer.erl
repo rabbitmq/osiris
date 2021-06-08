@@ -531,20 +531,18 @@ notify_writers(Q0, COffs, Cfg) ->
 send_written_events(#cfg{reference = ExtRef,
                          event_formatter = Fmt},
                     Corrs) ->
-    %% TODO: minor optimisation: use maps:iterator here to avoid building a new
-    %% result map
-    maps:map(fun({P, WId}, V) ->
-                %% TODO: if the writer is on a remote node this could block
-                %% which is bad but we'd have to consider the downsides of using
-                %% send with noconnect and nosuspend here
-                % ?DEBUG("send_written_events ~s ~w", [ExtRef, V]),
-                P
-                ! wrap_osiris_event(Fmt,
-                                    {osiris_written,
-                                     ExtRef,
-                                     WId,
-                                     lists:reverse(V)})
-             end,
+    maps:fold(fun({P, WId}, V, Acc) ->
+                     %% TODO: if the writer is on a remote node this could block
+                     %% which is bad but we'd have to consider the downsides of using
+                     %% send with noconnect and nosuspend here
+                     % ?DEBUG("send_written_events ~s ~w", [ExtRef, V]),
+                     P ! wrap_osiris_event(Fmt,
+                                           {osiris_written,
+                                            ExtRef,
+                                            WId,
+                                            lists:reverse(V)}),
+                     Acc
+             end, ok,
              Corrs),
     ok.
 

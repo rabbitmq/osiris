@@ -432,8 +432,7 @@ init(#{dir := Dir,
                                       mode =
                                           #write{type = WriterType,
                                                  tail_info = {NextOffset, empty},
-                                                 current_epoch = Epoch}},
-                             erlang:system_time(millisecond));
+                                                 current_epoch = Epoch}});
         [#seg_info{file = Filename,
                    index = IdxFilename,
                    size = Size,
@@ -526,7 +525,7 @@ write([_ | _] = Entries,
     %% we need to open a new segment here to ensure tracking chunk
     %% is made before the one that triggers the new segment to be created
     trigger_retention_eval(
-      write(Entries, ChType, Now, Trailer, open_new_segment(State0, Now)));
+      write(Entries, ChType, Now, Trailer, open_new_segment(State0)));
 write([_ | _] = Entries,
       ChType,
       Now,
@@ -573,7 +572,7 @@ accept_chunk([<<?MAGIC:4/unsigned,
     case write_chunk(Chunk, Timestamp, Epoch, NumRecords, State0) of
         full ->
             trigger_retention_eval(
-              accept_chunk(Chunk, open_new_segment(State0, Timestamp)));
+              accept_chunk(Chunk, open_new_segment(State0)));
         State ->
             State
     end;
@@ -763,7 +762,6 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir,
             %% first we need to validate PrevEO
             case PrevEO of
                 empty ->
-                % empty when StartOffset == 0 ->
                     case find_segment_for_offset(StartOffset, SegInfos) of
                         not_found ->
                             %% this is unexpected and thus an error
@@ -1565,18 +1563,15 @@ write_chunk(Chunk,
             State#?MODULE{fd = undefined,
                           index_fd = undefined,
                           mode =
-                              Write#write{
-                                % writers = Writers,
-                                          tail_info =
-                                              {NextOffset,
-                                               {Epoch, Next, Timestamp}},
+                              Write#write{tail_info =
+                                          {NextOffset,
+                                           {Epoch, Next, Timestamp}},
                                           segment_size = {0, 0}}};
         false ->
             State#?MODULE{mode =
                               Write#write{tail_info =
                                               {NextOffset,
                                                {Epoch, Next, Timestamp}},
-                                          % writers = Writers,
                                           segment_size = {SegSizeBytes + Size, SegSizeChunks + 1}}}
     end.
 
@@ -1670,15 +1665,13 @@ make_file_name(N, Suff) ->
 
 open_new_segment(#?MODULE{cfg =
                               #cfg{directory = Dir,
-                                   counter = Cnt
-                                   },
+                                   counter = Cnt},
                           fd = undefined,
                           index_fd = undefined,
                           mode =
                               #write{type = _WriterType,
-                                     segment_size = {_SegSizeBytes, _SegSizeChunks},
                                      tail_info = {NextOffset, _}}} =
-                     State0, _Timestamp) ->
+                     State0) ->
     Filename = make_file_name(NextOffset, "segment"),
     IdxFilename = make_file_name(NextOffset, "index"),
     ?DEBUG("~s: ~s : ~s", [?MODULE, ?FUNCTION_NAME, Filename]),
