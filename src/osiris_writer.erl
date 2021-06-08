@@ -51,6 +51,7 @@
 -record(?MODULE,
         {cfg :: #cfg{},
          log :: osiris_log:state(),
+         tracking :: osiris_tracking:state(),
          replica_state = #{} :: #{node() => {osiris:offset(), osiris:milliseconds()}},
          pending_corrs = queue:new() :: queue:queue(),
          duplicates = [] ::
@@ -128,7 +129,7 @@ write_tracking(Pid, TrackingId, Offset)
     gen_batch_server:cast(Pid, {write_tracking, TrackingId, offset, Offset}).
 
 read_tracking(Pid, TrackingId) ->
-    gen_batch_server:call(Pid, {read_tracking, TrackingId}).
+    gen_batch_server:call(Pid, {read_tracking, offset, TrackingId}).
 
 read_tracking(Pid) ->
     gen_batch_server:call(Pid, read_tracking).
@@ -158,6 +159,7 @@ init(#{name := Name,
                                   end,
                                   counter_spec =>
                                       {CntName, ?ADD_COUNTER_FIELDS}}),
+    Trk = osiris_log:recover_tracking(Log),
     CntRef = osiris_log:counters_ref(Log),
     %% should this not be be chunk id rather than last offset?
     LastOffs = osiris_log:next_offset(Log) - 1,
@@ -190,30 +192,60 @@ init(#{name := Name,
                        counter = CntRef},
               committed_offset = CommittedOffset,
               replica_state = maps:from_list([{R, {-1, 0}} || R <- Replicas]),
-              log = Log}}.
+              log = Log,
+              tracking = Trk}}.
 
 handle_batch(Commands,
              #?MODULE{cfg = #cfg{counter = Cnt, offset_ref = ORef} = Cfg,
                       duplicates = Dupes0,
                       committed_offset = COffs0,
-                      log = Log0} =
+                      tracking = Trk0} =
                  State0) ->
 
     %% process commands in reverse order
     case catch lists:foldr(fun handle_command/2,
-                           {State0, [], [], #{}, #{}, #{}, []}, Commands)
-    of
-        {State1, Entries, Replies, Corrs, Trk, Wrt, Dupes} ->
+                           {State0, [], [], #{}, Trk0, []}, Commands) of
+        {#?MODULE{log = Log0} = State1, Entries, Replies, Corrs, Trk1, Dupes} ->
+            Now = erlang:system_time(millisecond),
             ThisBatchOffs = osiris_log:next_offset(Log0),
-            Log1 =
-                osiris_log:write(Entries,
-                                 ?CHNK_USER,
-                                 erlang:system_time(millisecond),
-                                 Wrt,
-                                 State1#?MODULE.log),
-            Log = osiris_log:write_tracking(Trk, delta, Log1),
+            NeedsFlush = osiris_tracking:needs_flush(Trk1),
+            {TrkBin, Trk2} = osiris_tracking:flush(Trk1),
+            Log1 = case Entries of
+                       [] when NeedsFlush ->
+                           %% TODO: we could set a timer for explicit tracking delta
+                           %% chunks in order to writer fewer of them
+                           osiris_log:write([TrkBin],
+                                            ?CHNK_TRK_DELTA,
+                                            Now,
+                                            <<>>,
+                                            Log0);
+                       _ ->
+                           osiris_log:write(Entries,
+                                            ?CHNK_USER,
+                                            Now,
+                                            TrkBin,
+                                            Log0)
+                   end,
+            HasTracking = not osiris_tracking:is_empty(Trk2),
+            {Log, Trk} = case osiris_log:is_open(Log1) of
+                             false when HasTracking ->
+                                 %% the log was closed, i.e. full
+                                 %% now we need to write a tracking snapshot
+                                 FstOffs = osiris_log:first_offset(Log1),
+                                 {SnapBin, Trk3} = osiris_tracking:snapshot(FstOffs, Trk2),
+
+                                 {osiris_log:write([SnapBin],
+                                                   ?CHNK_TRK_SNAPSHOT,
+                                                   Now,
+                                                   <<>>,
+                                                   Log1), Trk3};
+                             _ ->
+                                 {Log1, Trk2}
+                         end,
             State2 =
-                update_pending(ThisBatchOffs, Corrs, State1#?MODULE{log = Log}),
+                update_pending(ThisBatchOffs, Corrs,
+                               State1#?MODULE{tracking = Trk,
+                                              log = Log}),
 
             LastChId =
                 case osiris_log:tail_info(State2#?MODULE.log) of
@@ -274,14 +306,16 @@ update_pending(BatchOffs, Corrs,
                               queue:in({BatchOffs, Corrs}, Pending0)}
     end.
 
-put_writer(undefined, _Corr, Wrt) ->
-    Wrt;
-put_writer(WriterId, Corr, Wrt) when is_binary(WriterId) ->
-    Wrt#{WriterId => Corr}.
+put_writer(undefined, _ChId, _Corr, Trk) ->
+    Trk;
+put_writer(WriterId, ChunkId, Corr, Trk) when is_binary(WriterId) ->
+    osiris_tracking:add(WriterId, sequence, Corr, ChunkId, Trk).
 
+handle_duplicates(_CommittedOffset, [], _Cfg) ->
+    [];
 handle_duplicates(CommittedOffset, Dupes, #cfg{} = Cfg)
     when is_list(Dupes) ->
-    %% turn list of dupes into  corr map
+    %% turn list of dupes into corr map
     {Rem, Corrs} =
         lists:foldl(fun ({ChId, Pid, WriterId, Seq}, {Rem, Corrs0})
                             when ChId =< CommittedOffset ->
@@ -299,20 +333,20 @@ handle_duplicates(CommittedOffset, Dupes, #cfg{} = Cfg)
     Rem.
 
 handle_command({cast, {write, Pid, WriterId, Corr, R}},
-               {State, Records, Replies, Corrs0, Trk, Wrt, Dupes}) ->
-    case is_duplicate(WriterId, Corr, State, Wrt) of
+               {#?MODULE{log = Log} = State, Records, Replies, Corrs0, Trk, Dupes}) ->
+    case is_duplicate(WriterId, Corr, State, Trk) of
         {false, _} ->
             Corrs =
                 maps:update_with({Pid, WriterId},
                                  fun(C) -> [Corr | C] end,
                                  [Corr],
                                  Corrs0),
+            ChId = osiris_log:next_offset(Log),
             {State,
              [R | Records],
              Replies,
              Corrs,
-             Trk,
-             put_writer(WriterId, Corr, Wrt),
+             put_writer(WriterId, ChId, Corr, Trk),
              Dupes};
         {true, ChId} ->
             %% add write to duplications list
@@ -321,35 +355,40 @@ handle_command({cast, {write, Pid, WriterId, Corr, R}},
              Replies,
              Corrs0,
              Trk,
-             Wrt,
              [{ChId, Pid, WriterId, Corr} | Dupes]}
     end;
 handle_command({cast, {write_tracking, TrackingId, TrackingType, TrackingData}},
-               {State, Records, Replies, Corrs, Trk0, Wrt, Dupes}) ->
-    Trk = Trk0#{TrackingId => {TrackingType, TrackingData}},
-    {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
-handle_command({call, From, {read_tracking, TrackingId}},
-               {State, Records, Replies0, Corrs, Trk, Wrt, Dupes}) ->
+               {#?MODULE{log = Log} = State, Records, Replies, Corrs, Trk0, Dupes}) ->
+    ChunkId = osiris_log:next_offset(Log),
+    Trk = osiris_tracking:add(TrackingId, TrackingType, TrackingData, ChunkId, Trk0),
+
+    {State, Records, Replies, Corrs, Trk, Dupes};
+handle_command({call, From, {read_tracking, TrackingType, TrackingId}},
+               {State, Records, Replies0, Corrs, Trk, Dupes}) ->
     %% need to merge pending tracking entries before read
-    Tracking = osiris_log:tracking(State#?MODULE.log),
-    Replies =
-        [{reply, From, maps:get(TrackingId, Tracking, undefined)} | Replies0],
-    {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
-handle_command({call, From, read_tracking},
-               {State, Records, Replies0, Corrs, Trk, Wrt, Dupes}) ->
-    Tracking = osiris_log:tracking(State#?MODULE.log),
+    %%
+    Tracking = case osiris_tracking:query(TrackingId, TrackingType, Trk) of
+                   {ok, T} ->
+                       {TrackingType, T};
+                   {error, not_found} ->
+                       undefined
+               end,
     Replies = [{reply, From, Tracking} | Replies0],
-    {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
+    {State, Records, Replies, Corrs, Trk, Dupes};
+handle_command({call, From, read_tracking},
+               {State, Records, Replies0, Corrs, Trk, Dupes}) ->
+    Tracking = osiris_tracking:overview(Trk),
+    Replies = [{reply, From, Tracking} | Replies0],
+    {State, Records, Replies, Corrs, Trk, Dupes};
 handle_command({cast, {register_data_listener, Pid, Offset}},
                {#?MODULE{data_listeners = Listeners} = State0,
                 Records,
                 Replies,
                 Corrs,
                 Trk,
-                Wrt,
                 Dupes}) ->
     State = State0#?MODULE{data_listeners = [{Pid, Offset} | Listeners]},
-    {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
+    {State, Records, Replies, Corrs, Trk, Dupes};
 handle_command({cast,
                 {register_offset_listener, Pid, EvtFormatter, Offset}},
                {#?MODULE{offset_listeners = Listeners} = State0,
@@ -357,19 +396,17 @@ handle_command({cast,
                 Replies,
                 Corrs,
                 Trk,
-                Wrt,
                 Dupes}) ->
     State =
         State0#?MODULE{offset_listeners =
                            [{Pid, Offset, EvtFormatter} | Listeners]},
-    {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
+    {State, Records, Replies, Corrs, Trk, Dupes};
 handle_command({cast, {ack, ReplicaNode, {Offset, _} = OffsetTs}},
                {#?MODULE{replica_state = ReplicaState0} = State0,
                 Records,
                 Replies,
                 Corrs,
                 Trk,
-                Wrt,
                 Dupes}) ->
     % ?DEBUG("osiris_writer ack from ~w at ~b", [ReplicaNode, Offset]),
     ReplicaState =
@@ -381,7 +418,7 @@ handle_command({cast, {ack, ReplicaNode, {Offset, _} = OffsetTs}},
                 ReplicaState0
         end,
     State = State0#?MODULE{replica_state = ReplicaState},
-    {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
+    {State, Records, Replies, Corrs, Trk, Dupes};
 handle_command({call, From, get_reader_context},
                {#?MODULE{cfg =
                              #cfg{offset_ref = ORef,
@@ -395,7 +432,6 @@ handle_command({call, From, get_reader_context},
                 Replies,
                 Corrs,
                 Trk,
-                Wrt,
                 Dupes}) ->
     Reply =
         {reply, From,
@@ -406,11 +442,11 @@ handle_command({call, From, get_reader_context},
            reference => Ref,
            readers_counter_fun => fun(Inc) -> counters:add(CntRef, ?C_READERS, Inc) end
           }},
-    {State, Records, [Reply | Replies], Corrs, Trk, Wrt, Dupes};
+    {State, Records, [Reply | Replies], Corrs, Trk, Dupes};
 handle_command({call, From, {query_writers, QueryFun}},
-               {State, Records, Replies0, Corrs, Trk, Wrt, Dupes}) ->
+               {State, Records, Replies0, Corrs, Trk, Dupes}) ->
     %% need to merge pending tracking entries before read
-    Writers = osiris_log:writers(State#?MODULE.log),
+    #{sequences := Writers} = osiris_tracking:overview(Trk),
     Result =
         try QueryFun(Writers) of
             R ->
@@ -420,11 +456,11 @@ handle_command({call, From, {query_writers, QueryFun}},
                 Err
         end,
     Replies = [{reply, From, Result} | Replies0],
-    {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
+    {State, Records, Replies, Corrs, Trk, Dupes};
 handle_command({call, From, query_replication_state},
                {#?MODULE{log = Log,
                          replica_state = R} = State, Records, Replies0,
-                Corrs, Trk, Wrt, Dupes}) ->
+                Corrs, Trk, Dupes}) ->
     %% need to merge pending tracking entries before read
     Result = case osiris_log:tail_info(Log) of
                  {0, empty} ->
@@ -433,18 +469,17 @@ handle_command({call, From, query_replication_state},
                      R#{node() => {O, T}}
              end,
     Replies = [{reply, From, Result} | Replies0],
-    {State, Records, Replies, Corrs, Trk, Wrt, Dupes};
+    {State, Records, Replies, Corrs, Trk, Dupes};
 handle_command({call, From, {update_retention, Retention}},
                {#?MODULE{log = Log0} = State,
                 Records,
                 Replies0,
                 Corrs,
                 Trk,
-                Wrt,
                 Dupes}) ->
     Log = osiris_log:update_retention(Retention, Log0),
     Replies = [{reply, From, ok} | Replies0],
-    {State#?MODULE{log = Log}, Records, Replies, Corrs, Trk, Wrt, Dupes};
+    {State#?MODULE{log = Log}, Records, Replies, Corrs, Trk, Dupes};
 handle_command(osiris_stop, _Acc) ->
     throw({stop, normal});
 handle_command(_Unk, Acc) ->
@@ -496,20 +531,18 @@ notify_writers(Q0, COffs, Cfg) ->
 send_written_events(#cfg{reference = ExtRef,
                          event_formatter = Fmt},
                     Corrs) ->
-    %% TODO: minor optimisation: use maps:iterator here to avoid building a new
-    %% result map
-    maps:map(fun({P, WId}, V) ->
-                %% TODO: if the writer is on a remote node this could block
-                %% which is bad but we'd have to consider the downsides of using
-                %% send with noconnect and nosuspend here
-                % ?DEBUG("send_written_events ~s ~w", [ExtRef, V]),
-                P
-                ! wrap_osiris_event(Fmt,
-                                    {osiris_written,
-                                     ExtRef,
-                                     WId,
-                                     lists:reverse(V)})
-             end,
+    maps:fold(fun({P, WId}, V, Acc) ->
+                     %% TODO: if the writer is on a remote node this could block
+                     %% which is bad but we'd have to consider the downsides of using
+                     %% send with noconnect and nosuspend here
+                     % ?DEBUG("send_written_events ~s ~w", [ExtRef, V]),
+                     P ! wrap_osiris_event(Fmt,
+                                           {osiris_written,
+                                            ExtRef,
+                                            WId,
+                                            lists:reverse(V)}),
+                     Acc
+             end, ok,
              Corrs),
     ok.
 
@@ -526,17 +559,10 @@ agreed_commit(Indexes) ->
 
 is_duplicate(undefined, _, _, _) ->
     {false, 0};
-is_duplicate(WriterId, Corr, #?MODULE{log = Log}, Wrt) ->
-    case Wrt of
-        #{WriterId := Seq} ->
-            ChunkId = osiris_log:next_offset(Log),
+is_duplicate(WriterId, Corr, #?MODULE{log = _Log}, Trk) ->
+    case osiris_tracking:query(WriterId, sequence, Trk) of
+        {ok, {ChunkId, Seq}} ->
             {Corr =< Seq, ChunkId};
-        _ ->
-            Writers = osiris_log:writers(Log),
-            case Writers of
-                #{WriterId := {ChunkId, _, Seq}} ->
-                    {Corr =< Seq, ChunkId};
-                _ ->
-                    {false, 0}
-            end
+        {error, not_found} ->
+            {false, 0}
     end.

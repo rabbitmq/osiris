@@ -1037,7 +1037,9 @@ tracking(Config) ->
     ok = osiris:write_tracking(Leader, TrackId, 1),
     timer:sleep(100),
     ?assertEqual({offset, 1}, osiris:read_tracking(Leader, TrackId)),
-
+    ok = osiris:stop_cluster(Conf0),
+    {ok, #{leader_pid := Leader2}} = osiris:start_cluster(Conf0#{epoch => 2}),
+    ?assertEqual({offset, 1}, osiris:read_tracking(Leader2, TrackId)),
     ok.
 
 tracking_many(Config) ->
@@ -1087,14 +1089,15 @@ tracking_all(Config) ->
     TrackId1 = <<"tracking-id-1">>,
     TrackId2 = <<"tracking-id-2">>,
     TrackId3 = <<"tracking-id-3">>,
-    ?assertEqual(#{}, osiris:read_tracking(Leader)),
+    ?assertMatch(#{offsets := O} when map_size(O) == 0,
+                                      osiris:read_tracking(Leader)),
     ok = osiris:write_tracking(Leader, TrackId1, 0),
     ok = osiris:write_tracking(Leader, TrackId2, 1),
     ok = osiris:write_tracking(Leader, TrackId3, 2),
     timer:sleep(250),
-    ?assertEqual(#{TrackId1 => {offset, 0},
-                   TrackId2 => {offset, 1},
-                   TrackId3 => {offset, 2}}, osiris:read_tracking(Leader)),
+    ?assertMatch(#{offsets := #{TrackId1 := 0,
+                                TrackId2 := 1,
+                                TrackId3 := 2}}, osiris:read_tracking(Leader)),
     ok.
 
 tracking_retention(Config) ->
@@ -1251,6 +1254,7 @@ writers_retention(Config) ->
 
     ct:pal("Num writers ~w", [map_size(Writers)]),
     ?assert(map_size(Writers) < 256),
+    ct:pal("WRITERS ~p", [lists:min(maps:keys(Writers))]),
 
     %% validate there are only a single entry
     ok.
