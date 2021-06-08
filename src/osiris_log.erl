@@ -225,7 +225,7 @@
 %% ID = arbitrary data
 %%
 %% Type specific data:
-%% When ID type = 0: Timestamp, Sequence = unsigned 64-bit integers
+%% When ID type = 0: ChunkId, Sequence = unsigned 64-bit integers
 %% When ID type = 1: Offset = unsigned 64-bit integer
 %%
 %%
