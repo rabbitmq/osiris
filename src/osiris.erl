@@ -42,7 +42,7 @@
 -type mfarg() :: {module(), atom(), list()}.
 -type offset() :: non_neg_integer().
 -type tracking_id() :: osiris_tracking:tracking_id().
--type tracking_type() :: osiris_log:tracking_type().
+-type tracking_type() :: osiris_tracking:tracking_type().
 -type epoch() :: non_neg_integer().
 -type milliseconds() :: non_neg_integer().
 -type tail_info() :: {NextOffset :: offset(),

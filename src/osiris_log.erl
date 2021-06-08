@@ -190,7 +190,7 @@
 %%
 %% Entry body = arbitrary data
 %%
-%% SimpleEntry (CHNK_TRK_DELTA or CHNK_TRK_SNAPSHOT)
+%% SimpleEntry (CHNK_TRK_SNAPSHOT)
 %% -------------------------------------------------
 %%
 %%   |0              |1              |2              |3              | Bytes
@@ -209,7 +209,7 @@
 %%   |0              |1              |2              |3              | Bytes
 %%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
 %%   +---------------+---------------+---------------+---------------+
-%%   | ID type       | ID size       | ID                            |
+%%   | Trk    type   | ID size       | ID                            |
 %%   +---------------+---------------+                               |
 %%   |                                                               |
 %%   :                                                               :
@@ -218,53 +218,16 @@
 %%   |                                                               |
 %%   +---------------------------------------------------------------+
 %%
-%% ID type = unsigned 8-bit integer (0 only currently allowed value)
+%% ID type = unsigned 8-bit integer 0 = sequence, 1 = offset
 %%
 %% ID size = unsigned 8-bit integer
 %%
 %% ID = arbitrary data
 %%
 %% Type specific data:
-%% When ID type = 0: Offset = unsigned 64-bit integer
+%% When ID type = 0: Timestamp, Sequence = unsigned 64-bit integers
+%% When ID type = 1: Offset = unsigned 64-bit integer
 %%
-%% SimpleEntry (CHNK_WRT_SNAPSHOT)
-%% -------------------------------
-%%
-%%   |0              |1              |2              |3              | Bytes
-%%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
-%%   +-+-------------+---------------+---------------+---------------+
-%%   |0| Entry body length                                           |
-%%   +-+-------------------------------------------------------------+
-%%   | Entry Body                                                    |
-%%   : (<body length> bytes)                                         :
-%%   :                                                               :
-%%   +---------------------------------------------------------------+
-%%
-%% The entry body is made of a contiguous list of the following block, until
-%% the body length is reached.
-%%
-%%   |0              |1              |2              |3              | Bytes
-%%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
-%%   +---------------+---------------+---------------+---------------+
-%%   | WriterID size | WriterID                                      |
-%%   +---------------+                                               |
-%%   |                                                               |
-%%   :                                                               :
-%%   +---------------------------------------------------------------+
-%%   | Timestamp                                                     |
-%%   | (8 bytes)                                                     |
-%%   +---------------------------------------------------------------+
-%%   | Sequence                                                      |
-%%   | (8 bytes)                                                     |
-%%   +---------------------------------------------------------------+
-%%
-%% WriterID size = unsigned 8-bit integer
-%%
-%% WriterID = arbitrary data
-%%
-%% Timestamp = signed 64-bit integer
-%%
-%% Sequence = unsigned 64-bit integer
 %%
 %% SubBatchEntry (CHNK_USER)
 %% -------------------------
@@ -292,35 +255,37 @@
 %%
 %% Body = arbitrary data
 %%
-%% Trailer format
+%% Tracking format
 %% ==============
 %%
-%% The trailer is made of a contiguous list of the following block, until the
-%% trailer length stated in the chunk header is reached.
+%% The tracking trailer is made of a contiguous list of the following block,
+%% until the trailer length stated in the chunk header is reached.
 %%
 %%   |0              |1              |2              |3              | Bytes
 %%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
 %%   +-+-------------+---------------+---------------+---------------+
-%%   | WriterID size | WriterID                                      |
-%%   +---------------+                                               |
+%%   | Tracking type |TrackingID size| TrackingID                    |
+%%   +---------------+---------------+                               |
 %%   |                                                               |
 %%   :                                                               :
 %%   +---------------------------------------------------------------+
-%%   | Sequence                                                      |
-%%   | (8 bytes)                                                     |
+%%   | Tracking data                                                 |
+%%   |                                                               |
 %%   +---------------------------------------------------------------+
+%%
+%%
+%% Tracking type: 0 = sequence, 1 = offset
+%% Tracking data: type 0 = 64 bit integer, 1 = 64 bit integer
 %%
 %% Index format
 %% ============
 %%
 %% Maps each chunk to an offset
-%% | Offset | FileOffset
+%% | Offset | Timestamp | FileOffset
 
 -type offset() :: osiris:offset().
 -type epoch() :: osiris:epoch().
 -type range() :: empty | {From :: offset(), To :: offset()}.
-% -type tracking_id() :: binary(). %% max 255 bytes
--type tracking_type() :: offset. %% extensible: offset | timestamp | in_flight
 -type counter_spec() :: {Tag :: term(), Fields :: [atom()]}.
 -type chunk_type() ::
     ?CHNK_USER |
@@ -400,8 +365,7 @@
 -export_type([state/0,
               range/0,
               config/0,
-              counter_spec/0,
-              tracking_type/0]).
+              counter_spec/0]).
 
 -spec directory(osiris:config() | list()) -> file:filename().
 directory(#{name := Name, dir := Dir}) ->
