@@ -274,7 +274,6 @@ write_multi_log(Config) ->
                             osiris_log:read_chunk_parsed(Acc0),
 
                         ?assert(is_list(Records)),
-                        % ct:pal("offsets ~w", [element(1, lists:unzip(Records))]),
                         ?assertEqual(10, length(Records)),
                         Acc
                      end,
@@ -451,8 +450,6 @@ init_data_reader_empty_log(Config) ->
     %% an empty log
     FLog0 = seed_log(?config(follower1_dir, Config), [], Config),
     RRConf = Conf#{dir => ?config(leader_dir, Config)},
-    % FTail = osiris_log:tail_info(FLog0),
-    % ct:pal("Tail info ~w", [FTail]),
     %% the next offset, i.e. offset 0
     {ok, RLog0} =
         osiris_log:init_data_reader(
@@ -620,7 +617,6 @@ accept_chunk(Config) ->
 
     Now = ?LINE,
     L2 = osiris_log:write([<<"hi">>], ?CHNK_USER, Now, <<>>, L1),
-    % ?assertMatch(#{<<"w1">> := {_, Now, 1}}, osiris_log:writers(L2)),
 
     F0 = osiris_log:init(FConf),
 
@@ -637,8 +633,6 @@ accept_chunk(Config) ->
     osiris_log:close(R2),
     osiris_log:close(F2),
     FL0 = osiris_log:init(FConf),
-    % ?assertMatch(#{<<"id1">> := {offset, 1}}, osiris_log:tracking(FL0)),
-    % ?assertMatch(#{<<"w1">> := {_, Now, 1}}, osiris_log:writers(FL0)),
     osiris_log:close(FL0),
     ok.
 
@@ -804,7 +798,6 @@ offset_tracking(Config) ->
     ?assertEqual(0, osiris_log:next_offset(S0)),
     S1 = osiris_log:write([<<"hi">>], ?CHNK_USER, ?LINE, Trailer, S0),
     ?assertEqual(1, osiris_log:next_offset(S1)),
-    % ?assertMatch(#{<<"id1">> := {offset, 0}}, osiris_log:tracking(S1)),
     T2 = osiris_tracking:add(<<"id1">>, offset, 1, osiris_log:next_offset(S1), T1),
     {Trailer2, _T3} = osiris_tracking:flush(T2),
     S2 = osiris_log:write([<<"hi">>], ?CHNK_USER, ?LINE, Trailer2, S1),
