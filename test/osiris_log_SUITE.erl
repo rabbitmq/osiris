@@ -129,12 +129,13 @@ init_recover_with_writers(Config) ->
     S0 = osiris_log:init(?config(osiris_conf, Config)),
     Now = erlang:system_time(millisecond),
     Writers = make_trailer(sequence, <<"wid1">>, 1),
+    ChId = osiris_log:next_offset(S0),
     S1 = osiris_log:write([<<"hi">>], ?CHNK_USER, Now, Writers, S0),
     ?assertEqual(1, osiris_log:next_offset(S1)),
     ok = osiris_log:close(S1),
     S2 = osiris_log:init(?config(osiris_conf, Config)),
     Trk = osiris_log:recover_tracking(S2),
-    ?assertMatch(#{sequences := #{<<"wid1">> := {_, 1}}}, osiris_tracking:overview(Trk)),
+    ?assertMatch(#{sequences := #{<<"wid1">> := {ChId, 1}}}, osiris_tracking:overview(Trk)),
     ?assertEqual(1, osiris_log:next_offset(S2)),
     ok.
 

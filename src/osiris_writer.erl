@@ -311,9 +311,11 @@ put_writer(undefined, _ChId, _Corr, Trk) ->
 put_writer(WriterId, ChunkId, Corr, Trk) when is_binary(WriterId) ->
     osiris_tracking:add(WriterId, sequence, Corr, ChunkId, Trk).
 
+handle_duplicates(_CommittedOffset, [], _Cfg) ->
+    [];
 handle_duplicates(CommittedOffset, Dupes, #cfg{} = Cfg)
     when is_list(Dupes) ->
-    %% turn list of dupes into  corr map
+    %% turn list of dupes into corr map
     {Rem, Corrs} =
         lists:foldl(fun ({ChId, Pid, WriterId, Seq}, {Rem, Corrs0})
                             when ChId =< CommittedOffset ->
@@ -347,7 +349,6 @@ handle_command({cast, {write, Pid, WriterId, Corr, R}},
              put_writer(WriterId, ChId, Corr, Trk),
              Dupes};
         {true, ChId} ->
-            ?INFO("DUPE ~w", [Corr]),
             %% add write to duplications list
             {State,
              Records,

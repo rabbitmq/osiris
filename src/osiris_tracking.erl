@@ -83,11 +83,11 @@ snapshot(FirstOffset, #?MODULE{sequences = Seqs0,
     Offsets = maps:filter(fun(_, O) -> O >= FirstOffset end, Offsets0),
     Seqs = trim_writers(?MAX_WRITERS, Seqs0),
 
-    SeqData = maps:fold(fun(TrkId, {Ts, Seq} , Acc) ->
+    SeqData = maps:fold(fun(TrkId, {ChId, Seq} , Acc) ->
                                 [<<?TRK_TYPE_SEQUENCE:8/unsigned,
                                    (byte_size(TrkId)):8/unsigned,
                                    TrkId/binary,
-                                   Ts:64/unsigned,
+                                   ChId:64/unsigned,
                                    Seq:64/unsigned>>
                                  | Acc]
                         end, [], Seqs),
@@ -121,10 +121,10 @@ query(TrkId, offset, #?MODULE{offsets = Offs})
             {error, not_found}
     end.
 
--spec append_trailer(osiris:milliseconds(), binary(), state()) ->
+-spec append_trailer(osiris:offset(), binary(), state()) ->
     state().
-append_trailer(Ts, Bin, State) ->
-    parse_trailer(Bin, Ts, State).
+append_trailer(ChId, Bin, State) ->
+    parse_trailer(Bin, ChId, State).
 
 -spec needs_flush(state()) -> boolean().
 needs_flush(#?MODULE{pending = Pend}) ->
@@ -152,10 +152,10 @@ parse_snapshot(<<>>, State) ->
 parse_snapshot(<<?TRK_TYPE_SEQUENCE:8/unsigned,
                  TrkIdSize:8/unsigned,
                  TrkId:TrkIdSize/binary,
-                 Ts:64/unsigned,
+                 ChId:64/unsigned,
                  Seq:64/unsigned, Rem/binary>>,
                #?MODULE{sequences = Seqs} = State) ->
-    parse_snapshot(Rem, State#?MODULE{sequences = Seqs#{TrkId => {Ts, Seq}}});
+    parse_snapshot(Rem, State#?MODULE{sequences = Seqs#{TrkId => {ChId, Seq}}});
 parse_snapshot(<<?TRK_TYPE_OFFSET:8/unsigned,
                  TrkIdSize:8/unsigned,
                  TrkId:TrkIdSize/binary,
@@ -163,20 +163,20 @@ parse_snapshot(<<?TRK_TYPE_OFFSET:8/unsigned,
                #?MODULE{offsets = Offsets} = State) ->
     parse_snapshot(Rem, State#?MODULE{offsets = Offsets#{TrkId => Offs}}).
 
-parse_trailer(<<>>, _Ts, State) ->
+parse_trailer(<<>>, _ChId, State) ->
     State;
 parse_trailer(<<?TRK_TYPE_SEQUENCE:8/unsigned,
                 TrkIdSize:8/unsigned,
                 TrkId:TrkIdSize/binary,
                 Seq:64/unsigned, Rem/binary>>,
-              Ts, #?MODULE{sequences = Seqs} = State) ->
-    parse_trailer(Rem, Ts, State#?MODULE{sequences = Seqs#{TrkId => {Ts, Seq}}});
+              ChId, #?MODULE{sequences = Seqs} = State) ->
+    parse_trailer(Rem, ChId, State#?MODULE{sequences = Seqs#{TrkId => {ChId, Seq}}});
 parse_trailer(<<?TRK_TYPE_OFFSET:8/unsigned,
                 TrkIdSize:8/unsigned,
                 TrkId:TrkIdSize/binary,
                 Offs:64/unsigned, Rem/binary>>,
-              Ts, #?MODULE{offsets = Offsets} = State) ->
-    parse_trailer(Rem, Ts, State#?MODULE{offsets = Offsets#{TrkId => Offs}}).
+              ChId, #?MODULE{offsets = Offsets} = State) ->
+    parse_trailer(Rem, ChId, State#?MODULE{offsets = Offsets#{TrkId => Offs}}).
 
 trim_writers(Max, Writers) when map_size(Writers) =< Max ->
     Writers;

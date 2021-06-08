@@ -656,7 +656,7 @@ chunk_id_index_scan0(Fd, ChunkId) ->
     end.
 
 delete_segment(#seg_info{file = File, index = Index}) ->
-    ?INFO("deleting segment ~s in ~s",
+    ?INFO("osiris_log: deleting segment ~s in ~s",
           [filename:basename(File), filename:dirname(File)]),
     ok = file:delete(File),
     ok = file:delete(Index),
@@ -1865,9 +1865,9 @@ recover_tracking(Fd, Trk0) ->
            ChType:8/unsigned,
            _:16/unsigned,
            _NumRecords:32/unsigned,
-           Timestamp:64/signed,
+           _Timestamp:64/signed,
            _Epoch:64/unsigned,
-           _ChunkId:64/unsigned,
+           ChunkId:64/unsigned,
            _Crc:32/integer,
            Size:32/unsigned,
            TSize:32/unsigned,
@@ -1877,7 +1877,7 @@ recover_tracking(Fd, Trk0) ->
                     %% tracking is written a single record so we don't
                     %% have to parse
                     {ok, <<0:1, S:31, Data:S/binary>>} = file:read(Fd, Size),
-                    Trk = osiris_tracking:append_trailer(Timestamp, Data, Trk0),
+                    Trk = osiris_tracking:append_trailer(ChunkId, Data, Trk0),
                     {ok, _} = file:position(Fd, {cur, TSize}),
                     %% A tracking delta chunk will not have any writer data
                     %% so no need to parse writers here
@@ -1891,7 +1891,7 @@ recover_tracking(Fd, Trk0) ->
                     {ok, _} = file:position(Fd, {cur, Size}),
                     {ok, TData} = file:read(Fd, TSize),
 
-                    Trk = osiris_tracking:append_trailer(Timestamp, TData, Trk0),
+                    Trk = osiris_tracking:append_trailer(ChunkId, TData, Trk0),
                     recover_tracking(Fd, Trk)
             end;
         eof ->
