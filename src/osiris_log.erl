@@ -1172,7 +1172,7 @@ select_chunk_to_send(_, _, DataSize, TrailerSize) ->
 
 needs_handling(data, _, _) ->
     true;
-needs_handling(offset, all, ChType) ->
+needs_handling(offset, all, _ChType) ->
     true;
 needs_handling(offset, user_data, ?CHNK_USER) ->
     true;
