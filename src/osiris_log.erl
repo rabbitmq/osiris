@@ -331,7 +331,7 @@
          readers_counter_fun = fun(_) -> ok end :: function(),
          first_offset_fun :: fun ((integer()) -> ok)}).
 -record(read,
-        {type :: data | offset | raw,
+        {type :: data | offset,
          offset_ref :: undefined | atomics:atomics_ref(),
          last_offset = 0 :: offset(),
          next_offset = 0 :: offset(),
