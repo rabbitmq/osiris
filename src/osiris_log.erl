@@ -258,8 +258,9 @@
 %% Tracking format
 %% ==============
 %%
-%% The tracking trailer is made of a contiguous list of the following block,
+%% Tracking is made of a contiguous list of the following block,
 %% until the trailer length stated in the chunk header is reached.
+%% The same format is used for the CHNK_TRK_DELTA chunk entry.
 %%
 %%   |0              |1              |2              |3              | Bytes
 %%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
