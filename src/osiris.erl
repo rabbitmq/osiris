@@ -58,6 +58,9 @@
     {max_bytes, non_neg_integer()} | {max_age, milliseconds()}.
 -type writer_id() :: binary().
 -type data() :: iodata() | {batch, non_neg_integer(), 0, iodata()}.
+-type reader_options() :: #{transport => tcp | ssl,
+                            chunk_selector => all | user_data
+                           }.
 
 -export_type([state/0,
               config/0,
@@ -163,20 +166,21 @@ fetch_writer_seq(Pid, WriterId)
                       {offset_out_of_range, empty | {offset(), offset()}}} |
                      {error, {invalid_last_offset_epoch, offset(), offset()}}.
 init_reader(Pid, OffsetSpec, CounterSpec) ->
-    init_reader(Pid, OffsetSpec, CounterSpec, tcp).
+    init_reader(Pid, OffsetSpec, CounterSpec, #{transport => tcp,
+                                                chunk_selector => user_data}).
 
--spec init_reader(pid(), offset_spec(), osiris_log:counter_spec(), tcp | ssl) ->
+-spec init_reader(pid(), offset_spec(), osiris_log:counter_spec(), reader_options()) ->
                      {ok, osiris_log:state()} |
                      {error,
                       {offset_out_of_range, empty | {offset(), offset()}}} |
                      {error, {invalid_last_offset_epoch, offset(), offset()}}.
-init_reader(Pid, OffsetSpec, {_, _} = CounterSpec, Transport)
+init_reader(Pid, OffsetSpec, {_, _} = CounterSpec, Options)
     when is_pid(Pid) andalso node(Pid) =:= node() ->
     ?DEBUG("osiris: initialising reader. Spec: ~w", [OffsetSpec]),
     {ok, Ctx0} = gen:call(Pid, '$gen_call', get_reader_context),
     % CntId = {?MODULE, Ref, Tag, Pid},
     Ctx = Ctx0#{counter_spec => CounterSpec,
-                transport => Transport},
+                options => Options},
     osiris_log:init_offset_reader(OffsetSpec, Ctx).
 
 -spec register_offset_listener(pid(), offset()) -> ok.

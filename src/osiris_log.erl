@@ -335,7 +335,8 @@
          offset_ref :: undefined | atomics:atomics_ref(),
          last_offset = 0 :: offset(),
          next_offset = 0 :: offset(),
-         transport :: tcp | ssl}).
+         transport :: tcp | ssl,
+         chunk_selector :: all | user_data}).
 -record(write,
         {type = writer :: writer | acceptor,
          segment_size = {0, 0} :: {non_neg_integer(), non_neg_integer()},
@@ -850,6 +851,7 @@ init_data_reader_from_segment(#{dir := Dir, name := Name} = Config,
                  #read{type = data,
                        offset_ref = maps:get(offset_ref, Config, undefined),
                        next_offset = NextOffs,
+                       chunk_selector = all,
                        transport = maps:get(transport, Config, tcp)},
              fd = Fd}.
 
@@ -919,7 +921,8 @@ init_offset_reader(OffsetSpec,
                    #{dir := Dir,
                      name := Name,
                      offset_ref := OffsetRef,
-                     readers_counter_fun := ReaderCounterFun} =
+                     readers_counter_fun := ReaderCounterFun,
+                     options := Options} =
                        Conf) ->
     SegInfo = build_log_overview(Dir),
     Range = range_from_segment_infos(SegInfo),
@@ -972,9 +975,10 @@ init_offset_reader(OffsetSpec,
                                   },
                           mode =
                               #read{type = offset,
+                                    chunk_selector = maps:get(chunk_selector, Options, user_data),
                                     offset_ref = OffsetRef,
                                     next_offset = ChOffs,
-                                    transport = maps:get(transport, Conf, tcp)},
+                                    transport = maps:get(transport, Options, tcp)},
                           fd = Fd}}
             catch
                 missing_file ->
@@ -1073,20 +1077,21 @@ read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
 -spec read_chunk_parsed(state()) ->
                            {[record()], state()} | {end_of_stream, state()} |
                            {error, {invalid_chunk_header, term()}}.
-read_chunk_parsed(#?MODULE{mode = #read{type = RType}} = State0) ->
+read_chunk_parsed(#?MODULE{mode = #read{type = RType,
+                                        chunk_selector = Selector}} = State0) ->
     %% reads the next chunk of entries, parsed
     %% NB: this may return records before the requested index,
     %% that is fine - the reading process can do the appropriate filtering
     case read_chunk(State0) of
-        {ok, {?CHNK_USER, Offs, _Epoch, _Header, Data, _Trailer}, State} ->
-            %% parse data into records
-            {parse_records(Offs, Data, []), State};
-        {ok, {_ChType, Offs, _Epoch, _Header, Data, _Trailer}, State}
-            when RType == data ->
-            {parse_records(Offs, Data, []), State};
-        {ok, {_ChType, _Offs, _Epoch, _Header, _, _Trailer}, State} ->
-            %% skip
-            read_chunk_parsed(State);
+        {ok, {ChType, Offs, _Epoch, _Header, Data, _Trailer}, State} ->
+            case needs_handling(RType, Selector, ChType) of
+                true ->
+                    %% parse data into records
+                    {parse_records(Offs, Data, []), State};
+                false ->
+                    %% skip
+                    read_chunk_parsed(State)
+            end;
         Ret ->
             Ret
     end.
@@ -1105,6 +1110,7 @@ send_file(Sock, State) ->
                    {end_of_stream, state()}.
 send_file(Sock,
           #?MODULE{cfg = #cfg{}, mode = #read{type = RType,
+                                              chunk_selector = Selector,
                                               transport = Transport}} = State0,
           Callback) ->
     case read_header0(State0) of
@@ -1123,15 +1129,12 @@ send_file(Sock,
             %% and return the number of bytes to sendfile
             %% this allow users of this api to send all the data
             %% or just header and entry data
-            ToSend =
-                case ChType of
-                    ?CHNK_USER when RType == offset ->
-                        %% offset readers only need the entry
-                        %% data not the trailer
-                        DataSize + ?HEADER_SIZE_B;
-                    _ ->
-                        DataSize + TrailerSize + ?HEADER_SIZE_B
-                end,
+            ToSend = case RType of
+                         offset ->
+                             select_chunk_to_send(Selector, ChType, DataSize, TrailerSize);
+                         data ->
+                             DataSize + TrailerSize + ?HEADER_SIZE_B
+                     end,
 
             %% sendfile doesn't increment the file descriptor position
             %% so we have to do this manually
@@ -1139,7 +1142,7 @@ send_file(Sock,
             State = State1#?MODULE{mode = incr_next_offset(NumRecords, Read)},
             %% only sendfile if either the reader is a data reader
             %% or the chunk is a user type (for offset readers)
-            case ChType == ?CHNK_USER orelse RType == data of
+            case needs_handling(RType, Selector, ChType) of
                 true ->
                     _ = Callback(Header, ToSend),
                     case sendfile(Transport, Fd, Sock, Pos, ToSend) of
@@ -1160,6 +1163,21 @@ send_file(Sock,
         Other ->
             Other
     end.
+
+%% There could be many more selectors in the future
+select_chunk_to_send(user_data, ?CHNK_USER, DataSize, _TrailerSize) ->
+    DataSize + ?HEADER_SIZE_B;
+select_chunk_to_send(_, _, DataSize, TrailerSize) ->
+    DataSize + TrailerSize + ?HEADER_SIZE_B.
+
+needs_handling(data, _, _) ->
+    true;
+needs_handling(offset, all, ChType) ->
+    true;
+needs_handling(offset, user_data, ?CHNK_USER) ->
+    true;
+needs_handling(_, _, _) ->
+    false.
 
 -spec close(state()) -> ok.
 close(#?MODULE{cfg = #cfg{counter_id = CntId,

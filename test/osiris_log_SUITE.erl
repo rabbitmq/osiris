@@ -50,6 +50,7 @@ all_tests() ->
      init_epoch_offsets,
      init_epoch_offsets_multi_segment,
      init_epoch_offsets_multi_segment2,
+     init_raw_offset_reader,
      % truncate,
      % truncate_multi_segment,
      accept_chunk,
@@ -94,7 +95,8 @@ init_per_testcase(TestCase, Config) ->
         name => atom_to_list(TestCase),
         epoch => 1,
         readers_counter_fun => fun(_) -> ok end,
-        offset_ref => ORef}},
+        offset_ref => ORef,
+        options => #{}}},
      {dir, Dir}
      | Config].
 
@@ -325,13 +327,20 @@ init_offset_reader_empty(Config) ->
     ok.
 
 init_offset_reader(Config) ->
+    init_offset_reader(Config, offset).
+
+init_raw_offset_reader(Config) ->
+    %% Raw readers behave like offset readers
+    init_offset_reader(Config, raw).
+
+init_offset_reader(Config, Mode) ->
     EpochChunks =
         [{1, [<<"one">>]}, {2, [<<"two">>]}, {3, [<<"three">>, <<"four">>]}],
     LDir = ?config(leader_dir, Config),
     Conf = ?config(osiris_conf, Config),
     LLog0 = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(LLog0),
-    RConf = Conf#{dir => LDir, offset_ref => ?FUNCTION_NAME},
+    RConf = Conf#{dir => LDir, offset_ref => ?FUNCTION_NAME, mode => Mode},
 
     {ok, L1} = osiris_log:init_offset_reader(first, RConf),
     ?assertEqual(0, osiris_log:next_offset(L1)),
