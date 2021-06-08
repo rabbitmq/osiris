@@ -108,7 +108,7 @@
 %%   | Epoch                                                         |
 %%   | (8 bytes)                                                     |
 %%   +---------------------------------------------------------------+
-%%   | First offset                                                  |
+%%   | ChunkId                                                       |
 %%   | (8 bytes)                                                     |
 %%   +---------------------------------------------------------------+
 %%   | Data CRC                                                      |
@@ -148,7 +148,7 @@
 %%
 %% Epoch = unsigned 64-bit integer
 %%
-%% First offset = unsigned 64-bit integer
+%% ChunkId = unsigned 64-bit integer, the first offset in the chunk
 %%
 %% Data CRC = unsigned 32-bit integer
 %%
