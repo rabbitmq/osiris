@@ -10,6 +10,7 @@
 -include("osiris.hrl").
 
 -export([init/1,
+         init/2,
          init_acceptor/2,
          write/2,
          write/3,
