@@ -42,6 +42,7 @@ all_tests() ->
      init_offset_reader,
      init_offset_reader_last_chunk_is_not_user_chunk,
      init_offset_reader_no_user_chunk_in_last_segment,
+     init_offset_reader_no_user_chunk_in_segments,
      init_offset_reader_timestamp,
      init_offset_reader_truncated,
      init_data_reader_empty_log,
@@ -441,6 +442,30 @@ init_offset_reader_no_user_chunk_in_last_segment(Config) ->
     % test that 'next' returns next chunk
     {ok, L2} = osiris_log:init_offset_reader(next, RConf),
     ?assertEqual(3, osiris_log:next_offset(L2)),
+    osiris_log:close(L2),
+    ok.
+
+init_offset_reader_no_user_chunk_in_segments(Config) ->
+    % | offset | chunk type |
+    % | 0      | tracking   |
+    LDir = ?config(leader_dir, Config),
+    S0 = seed_log(LDir, [], Config),
+    S1 = osiris_log:write([<<"1st tracking delta chunk">>],
+                          ?CHNK_TRK_DELTA,
+                          ?LINE,
+                          make_trailer(offset, <<"id1">>, 10),
+                          S0),
+    osiris_log:close(S1),
+
+    Conf = ?config(osiris_conf, Config),
+    RConf = Conf#{dir => LDir, offset_ref => ?FUNCTION_NAME},
+    % Test that 'last' returns 0 when there is no user chunk
+    {ok, L1} = osiris_log:init_offset_reader(last, RConf),
+    ?assertEqual(0, osiris_log:next_offset(L1)),
+    osiris_log:close(L1),
+
+    {ok, L2} = osiris_log:init_offset_reader(next, RConf),
+    ?assertEqual(1, osiris_log:next_offset(L2)),
     osiris_log:close(L2),
     ok.
 
