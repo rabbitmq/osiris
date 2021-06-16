@@ -1020,6 +1020,64 @@ init_offset_reader(OffsetSpec,
             end
     end.
 
+%% Searches the index files backwards for the ID of the last user chunk.
+last_user_chunk_id(SegInfos) when is_list(SegInfos) ->
+    {Time, Result} = timer:tc(
+                       fun() ->
+                               last_user_chunk_id0(lists:reverse(SegInfos))
+                       end),
+    ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1_000_000]),
+    Result.
+
+last_user_chunk_id0([]) ->
+    %% There are no user chunks in any index files.
+    0;
+last_user_chunk_id0([#seg_info{index = IdxFile} | Rest]) ->
+    try
+        %% Do not read-ahead since we read the index file backwards chunk by chunk.
+        {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
+        file:position(IdxFd, eof),
+        Last = last_user_chunk_id_in_index(IdxFd),
+        file:close(IdxFd),
+        case Last of
+            {ok, Id} ->
+                Id;
+            {error, Reason} ->
+                ?DEBUG("Could not find user chunk in index file ~s (~p)", [IdxFile, Reason]),
+                last_user_chunk_id0(Rest)
+        end
+    catch
+        missing_file ->
+            ?DEBUG("Index file does not exist: ~s", [IdxFile]),
+            last_user_chunk_id0(Rest)
+    end.
+
+%% Searches the index file backwards for the ID of the last user chunk.
+last_user_chunk_id_in_index(IdxFd) ->
+    case file:position(IdxFd, {cur, -2*?INDEX_RECORD_SIZE_B}) of
+        {error, _} = Error ->
+            Error;
+        {ok, _NewPos} ->
+            case file:read(IdxFd, ?INDEX_RECORD_SIZE_B) of
+                {ok,
+                 <<Offset:64/unsigned,
+                   _Timestamp:64/signed,
+                   _Epoch:64/unsigned,
+                   _FileOffset:32/unsigned,
+                   ?CHNK_USER:8/unsigned>>} ->
+                    {ok, Offset};
+                {ok,
+                 <<_Offset:64/unsigned,
+                   _Timestamp:64/signed,
+                   _Epoch:64/unsigned,
+                   _FileOffset:32/unsigned,
+                   _ChType:8/unsigned>>} ->
+                    last_user_chunk_id_in_index(IdxFd);
+                {error, _} = Error ->
+                    Error
+            end
+    end.
+
 -spec committed_offset(state()) -> undefined | offset().
 committed_offset(#?MODULE{mode = #read{offset_ref = undefined}}) ->
     undefined;
@@ -1332,64 +1390,6 @@ build_log_overview0([IdxFile | IdxFiles], Acc0) ->
                     %% The retention policy could have just been applied
                     ok = file:close(IdxFd),
                     build_log_overview0(IdxFiles, Acc0)
-            end
-    end.
-
-%% Searches the index files backwards for the ID of the last user chunk.
-last_user_chunk_id(SegInfos) when is_list(SegInfos) ->
-    {Time, Result} = timer:tc(
-                       fun() ->
-                               last_user_chunk_id0(lists:reverse(SegInfos))
-                       end),
-    ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1_000_000]),
-    Result.
-
-last_user_chunk_id0([]) ->
-    %% There are no user chunks in any index files.
-    0;
-last_user_chunk_id0([#seg_info{index = IdxFile} | Rest]) ->
-    try
-        %% Do not read-ahead since we read the index file backwards chunk by chunk.
-        {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
-        file:position(IdxFd, eof),
-        Last = last_user_chunk_id_in_index(IdxFd),
-        file:close(IdxFd),
-        case Last of
-            {ok, Id} ->
-                Id;
-            {error, Reason} ->
-                ?DEBUG("Could not find user chunk in index file ~s (~p)", [IdxFile, Reason]),
-                last_user_chunk_id0(Rest)
-        end
-    catch
-        missing_file ->
-            ?DEBUG("Index file does not exist: ~s", [IdxFile]),
-            last_user_chunk_id0(Rest)
-    end.
-
-%% Searches the index file backwards for the ID of the last user chunk.
-last_user_chunk_id_in_index(IdxFd) ->
-    case file:position(IdxFd, {cur, -2*?INDEX_RECORD_SIZE_B}) of
-        {error, _} = Error ->
-            Error;
-        {ok, _NewPos} ->
-            case file:read(IdxFd, ?INDEX_RECORD_SIZE_B) of
-                {ok,
-                 <<Offset:64/unsigned,
-                   _Timestamp:64/signed,
-                   _Epoch:64/unsigned,
-                   _FileOffset:32/unsigned,
-                   ?CHNK_USER:8/unsigned>>} ->
-                    {ok, Offset};
-                {ok,
-                 <<_Offset:64/unsigned,
-                   _Timestamp:64/signed,
-                   _Epoch:64/unsigned,
-                   _FileOffset:32/unsigned,
-                   _ChType:8/unsigned>>} ->
-                    last_user_chunk_id_in_index(IdxFd);
-                {error, _} = Error ->
-                    Error
             end
     end.
 
