@@ -931,7 +931,7 @@ init_offset_reader({timestamp, Ts}, #{dir := Dir} = Conf) ->
                 {value, Info} ->
                     %% segment was found, now we need to scan index to
                     %% find nearest offset
-                    ChunkId = user_chunk_id_for_timestamp(Info, Ts),
+                    ChunkId = chunk_id_for_timestamp(Info, Ts),
                     init_offset_reader(ChunkId, Conf);
                 false ->
                     %% segment was not found, attach next
@@ -1869,7 +1869,7 @@ throw_missing(Any) ->
 open(SegFile, Options) ->
     throw_missing(file:open(SegFile, Options)).
 
-user_chunk_id_for_timestamp(#seg_info{index = Idx}, Ts) ->
+chunk_id_for_timestamp(#seg_info{index = Idx}, Ts) ->
     Fd = open_index_read(Idx),
     %% scan index file for nearest timestamp
     {ChunkId, _Timestamp, _Epoch, _FilePos} = timestamp_idx_scan(Fd, Ts),
@@ -1882,7 +1882,7 @@ timestamp_idx_scan(Fd, Ts) ->
            Timestamp:64/signed,
            Epoch:64/unsigned,
            FilePos:32/unsigned,
-           ?CHNK_USER:8/unsigned>>} ->
+           _ChType:8/unsigned>>} ->
             case Ts =< Timestamp of
                 true ->
                     ok = file:close(Fd),
