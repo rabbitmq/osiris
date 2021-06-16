@@ -1352,13 +1352,14 @@ last_user_chunk_id0([#seg_info{index = IdxFile} | Rest]) ->
         %% Do not read-ahead since we read the index file backwards chunk by chunk.
         {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
         file:position(IdxFd, eof),
-        L = last_user_chunk_id_in_index(IdxFd),
+        Last = last_user_chunk_id_in_index(IdxFd),
         file:close(IdxFd),
-        case L of
+        case Last of
+            {ok, Id} ->
+                Id;
             {error, Reason} ->
                 ?DEBUG("Could not find user chunk in index file ~s (~p)", [IdxFile, Reason]),
-                last_user_chunk_id0(Rest);
-            _ -> L
+                last_user_chunk_id0(Rest)
         end
     catch
         missing_file ->
@@ -1379,7 +1380,7 @@ last_user_chunk_id_in_index(IdxFd) ->
                    _Epoch:64/unsigned,
                    _FileOffset:32/unsigned,
                    ?CHNK_USER:8/unsigned>>} ->
-                    Offset;
+                    {ok, Offset};
                 {ok,
                  <<_Offset:64/unsigned,
                    _Timestamp:64/signed,
