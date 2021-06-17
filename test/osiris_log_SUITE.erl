@@ -32,6 +32,7 @@ all_tests() ->
      init_with_lower_epoch,
      write_batch,
      subbatch,
+     subbatch_compressed,
      read_chunk_parsed,
      read_chunk_parsed_multiple_chunks,
      read_header,
@@ -186,6 +187,33 @@ subbatch(Config) ->
     atomics:put(OffRef, 1, 0), %% first chunk index
 
     ?assertMatch({[{0, <<"hi">>}, {1, <<"h0">>}, {2, <<"simple">>}], _},
+                 osiris_log:read_chunk_parsed(R1)),
+
+    osiris_log:close(S1),
+    osiris_log:close(R1),
+    ok.
+
+
+subbatch_compressed(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf),
+    IOData = zlib:gzip([<<0:1, 2:31/unsigned, "hi">>, <<0:1, 2:31/unsigned, "h0">>]),
+    CompType = 1, %% gzip
+    Batch = {batch, 2, CompType, IOData},
+    %% osiris_writer passes entries in reverse order
+    S1 = osiris_log:write(
+             lists:reverse([Batch, <<"simple">>]), S0),
+    ?assertEqual(3, osiris_log:next_offset(S1)),
+    OffRef = atomics:new(1, []),
+    atomics:put(OffRef, 1, -1), %% the initial value
+    {ok, R0} =
+        osiris_log:init_offset_reader(0, Conf#{offset_ref => OffRef}),
+    {end_of_stream, R1} = osiris_log:read_chunk_parsed(R0),
+    atomics:put(OffRef, 1, 0), %% first chunk index
+
+    %% compressed sub batches should not be parsed server side
+    %% so just returns the batch as is
+    ?assertMatch({[{0, Batch}, {2, <<"simple">>}], _},
                  osiris_log:read_chunk_parsed(R1)),
 
     osiris_log:close(S1),

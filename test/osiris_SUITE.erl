@@ -52,6 +52,7 @@ all_tests() ->
      tracking_retention,
      single_node_deduplication,
      single_node_deduplication_2,
+     single_node_deduplication_sub_batch,
      cluster_minority_deduplication,
      cluster_deduplication,
      writers_retention,
@@ -198,7 +199,7 @@ cluster_batch_write(Config) ->
     {ok,
      #{leader_pid := Leader, replica_pids := [ReplicaPid, ReplicaPid2]}} =
         osiris:start_cluster(Conf0),
-    Batch = {batch, 1, 0, <<0:1, 8:31/unsigned, "mah-data">>},
+    Batch = {batch, 1, 0, simple(<<"mah-data">>)},
     ok = osiris:write(Leader, undefined, 42, Batch),
     receive
         {osiris_written, _, _WriterId, [42]} ->
@@ -1164,6 +1165,25 @@ single_node_deduplication_2(Config) ->
 
     ok.
 
+single_node_deduplication_sub_batch(Config) ->
+    Name = ?config(cluster_name, Config),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          replica_nodes => [],
+          dir => ?config(priv_dir, Config)},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    WID = <<"wid1">>,
+    ok = osiris:write(Leader, WID, 1, {batch, 1, 0, simple(<<"data1">>)}),
+    timer:sleep(50),
+    ok = osiris:write(Leader, WID, 1, {batch, 1, 0, simple(<<"data1">>)}),
+    ok = osiris:write(Leader, WID, 2, {batch, 1, 0, simple(<<"data2">>)}),
+    wait_for_written([1, 2]),
+    %% data1b must not have been written
+    ok = validate_log(Leader, [{0, <<"data1">>}, {1, <<"data2">>}]),
+    ok.
+
 cluster_minority_deduplication(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
@@ -1418,3 +1438,7 @@ node_setup(DataDir) ->
     application:start(sasl),
     _ = error_logger:tty(false),
     ok.
+
+simple(Bin) ->
+    S = byte_size(Bin),
+    <<0:1, S:31, Bin/binary>>.

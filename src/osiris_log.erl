@@ -321,7 +321,7 @@
       counter_spec => counter_spec(),
       %% used when initialising a log from an offset other than 0
       initial_offset => osiris:offset()}.
--type record() :: {offset(), iodata()}.
+-type record() :: {offset(), osiris:data()}.
 -type offset_spec() :: osiris:offset_spec().
 -type retention_spec() :: osiris:retention_spec().
 -type header_map() ::
@@ -1337,7 +1337,20 @@ parse_records(Offs,
                 Rem/binary>>,
               Acc) ->
     Recs = parse_records(Offs, Data, []),
-    parse_records(Offs + NumRecs, Rem, lists:reverse(Recs) ++ Acc).
+    parse_records(Offs + NumRecs, Rem, lists:reverse(Recs) ++ Acc);
+parse_records(Offs,
+              <<1:1, %% simple
+                CompType:3/unsigned, %% compression type
+                _:4/unsigned, %% reserved
+                NumRecs:16/unsigned,
+                Len:32/unsigned,
+                Data:Len/binary,
+                Rem/binary>>,
+              Acc) ->
+    %% return the first offset of the sub batch and the batch, unparsed
+    %% as we don't want to decompress on the server
+    parse_records(Offs + NumRecs, Rem,
+                  [{Offs, {batch, NumRecs, CompType, Data}} | Acc]).
 
 build_log_overview(Dir) when is_list(Dir) ->
     {Time, Result} = timer:tc(
