@@ -11,7 +11,7 @@ define PROJECT_ENV
 endef
 
 LOCAL_DEPS = sasl crypto
-dep_gen_batch_server = hex 0.8.3
+dep_gen_batch_server = hex 0.8.6
 DEPS = gen_batch_server
 
 # TEST_DEPS=eunit_formatters looking_glass
