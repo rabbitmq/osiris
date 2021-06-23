@@ -47,6 +47,14 @@
 -type milliseconds() :: non_neg_integer().
 -type tail_info() :: {NextOffset :: offset(),
                       Last :: empty | {epoch(), offset(), osiris:milliseconds()}}.
+-type compression_type() :: 0 | % no compression
+                            1 | % gzip
+                            2 | % snappy
+                            3 | % lz4
+                            4 | % zstd
+                            5 | % reserved
+                            6 | % reserved
+                            7.  % user defined
 -type offset_spec() ::
     first |
     last |
@@ -57,7 +65,7 @@
 -type retention_spec() ::
     {max_bytes, non_neg_integer()} | {max_age, milliseconds()}.
 -type writer_id() :: binary().
--type data() :: iodata() | {batch, non_neg_integer(), 0, iodata()}.
+-type data() :: iodata() | {batch, non_neg_integer(), compression_type(), iodata()}.
 -type reader_options() :: #{transport => tcp | ssl,
                             chunk_selector => all | user_data
                            }.
