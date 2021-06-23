@@ -25,6 +25,7 @@
          query_writers/2,
          query_replication_state/1,
          init/1,
+         handle_continue/2,
          handle_batch/2,
          terminate/2,
          format_status/1,
@@ -140,12 +141,16 @@ query_writers(Pid, QueryFun) ->
 query_replication_state(Pid) when is_pid(Pid) ->
     gen_batch_server:call(Pid, query_replication_state).
 
--spec init(osiris:config()) -> {ok, state()}.
-init(#{name := Name,
-       epoch := Epoch,
-       reference := ExtRef,
-       replica_nodes := Replicas} =
-         Config)
+-spec init(osiris:config()) ->
+    {ok, undefined, {continue, osiris:config()}}.
+init(Config) ->
+    {ok, undefined, {continue, Config}}.
+
+handle_continue(#{name := Name,
+                  epoch := Epoch,
+                  reference := ExtRef,
+                  replica_nodes := Replicas} =
+                Config, undefined)
     when is_list(Name) ->
     Dir = osiris_log:directory(Config),
     process_flag(trap_exit, true),
