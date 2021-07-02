@@ -139,17 +139,10 @@ init(#{name := Name,
             atomics:put(ORef, 1, -1),
             atomics:put(ORef, 2, -1),
             ?DEBUG("~s: writer epoch offset ~w", [?MODULE, LeaderEpochOffs]),
-            % InitOffset = case LeaderRange  of
-            %                  empty ->
-            %                      0;
-            %                  {FirstLeaderOffset, _} ->
-            %                      FirstLeaderOffset
-            %              end,
 
             Dir = osiris_log:directory(Config),
             Log = osiris_log:init_acceptor(LeaderRange, LeaderEpochOffs,
                                            Config#{dir => Dir,
-                                                   % initial_offset => InitOffset,
                                                    first_offset_fun =>
                                                    fun (Fst) ->
                                                            atomics:put(ORef, 2, Fst)
