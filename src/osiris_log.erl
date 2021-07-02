@@ -1735,6 +1735,8 @@ offset_range_from_segment_infos(SegInfos) ->
     ChunkRange = chunk_range_from_segment_infos(SegInfos),
     offset_range_from_chunk_range(ChunkRange).
 
+chunk_range_from_segment_infos([]) ->
+    empty;
 chunk_range_from_segment_infos([#seg_info{first = undefined,
                                           last = undefined}]) ->
     empty;
