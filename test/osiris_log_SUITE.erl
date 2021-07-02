@@ -61,6 +61,7 @@ all_tests() ->
      accept_chunk_truncates_tail,
      accept_chunk_does_not_truncate_tail_in_same_epoch,
      accept_chunk_in_other_epoch,
+     init_epoch_offsets_discards_all_when_no_overlap_in_same_epoch,
      overview,
      evaluate_retention_max_bytes,
      evaluate_retention_max_age,
@@ -646,8 +647,9 @@ init_epoch_offsets_empty(Config) ->
     LogInit = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(LogInit),
     EOffs = [{1, 0}],
+    Range = {0, 3},
     Log0 =
-        osiris_log:init_acceptor(EOffs, Conf#{dir => FDir, epoch => 1}),
+        osiris_log:init_acceptor(Range, EOffs, Conf#{dir => FDir, epoch => 1}),
     {0, empty} = osiris_log:tail_info(Log0),
     osiris_log:close(Log0),
     ok.
@@ -660,8 +662,9 @@ init_epoch_offsets_empty_writer(Config) ->
     LogInit = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(LogInit),
     EOffs = [],
+    Range = {0, 3},
     Log0 =
-        osiris_log:init_acceptor(EOffs, Conf#{dir => LDir, epoch => 2}),
+        osiris_log:init_acceptor(Range, EOffs, Conf#{dir => LDir, epoch => 2}),
     {0, empty} = osiris_log:tail_info(Log0),
     osiris_log:close(Log0),
     ok.
@@ -672,14 +675,14 @@ init_epoch_offsets_truncated_writer(Config) ->
     Conf = ?config(osiris_conf, Config),
     LDir = ?config(leader_dir, Config),
     EOffs = [{3, 100}],
+    Range = {50, 100},
     Log0 =
-        osiris_log:init_acceptor(EOffs, Conf#{dir => LDir,
-                                              epoch => 2,
-                                              initial_offset => 100}),
-    {100, empty} = osiris_log:tail_info(Log0),
+    osiris_log:init_acceptor(Range, EOffs, Conf#{dir => LDir,
+                                                 epoch => 2}),
+    {50, empty} = osiris_log:tail_info(Log0),
     osiris_log:close(Log0),
 
-    ?assert(filelib:is_file(filename:join(LDir, "00000000000000000100.index"))),
+    ?assert(filelib:is_file(filename:join(LDir, "00000000000000000050.index"))),
     ok.
 
 init_epoch_offsets(Config) ->
@@ -689,8 +692,9 @@ init_epoch_offsets(Config) ->
     LogInit = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(LogInit),
     EOffs = [{1, 1}],
+    Range = {0, 1},
     Log0 =
-        osiris_log:init_acceptor(EOffs,
+        osiris_log:init_acceptor(Range, EOffs,
                                  #{dir => LDir,
                                    name => ?config(test_case, Config),
                                    epoch => 2}),
@@ -707,8 +711,9 @@ init_epoch_offsets_multi_segment(Config) ->
     osiris_log:close(seed_log(LDir, EpochChunks, Config)),
     ct:pal("~p", [osiris_log:overview(LDir)]),
     EOffs = [{1, 650}],
+    Range = {0, 650},
     Log0 =
-        osiris_log:init_acceptor(EOffs,
+        osiris_log:init_acceptor(Range, EOffs,
                                  #{dir => LDir,
                                    name => ?config(test_case, Config),
                                    epoch => 2}),
@@ -725,8 +730,9 @@ init_epoch_offsets_multi_segment2(Config) ->
     osiris_log:close(seed_log(LDir, EpochChunks, Config)),
     ct:pal("~p", [osiris_log:overview(LDir)]),
     EOffs = [{3, 750}, {1, 650}],
+    Range = {0, 750},
     Log0 =
-        osiris_log:init_acceptor(EOffs,
+        osiris_log:init_acceptor(Range, EOffs,
                                  #{dir => LDir,
                                    name => ?config(test_case, Config),
                                    epoch => 2}),
@@ -788,9 +794,9 @@ accept_chunk_truncates_tail(Config) ->
     FLog0 = seed_log(FDir, FollowerEpochChunks, Config),
     osiris_log:close(FLog0),
 
-    {LO, EOffs} = osiris_log:overview(LDir),
+    {Range, EOffs} = osiris_log:overview(LDir),
     ALog0 =
-        osiris_log:init_acceptor(EOffs, Conf#{dir => FDir, epoch => 2}),
+        osiris_log:init_acceptor(Range, EOffs, Conf#{dir => FDir, epoch => 2}),
     {ok, RLog0} =
         osiris_log:init_data_reader(
             osiris_log:tail_info(ALog0), Conf#{dir => LDir}),
@@ -798,7 +804,7 @@ accept_chunk_truncates_tail(Config) ->
     ALog = osiris_log:accept_chunk([Hd, Ch, Tr], ALog0),
     osiris_log:close(ALog),
     % validate equal
-    ?assertMatch({LO, EOffs}, osiris_log:overview(FDir)),
+    ?assertMatch({Range, EOffs}, osiris_log:overview(FDir)),
     ok.
 
 accept_chunk_does_not_truncate_tail_in_same_epoch(Config) ->
@@ -821,8 +827,8 @@ accept_chunk_does_not_truncate_tail_in_same_epoch(Config) ->
     FLog0 = seed_log(FDir, FollowerEpochChunks, Config),
     osiris_log:close(FLog0),
 
-    {_LO, EOffs} = osiris_log:overview(LDir),
-    ALog0 = osiris_log:init_acceptor(EOffs, Conf#{dir => FDir, epoch => 2}),
+    {Range, EOffs} = osiris_log:overview(LDir),
+    ALog0 = osiris_log:init_acceptor(Range, EOffs, Conf#{dir => FDir, epoch => 2}),
     ATail = osiris_log:tail_info(ALog0),
     osiris_log:close(ALog0),
     %% ensure we don't truncate too much
@@ -849,12 +855,32 @@ accept_chunk_in_other_epoch(Config) ->
     FLog0 = seed_log(FDir, FollowerEpochChunks, Config),
     osiris_log:close(FLog0),
 
-    {_LO, EOffs} = osiris_log:overview(LDir),
-    ALog0 = osiris_log:init_acceptor(EOffs, Conf#{dir => FDir, epoch => 2}),
+    {Range,  EOffs} = osiris_log:overview(LDir),
+    ALog0 = osiris_log:init_acceptor(Range, EOffs, Conf#{dir => FDir, epoch => 2}),
     ATail = osiris_log:tail_info(ALog0),
     osiris_log:close(ALog0),
     %% ensure we don't truncate too much
     ?assertMatch({3, {1, 1, _}}, ATail),
+    ok.
+
+
+init_epoch_offsets_discards_all_when_no_overlap_in_same_epoch(Config) ->
+    EpochChunks =
+        [{1, [<<"one">>]},
+         {1, [<<"two">>]},
+         {1, [<<"three">>, <<"four">>]}],
+    LDir = ?config(leader_dir, Config),
+    LogInit = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(LogInit),
+    EOffs = [{1, 10}],
+    Range = {5, 10}, %% replica's range is 0, 3
+    Log0 =
+        osiris_log:init_acceptor(Range, EOffs,
+                                 #{dir => LDir,
+                                   name => ?config(test_case, Config),
+                                   epoch => 2}),
+    {5, empty} = osiris_log:tail_info(Log0),
+    osiris_log:close(Log0),
     ok.
 
 overview(Config) ->
