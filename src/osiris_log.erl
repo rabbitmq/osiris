@@ -11,7 +11,7 @@
 
 -export([init/1,
          init/2,
-         init_acceptor/2,
+         init_acceptor/3,
          write/2,
          write/3,
          write/5,
@@ -637,7 +637,10 @@ is_open(#?MODULE{mode = #write{}, fd = Fd}) ->
     Fd =/= undefined.
 
 % -spec
-init_acceptor(EpochOffsets0, #{name := Name, dir := Dir} = Conf) ->
+-spec init_acceptor(range(), list(), config()) ->
+    state().
+init_acceptor(Range, EpochOffsets0,
+              #{name := Name, dir := Dir} = Conf) ->
     %% truncate to first common last epoch offset
     %% * if the last local chunk offset has the same epoch but is lower
     %% than the last chunk offset then just attach at next offset.
@@ -651,11 +654,15 @@ init_acceptor(EpochOffsets0, #{name := Name, dir := Dir} = Conf) ->
 
     %% then truncate to
     SegInfos = build_log_overview(Dir),
-    ?DEBUG("~s: ~s from epoch offsets: ~w",
-           [?MODULE, ?FUNCTION_NAME, EpochOffsets]),
-    ok = truncate_to(Name, EpochOffsets, SegInfos),
+    ?DEBUG("~s: ~s from epoch offsets: ~w range ~w",
+           [?MODULE, ?FUNCTION_NAME, EpochOffsets, Range]),
+    ok = truncate_to(Name, Range, EpochOffsets, SegInfos),
     %% after truncation we can do normal init
-    init(Conf, acceptor).
+    InitOffset = case Range  of
+                     empty -> 0;
+                     {O, _} -> O
+                 end,
+    init(Conf#{initial_offset => InitOffset}, acceptor).
 
 chunk_id_index_scan(IdxFile, ChunkId) when is_list(IdxFile) ->
     Fd = open_index_read(IdxFile),
@@ -686,14 +693,14 @@ delete_segment(#seg_info{file = File, index = Index}) ->
     ok = file:delete(Index),
     ok.
 
-truncate_to(_Name, _, []) ->
+truncate_to(_Name, _Range, _EpochOffsets, []) ->
     %% the target log is empty
     ok;
-truncate_to(_Name, [], SegInfos) ->
+truncate_to(_Name, _Range, [], SegInfos) ->
     %% ?????  this means the entire log is out
     [begin ok = delete_segment(I) end || I <- SegInfos],
     ok;
-truncate_to(Name, [{E, ChId} | NextEOs], SegInfos) ->
+truncate_to(Name, Range, [{E, ChId} | NextEOs], SegInfos) ->
     case find_segment_for_offset(ChId, SegInfos) of
         not_found ->
             case lists:last(SegInfos) of
@@ -701,12 +708,30 @@ truncate_to(Name, [{E, ChId} | NextEOs], SegInfos) ->
                                              id = LastChId,
                                              num = Num}}
                 when ChId > LastChId + Num ->
-                    %% the last available chunk id is smaller than the
-                    %% source but is in the same epoch
-                    %% this is fine no truncation needed
-                    ok;
+                    %% the last available local chunk id is smaller than the
+                    %% sources last chunk id but is in the same epoch
+                    %% check if there is any overlap
+                    LastOffsLocal = case offset_range_from_segment_infos(SegInfos) of
+                                        empty -> 0;
+                                        {_, L} -> L
+                                    end,
+                    FstOffsetRemote = case Range of
+                                          empty -> 0;
+                                          {F, _} -> F
+                                      end,
+                    case LastOffsLocal < FstOffsetRemote of
+                        true ->
+                            %% there is no overlap, need to delete all
+                            %% local segments
+                            [begin ok = delete_segment(I) end || I <- SegInfos],
+                            ok;
+                        false ->
+                            %% there is overlap
+                            %% no truncation needed
+                            ok
+                    end;
                 _ ->
-                    truncate_to(Name, NextEOs, SegInfos)
+                    truncate_to(Name, Range, NextEOs, SegInfos)
             end;
         {end_of_log, _Info} ->
             ok;
@@ -742,7 +767,7 @@ truncate_to(Name, [{E, ChId} | NextEOs], SegInfos) ->
                      || I <- SegInfos, I#seg_info.first#chunk_info.id > ChId],
                     ok;
                 _ ->
-                    truncate_to(Name, NextEOs, SegInfos)
+                    truncate_to(Name, Range, NextEOs, SegInfos)
             end
     end.
 
