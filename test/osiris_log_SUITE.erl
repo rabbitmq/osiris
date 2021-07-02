@@ -174,7 +174,7 @@ subbatch(Config) ->
     S0 = osiris_log:init(Conf),
     IOData = [<<0:1, 2:31/unsigned, "hi">>, <<0:1, 2:31/unsigned, "h0">>],
     CompType = 0, %% no compression
-    Batch = {batch, 2, CompType, IOData},
+    Batch = {batch, 2, CompType, iolist_size(IOData), IOData},
     %% osiris_writer passes entries in reverse order
     S1 = osiris_log:write(
              lists:reverse([Batch, <<"simple">>]), S0),
@@ -199,7 +199,7 @@ subbatch_compressed(Config) ->
     S0 = osiris_log:init(Conf),
     IOData = zlib:gzip([<<0:1, 2:31/unsigned, "hi">>, <<0:1, 2:31/unsigned, "h0">>]),
     CompType = 1, %% gzip
-    Batch = {batch, 2, CompType, IOData},
+    Batch = {batch, 2, CompType, iolist_size(IOData), IOData},
     %% osiris_writer passes entries in reverse order
     S1 = osiris_log:write(
              lists:reverse([Batch, <<"simple">>]), S0),

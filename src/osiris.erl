@@ -65,7 +65,8 @@
 -type retention_spec() ::
     {max_bytes, non_neg_integer()} | {max_age, milliseconds()}.
 -type writer_id() :: binary().
--type data() :: iodata() | {batch, non_neg_integer(), compression_type(), iodata()}.
+-type data() :: iodata() | {batch, non_neg_integer(), compression_type(),
+                            non_neg_integer(), iodata()}.
 -type reader_options() :: #{transport => tcp | ssl,
                             chunk_selector => all | user_data
                            }.
