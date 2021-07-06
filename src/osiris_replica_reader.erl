@@ -107,26 +107,32 @@ init(#{hosts := Hosts,
             CntId = {?MODULE, ExtRef, Host, Port},
             CntSpec = {CntId, ?COUNTER_FIELDS},
             %% TODO: handle errors
-            {ok, Log} =
-                osiris_writer:init_data_reader(LeaderPid, TailInfo, CntSpec),
-            CntRef = osiris_log:counters_ref(Log),
-            ?INFO("starting replica reader ~s at offset ~b Args: ~p",
-                  [Name, osiris_log:next_offset(Log), Args]),
+            try
+                {ok, Log} =
+                    osiris_writer:init_data_reader(LeaderPid, TailInfo, CntSpec),
+                CntRef = osiris_log:counters_ref(Log),
+                ?INFO("starting replica reader ~s at offset ~b Args: ~p",
+                      [Name, osiris_log:next_offset(Log), Args]),
 
-            ok = gen_tcp:send(Sock, Token),
-            %% register data listener with osiris_proc
-            ok = osiris_writer:register_data_listener(LeaderPid, StartOffset),
-            MRef = monitor(process, LeaderPid),
-            State =
-                maybe_send_committed_offset(#state{log = Log,
-                                                   name = Name,
-                                                   socket = Sock,
-                                                   replica_pid = ReplicaPid,
-                                                   leader_pid = LeaderPid,
-                                                   leader_monitor_ref = MRef,
-                                                   counter = CntRef,
-                                                   counter_id = CntId}),
-            {ok, State};
+                ok = gen_tcp:send(Sock, Token),
+                %% register data listener with osiris_proc
+                ok = osiris_writer:register_data_listener(LeaderPid, StartOffset),
+                MRef = monitor(process, LeaderPid),
+                State =
+                    maybe_send_committed_offset(#state{log = Log,
+                                                       name = Name,
+                                                       socket = Sock,
+                                                       replica_pid = ReplicaPid,
+                                                       leader_pid = LeaderPid,
+                                                       leader_monitor_ref = MRef,
+                                                       counter = CntRef,
+                                                       counter_id = CntId}),
+                {ok, State}
+            catch
+                exit:{noproc, _} ->
+                    ?WARN("osiris writer for ~p is down, replica reader will not start", [ExtRef]),
+                    {stop, writer_unavailable}
+            end;
         {error, Reason} ->
             {stop, Reason}
     end.
