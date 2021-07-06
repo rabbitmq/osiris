@@ -236,7 +236,9 @@
 %%   |0              |1              |2              |3              | Bytes
 %%   |0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7|0 1 2 3 4 5 6 7| Bits
 %%   +-+-----+-------+---------------+---------------+---------------+
-%%   |1| Cmp | Rsvd  | Number of records             | Length  (...) |
+%%   |1| Cmp | Rsvd  | Number of records             | Uncmp Length..|
+%%   +-+-----+-------+-------------------------------+---------------+
+%%   | Uncompressed Length                           | Length  (...) |
 %%   +-+-----+-------+-------------------------------+---------------+
 %%   | Length                                        | Body          |
 %%   +-+---------------------------------------------+               +
@@ -252,6 +254,7 @@
 %%
 %% Number of records = unsigned 16-bit integer
 %%
+%% Uncompressed Length = unsigned 32-bit integer
 %% Length = unsigned 32-bit integer
 %%
 %% Body = arbitrary data
@@ -1357,6 +1360,7 @@ parse_records(Offs,
                 0:3/unsigned, %% compression type
                 _:4/unsigned, %% reserved
                 NumRecs:16/unsigned,
+                _UncompressedLen:32/unsigned,
                 Len:32/unsigned,
                 Data:Len/binary,
                 Rem/binary>>,
@@ -1368,6 +1372,7 @@ parse_records(Offs,
                 CompType:3/unsigned, %% compression type
                 _:4/unsigned, %% reserved
                 NumRecs:16/unsigned,
+                UncompressedLen:32/unsigned,
                 Len:32/unsigned,
                 Data:Len/binary,
                 Rem/binary>>,
@@ -1375,7 +1380,7 @@ parse_records(Offs,
     %% return the first offset of the sub batch and the batch, unparsed
     %% as we don't want to decompress on the server
     parse_records(Offs + NumRecs, Rem,
-                  [{Offs, {batch, NumRecs, CompType, Data}} | Acc]).
+                  [{Offs, {batch, NumRecs, CompType, UncompressedLen, Data}} | Acc]).
 
 build_log_overview(Dir) when is_list(Dir) ->
     {Time, Result} = timer:tc(
@@ -1638,13 +1643,14 @@ segment_from_index_file(IdxFile) ->
 
 make_chunk(Blobs, TData, ChType, Timestamp, Epoch, Next) ->
     {NumEntries, NumRecords, EData} =
-        lists:foldl(fun ({batch, NumRecords, CompType, B},
+        lists:foldl(fun ({batch, NumRecords, CompType, UncompLen, B},
                          {Entries, Count, Acc}) ->
                             Data =
                                 [<<1:1, %% batch record type
                                    CompType:3/unsigned,
                                    0:4/unsigned,
                                    NumRecords:16/unsigned,
+                                   UncompLen:32/unsigned,
                                    (iolist_size(B)):32/unsigned>>,
                                  B],
                             {Entries + 1, Count + NumRecords, [Data | Acc]};

@@ -199,7 +199,7 @@ cluster_batch_write(Config) ->
     {ok,
      #{leader_pid := Leader, replica_pids := [ReplicaPid, ReplicaPid2]}} =
         osiris:start_cluster(Conf0),
-    Batch = {batch, 1, 0, simple(<<"mah-data">>)},
+    Batch = {batch, 1, 0, 8, simple(<<"mah-data">>)},
     ok = osiris:write(Leader, undefined, 42, Batch),
     receive
         {osiris_written, _, _WriterId, [42]} ->
@@ -1175,10 +1175,10 @@ single_node_deduplication_sub_batch(Config) ->
           dir => ?config(priv_dir, Config)},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     WID = <<"wid1">>,
-    ok = osiris:write(Leader, WID, 1, {batch, 1, 0, simple(<<"data1">>)}),
+    ok = osiris:write(Leader, WID, 1, {batch, 1, 0, 5, simple(<<"data1">>)}),
     timer:sleep(50),
-    ok = osiris:write(Leader, WID, 1, {batch, 1, 0, simple(<<"data1">>)}),
-    ok = osiris:write(Leader, WID, 2, {batch, 1, 0, simple(<<"data2">>)}),
+    ok = osiris:write(Leader, WID, 1, {batch, 1, 0, 5, simple(<<"data1">>)}),
+    ok = osiris:write(Leader, WID, 2, {batch, 1, 0, 5, simple(<<"data2">>)}),
     wait_for_written([1, 2]),
     %% data1b must not have been written
     ok = validate_log(Leader, [{0, <<"data1">>}, {1, <<"data2">>}]),
