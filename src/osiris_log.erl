@@ -19,6 +19,7 @@
          accept_chunk/2,
          next_offset/1,
          first_offset/1,
+         first_timestamp/1,
          tail_info/1,
          is_open/1,
          send_file/2,
@@ -54,13 +55,15 @@
 -define(INDEX_RECORD_SIZE_B, 29).
 -define(C_OFFSET, 1).
 -define(C_FIRST_OFFSET, 2).
--define(C_CHUNKS, 3).
--define(C_SEGMENTS, 4).
+-define(C_FIRST_TIMESTAMP, 3).
+-define(C_CHUNKS, 4).
+-define(C_SEGMENTS, 5).
 -define(COUNTER_FIELDS,
         [
          {offset, ?C_OFFSET, counter, "The last offset (not chunk id) in the log for writers. The last offset read for readers"
          },
          {first_offset, ?C_FIRST_OFFSET, counter, "First offset, not updated for readers"},
+         {first_timestamp, ?C_FIRST_TIMESTAMP, counter, "First timestamp, not updated for readers"},
          {chunks, ?C_CHUNKS, counter, "Number of chunks read or written, incremented even if a reader only reads the header"},
          {segments, ?C_SEGMENTS, counter, "Number of segments"}
         ]
@@ -276,8 +279,15 @@
 %%   +---------------------------------------------------------------+
 %%
 %%
-%% Tracking type: 0 = sequence, 1 = offset
-%% Tracking data: type 0 = 64 bit integer, 1 = 64 bit integer
+%% Tracking type: 0 = sequence, 1 = offset, 2 = timestamp
+%%
+%% Tracking type 0 = sequence to track producers for msg deduplication
+%% use case: producer sends msg -> osiris persists msg -> confirm doens't reach producer -> producer resends same msg
+%%
+%% Tracking type 1 = offset to track consumers
+%% use case: consumer or server restarts -> osiris knows offset where consumer needs to resume
+%%
+%% Tracking data: 64 bit integer
 %%
 %% Index format
 %% ============
@@ -466,8 +476,9 @@ init(#{dir := Dir,
                                    id = LastChId,
                                    num = LastNum}}
          | _] = Infos ->
-            [#seg_info{first = #chunk_info{id = FstChId}} | _] =
-                lists:reverse(Infos),
+            [#seg_info{first = #chunk_info{id = FstChId,
+                                           timestamp = FstTs}} | _] =
+            lists:reverse(Infos),
             %% assert epoch is same or larger
             %% than last known epoch
             case LastEpoch > Epoch of
@@ -480,6 +491,7 @@ init(#{dir := Dir,
                         {LastEpoch, LastChId, LastTs}},
 
             counters:put(Cnt, ?C_FIRST_OFFSET, FstChId),
+            counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
             counters:put(Cnt, ?C_OFFSET, LastChId + LastNum - 1),
             counters:put(Cnt, ?C_SEGMENTS, length(Infos)),
             ?INFO("~s:~s/~b: next offset ~b first offset ~b",
@@ -627,6 +639,10 @@ next_offset(#?MODULE{mode = #read{next_offset = Next}}) ->
 -spec first_offset(state()) -> offset().
 first_offset(#?MODULE{cfg = #cfg{counter = Cnt}}) ->
     counters:get(Cnt, ?C_FIRST_OFFSET).
+
+-spec first_timestamp(state()) -> osiris:milliseconds().
+first_timestamp(#?MODULE{cfg = #cfg{counter = Cnt}}) ->
+    counters:get(Cnt, ?C_FIRST_TIMESTAMP).
 
 -spec tail_info(state()) -> osiris:tail_info().
 tail_info(#?MODULE{mode = #write{tail_info = TailInfo}}) ->
@@ -1524,9 +1540,11 @@ evaluate_retention(Dir, Specs) ->
                        fun() ->
                                SegInfos0 = build_log_overview(Dir),
                                SegInfos = evaluate_retention0(SegInfos0, Specs),
-                               {offset_range_from_segment_infos(SegInfos), length(SegInfos)}
+                               OffsetRange = offset_range_from_segment_infos(SegInfos),
+                               FirstTs = first_timestamp_from_segment_infos(SegInfos),
+                               {OffsetRange, FirstTs, length(SegInfos)}
                        end),
-    ?DEBUG("~s:~s/~b (~w) completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Specs, Time/1000000]),
+    ?DEBUG("~s:~s/~b (~w) completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Specs, Time/1_000_000]),
     Result.
 
 evaluate_retention0(Infos, []) ->
@@ -1758,6 +1776,12 @@ sendfile(ssl, Fd, Sock, Pos, ToSend) ->
         {error, _} = Err ->
             Err
     end.
+
+first_timestamp_from_segment_infos(
+  [#seg_info{first = #chunk_info{timestamp = Ts}} | _ ]) ->
+    Ts;
+first_timestamp_from_segment_infos(_) ->
+    0.
 
 offset_range_from_segment_infos(SegInfos) ->
     ChunkRange = chunk_range_from_segment_infos(SegInfos),
@@ -2166,11 +2190,13 @@ trigger_retention_eval(#?MODULE{cfg =
                                          first_offset_fun = Fun}} = State) ->
     ok =
         osiris_retention:eval(Dir, RetentionSpec,
-                              %% updates the first offset after retention has
-                              %% been evaluated
-                              fun ({{Fst, _}, Seg}) when is_integer(Fst) ->
-                                      Fun(Fst),
-                                      counters:put(Cnt, ?C_FIRST_OFFSET, Fst),
+                              %% updates first offset and first timestamp
+                              %% after retention has been evaluated
+                              fun ({{FstOff, _}, FstTs, Seg}) when is_integer(FstOff),
+                                                                   is_integer(FstTs) ->
+                                      Fun(FstOff),
+                                      counters:put(Cnt, ?C_FIRST_OFFSET, FstOff),
+                                      counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
                                       counters:put(Cnt, ?C_SEGMENTS, Seg);
                                   (_) ->
                                       ok

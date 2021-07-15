@@ -1030,7 +1030,8 @@ write_chunk(Epoch, Now, Records, Trk0, Log0) ->
         false when HasTracking ->
             ct:pal("writing tracking snapshot ~w", [osiris_log:next_offset(Log0)]),
             FirstOffset = osiris_log:first_offset(Log0),
-            {SnapBin, Trk} = osiris_tracking:snapshot(FirstOffset, Trk0),
+            FirstTs = osiris_log:first_timestamp(Log0),
+            {SnapBin, Trk} = osiris_tracking:snapshot(FirstOffset, FirstTs, Trk0),
             write_chunk(Epoch, Now, Records, Trk,
                         osiris_log:write([SnapBin],
                                          ?CHNK_TRK_SNAPSHOT,

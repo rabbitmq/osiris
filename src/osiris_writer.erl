@@ -19,8 +19,8 @@
          register_data_listener/2,
          ack/2,
          write/5,
-         write_tracking/3,
-         read_tracking/2,
+         write_tracking/4,
+         read_tracking/3,
          read_tracking/1,
          query_writers/2,
          query_replication_state/1,
@@ -126,16 +126,16 @@ write(Pid, Sender, WriterId, Corr, Data)
     when is_pid(Pid) andalso is_pid(Sender) ->
     gen_batch_server:cast(Pid, {write, Sender, WriterId, Corr, Data}).
 
--spec write_tracking(pid(), binary(), osiris:offset()) -> ok.
-write_tracking(Pid, TrackingId, Offset)
+-spec write_tracking(pid(), binary(), offset | timestamp, osiris:offset() | osiris:milliseconds()) -> ok.
+write_tracking(Pid, TrackingId, TrackingType, TrackingData)
     when is_pid(Pid)
          andalso is_binary(TrackingId)
          andalso byte_size(TrackingId) =< 255
-         andalso is_integer(Offset) ->
-    gen_batch_server:cast(Pid, {write_tracking, TrackingId, offset, Offset}).
+         andalso is_integer(TrackingData) ->
+    gen_batch_server:cast(Pid, {write_tracking, TrackingId, TrackingType, TrackingData}).
 
-read_tracking(Pid, TrackingId) ->
-    gen_batch_server:call(Pid, {read_tracking, offset, TrackingId}).
+read_tracking(Pid, TrackingType, TrackingId) ->
+    gen_batch_server:call(Pid, {read_tracking, TrackingType, TrackingId}).
 
 read_tracking(Pid) ->
     gen_batch_server:call(Pid, read_tracking).
@@ -242,7 +242,8 @@ handle_batch(Commands,
                                  %% the log was closed, i.e. full
                                  %% now we need to write a tracking snapshot
                                  FstOffs = osiris_log:first_offset(Log1),
-                                 {SnapBin, Trk3} = osiris_tracking:snapshot(FstOffs, Trk2),
+                                 FstTs = osiris_log:first_timestamp(Log1),
+                                 {SnapBin, Trk3} = osiris_tracking:snapshot(FstOffs, FstTs, Trk2),
 
                                  {osiris_log:write([SnapBin],
                                                    ?CHNK_TRK_SNAPSHOT,
@@ -371,7 +372,6 @@ handle_command({cast, {write_tracking, TrackingId, TrackingType, TrackingData}},
                {#?MODULE{log = Log} = State, Records, Replies, Corrs, Trk0, Dupes}) ->
     ChunkId = osiris_log:next_offset(Log),
     Trk = osiris_tracking:add(TrackingId, TrackingType, TrackingData, ChunkId, Trk0),
-
     {State, Records, Replies, Corrs, Trk, Dupes};
 handle_command({call, From, {read_tracking, TrackingType, TrackingId}},
                {State, Records, Replies0, Corrs, Trk, Dupes}) ->
