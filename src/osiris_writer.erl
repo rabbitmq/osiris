@@ -58,7 +58,7 @@
         {cfg :: #cfg{},
          log :: osiris_log:state(),
          tracking :: osiris_tracking:state(),
-         replica_state = #{} :: #{node() => {osiris:offset(), osiris:milliseconds()}},
+         replica_state = #{} :: #{node() => {osiris:offset(), osiris:timestamp()}},
          pending_corrs = queue:new() :: queue:queue(),
          duplicates = [] ::
              [{osiris:offset(), pid(), osiris:writer_id(), non_neg_integer()}],
@@ -111,7 +111,7 @@ register_data_listener(Pid, Offset) ->
     ok =
         gen_batch_server:cast(Pid, {register_data_listener, self(), Offset}).
 
--spec ack(identifier(), {osiris:offset(), osiris:milliseconds()}) -> ok.
+-spec ack(identifier(), {osiris:offset(), osiris:timestamp()}) -> ok.
 ack(LeaderPid, {Offset, _} = OffsetTs)
   when is_integer(Offset) andalso Offset >= 0 ->
     gen_batch_server:cast(LeaderPid, {ack, node(), OffsetTs}).
@@ -126,7 +126,7 @@ write(Pid, Sender, WriterId, Corr, Data)
     when is_pid(Pid) andalso is_pid(Sender) ->
     gen_batch_server:cast(Pid, {write, Sender, WriterId, Corr, Data}).
 
--spec write_tracking(pid(), binary(), offset | timestamp, osiris:offset() | osiris:milliseconds()) -> ok.
+-spec write_tracking(pid(), binary(), offset | timestamp, osiris:offset() | osiris:timestamp()) -> ok.
 write_tracking(Pid, TrackingId, TrackingType, TrackingData)
     when is_pid(Pid)
          andalso is_binary(TrackingId)

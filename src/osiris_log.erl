@@ -341,7 +341,7 @@
       crc => integer(),
       num_records => non_neg_integer(),
       num_entries => non_neg_integer(),
-      timestamp => osiris:milliseconds(),
+      timestamp => osiris:timestamp(),
       data_size => non_neg_integer(),
       trailer_size => non_neg_integer(),
       header_data => binary(),
@@ -546,7 +546,7 @@ write(Entries, Now, #?MODULE{mode = #write{}} = State)
 
 -spec write([osiris:data()],
             chunk_type(),
-            osiris:milliseconds(),
+            osiris:timestamp(),
             iodata(),
             state()) ->
                state().
@@ -640,7 +640,7 @@ next_offset(#?MODULE{mode = #read{next_offset = Next}}) ->
 first_offset(#?MODULE{cfg = #cfg{counter = Cnt}}) ->
     counters:get(Cnt, ?C_FIRST_OFFSET).
 
--spec first_timestamp(state()) -> osiris:milliseconds().
+-spec first_timestamp(state()) -> osiris:timestamp().
 first_timestamp(#?MODULE{cfg = #cfg{counter = Cnt}}) ->
     counters:get(Cnt, ?C_FIRST_TIMESTAMP).
 

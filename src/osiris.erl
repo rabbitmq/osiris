@@ -45,8 +45,9 @@
 -type tracking_type() :: osiris_tracking:tracking_type().
 -type epoch() :: non_neg_integer().
 -type milliseconds() :: non_neg_integer().
+-type timestamp() :: integer(). % milliseconds since epoch
 -type tail_info() :: {NextOffset :: offset(),
-                      Last :: empty | {epoch(), offset(), osiris:milliseconds()}}.
+                      Last :: empty | {epoch(), offset(), osiris:timestamp()}}.
 -type compression_type() :: 0 | % no compression
                             1 | % gzip
                             2 | % snappy
@@ -61,7 +62,7 @@
     next |
     {abs, offset()} |
     offset() |
-    {timestamp, milliseconds()}.
+    {timestamp, timestamp()}.
 -type retention_spec() ::
     {max_bytes, non_neg_integer()} | {max_age, milliseconds()}.
 -type writer_id() :: binary().
@@ -82,7 +83,7 @@
               tracking_id/0,
               offset_spec/0,
               retention_spec/0,
-              milliseconds/0,
+              timestamp/0,
               writer_id/0,
               data/0]).
 
@@ -133,12 +134,12 @@ start_replica(Replica, Config) ->
 write(Pid, WriterId, Corr, Data) ->
     osiris_writer:write(Pid, self(), WriterId, Corr, Data).
 
--spec write_tracking(pid(), binary(), tracking_type(), offset() | milliseconds()) -> ok.
+-spec write_tracking(pid(), binary(), tracking_type(), offset() | timestamp()) -> ok.
 write_tracking(Pid, TrackingId, TrackingType, TrackingData) ->
     osiris_writer:write_tracking(Pid, TrackingId, TrackingType, TrackingData).
 
 -spec read_tracking(pid(), tracking_type(), binary()) ->
-    {tracking_type(), offset() | milliseconds()} | undefined.
+    {tracking_type(), offset() | timestamp()} | undefined.
 read_tracking(Pid, TrackingType, TrackingId) ->
     osiris_writer:read_tracking(Pid, TrackingType, TrackingId).
 

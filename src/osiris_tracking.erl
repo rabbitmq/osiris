@@ -22,14 +22,14 @@
 
 -type tracking_id() :: binary().
 -type tracking_type() :: sequence | offset | timestamp.
--type tracking() :: non_neg_integer() | osiris:offset() | osiris:milliseconds().
+-type tracking() :: non_neg_integer() | osiris:offset() | osiris:timestamp().
 
 -record(?MODULE, {cfg = #cfg{} :: #cfg{},
                   pending = init_pending() :: #{sequences | offsets | timestamps =>
                                                 #{tracking_id() => tracking()}},
                   sequences = #{} :: #{osiris:writer_id() => {osiris:offset(), non_neg_integer()}},
                   offsets = #{} :: #{tracking_id() => osiris:offset()},
-                  timestamps = #{} :: #{tracking_id() => osiris:milliseconds()}
+                  timestamps = #{} :: #{tracking_id() => osiris:timestamp()}
                  }).
 
 -opaque state() :: #?MODULE{}.
@@ -88,7 +88,7 @@ flush(#?MODULE{pending = Pending} = State) ->
                       end, [], Pending),
     {TData, State#?MODULE{pending = init_pending()}}.
 
--spec snapshot(osiris:offset(), osiris:milliseconds(), state()) ->
+-spec snapshot(osiris:offset(), osiris:timestamp(), state()) ->
     {iodata(), state()}.
 snapshot(FirstOffset, FirstTimestamp, #?MODULE{sequences = Seqs0,
                                                offsets = Offsets0,
