@@ -19,7 +19,7 @@
          register_data_listener/2,
          ack/2,
          write/5,
-         write_tracking/4,
+         write_tracking/3,
          read_tracking/3,
          read_tracking/1,
          query_writers/2,
@@ -126,8 +126,8 @@ write(Pid, Sender, WriterId, Corr, Data)
     when is_pid(Pid) andalso is_pid(Sender) ->
     gen_batch_server:cast(Pid, {write, Sender, WriterId, Corr, Data}).
 
--spec write_tracking(pid(), binary(), offset | timestamp, osiris:offset() | osiris:timestamp()) -> ok.
-write_tracking(Pid, TrackingId, TrackingType, TrackingData)
+-spec write_tracking(pid(), binary(), {offset | timestamp, osiris:offset() | osiris:timestamp()}) -> ok.
+write_tracking(Pid, TrackingId, {TrackingType, TrackingData})
     when is_pid(Pid)
          andalso is_binary(TrackingId)
          andalso byte_size(TrackingId) =< 255
