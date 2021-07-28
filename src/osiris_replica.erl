@@ -60,11 +60,16 @@
 
 -export_type([state/0]).
 
--define(ADD_COUNTER_FIELDS, [committed_offset, forced_gcs, packets, readers]).
 -define(C_COMMITTED_OFFSET, ?C_NUM_LOG_FIELDS + 1).
 -define(C_FORCED_GCS, ?C_NUM_LOG_FIELDS + 2).
 -define(C_PACKETS, ?C_NUM_LOG_FIELDS + 3).
 -define(C_READERS, ?C_NUM_LOG_FIELDS + 4).
+-define(ADD_COUNTER_FIELDS,
+        [{committed_offset, ?C_COMMITTED_OFFSET, counter, "Last committed offset"},
+         {forced_gcs, ?C_FORCED_GCS, counter, "Number of garbage collection runs"},
+         {packets, ?C_PACKETS, counter, "Number of packets"},
+         {readers, ?C_READERS, counter, "Number of readers"}]).
+
 -define(DEFAULT_ONE_TIME_TOKEN_TIMEOUT, 30000).
 -define(TOKEN_SIZE, 32).
 -define(DEF_REC_BUF, 408300 * 5).

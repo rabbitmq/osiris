@@ -39,8 +39,12 @@
          committed_offset = -1 :: -1 | osiris:offset(),
          offset_listener :: undefined | osiris:offset()}).
 
--define(COUNTER_FIELDS, [offset_listeners]).
 -define(C_OFFSET_LISTENERS, ?C_NUM_LOG_FIELDS + 1).
+-define(COUNTER_FIELDS,
+        [
+         {offset_listeners, ?C_OFFSET_LISTENERS, counter, "Number of offset listeners"}
+        ]
+       ).
 
 -spec maybe_connect(list(), integer(), list()) ->
                        {ok, term(), term()} | {error, term()}.

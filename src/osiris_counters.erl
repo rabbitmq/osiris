@@ -26,47 +26,25 @@
 
 -spec init() -> ok.
 init() ->
-    _ = ets:new(?MODULE, [set, named_table, public]),
-    ok.
+    seshat_counters:new_group(osiris).
 
--spec new(name(), [atom()]) -> counters:counters_ref().
-new(Name, Fields) when is_list(Fields) ->
-    Size = length(Fields),
-    CRef = counters:new(Size, []),
-    ok = register_counter(Name, CRef, Fields),
-    CRef.
+-spec new(name(), [{Name :: atom(), Position :: non_neg_integer(),
+                    Type :: atom(), Description :: term()}]) ->
+                 counters:counters_ref().
+new(Name, Fields) ->
+    seshat_counters:new(osiris, Name, Fields).
 
 -spec fetch(name()) -> undefined | counters:counters_ref().
 fetch(Name) ->
-    case ets:lookup(?MODULE, Name) of
-        [{Name, Ref, _}] ->
-            Ref;
-        _ ->
-            undefined
-    end.
+    seshat_counters:fetch(osiris, Name).
 
 -spec delete(term()) -> ok.
 delete(Name) ->
-    true = ets:delete(?MODULE, Name),
-    ok.
+    seshat_counters:delete(osiris, Name).
 
 -spec overview() -> #{name() => #{atom() => non_neg_integer()}}.
 overview() ->
-    ets:foldl(fun({Name, Ref, Fields}, Acc) ->
-                 Size = length(Fields),
-                 Values = [counters:get(Ref, I) || I <- lists:seq(1, Size)],
-                 Counters =
-                     maps:from_list(
-                         lists:zip(Fields, Values)),
-                 Acc#{Name => Counters}
-              end,
-              #{}, ?MODULE).
-
-%% internal
-
-register_counter(Name, Ref, Size) ->
-    true = ets:insert(?MODULE, {Name, Ref, Size}),
-    ok.
+    seshat_counters:overview(osiris).
 
 -ifdef(TEST).
 
