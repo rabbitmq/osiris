@@ -87,7 +87,7 @@ start_metrics_gatherer(Node) ->
     erlang:spawn(Node, ?MODULE, do_metrics, [#{}]).
 
 do_metrics(O0) ->
-    O = osiris_counters:overview(osiris),
+    O = osiris_counters:overview(),
     O1 = maps:with(
              maps:keys(O0), O),
     maps:map(fun(K, CC) ->
