@@ -1303,7 +1303,7 @@ close(#?MODULE{cfg = #cfg{counter_id = CntId,
         undefined ->
             ok;
         _ ->
-            seshat_counters:delete(osiris, CntId)
+            osiris_counters:delete(CntId)
     end.
 
 delete_directory(#{name := Name} = Config) when is_map(Config) ->
@@ -1983,7 +1983,7 @@ validate_crc(ChunkId, Crc, IOData) ->
 
 make_counter(#{counter_spec := {Name, Fields}}) ->
     %% create a registered counter
-    seshat_counters:new(osiris, Name, ?COUNTER_FIELDS ++ Fields);
+    osiris_counters:new(Name, ?COUNTER_FIELDS ++ Fields);
 make_counter(_) ->
     %% if no spec is provided we create a local counter only
     counters:new(?C_NUM_LOG_FIELDS, []).
