@@ -28,7 +28,9 @@
 init() ->
     seshat_counters:new_group(osiris).
 
--spec new(name(), [atom()]) -> counters:counters_ref().
+-spec new(name(), [{Name :: atom(), Position :: non_neg_integer(),
+                    Type :: atom(), Description :: term()}]) ->
+                 counters:counters_ref().
 new(Name, Fields) ->
     seshat_counters:new(osiris, Name, Fields).
 
