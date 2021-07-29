@@ -24,3 +24,5 @@ dep_looking_glass = git https://github.com/rabbitmq/looking-glass.git master
 DIALYZER_OPTS += --src -r test
 EUNIT_OPTS = no_tty, {report, {eunit_progress, [colored, profile]}}
 include $(if $(ERLANG_MK_FILENAME),$(ERLANG_MK_FILENAME),erlang.mk)
+
+include mk/bazel.mk
