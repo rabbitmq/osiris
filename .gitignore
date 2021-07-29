@@ -20,3 +20,6 @@ osiris.d
 *.d
 
 *.jar
+
+/.bazelrc
+/bazel-*
