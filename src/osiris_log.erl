@@ -416,7 +416,7 @@ init(#{dir := Dir,
         maps:get(max_segment_size_bytes, Config, ?DEFAULT_MAX_SEGMENT_SIZE_B),
     MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks, ?DEFAULT_MAX_SEGMENT_SIZE_C),
     Retention = maps:get(retention, Config, []),
-    ?INFO("osiris_log:init/1 max_segment_size_bytes: ~b, max_segment_size_chunks ~b, retention ~w",
+    ?DEBUG("osiris_log:init/1 max_segment_size_bytes: ~b, max_segment_size_chunks ~b, retention ~w",
           [MaxSizeBytes, MaxSizeChunks, Retention]),
     ok = filelib:ensure_dir(Dir),
     case file:make_dir(Dir) of
@@ -482,12 +482,12 @@ init(#{dir := Dir,
             counters:put(Cnt, ?C_FIRST_OFFSET, FstChId),
             counters:put(Cnt, ?C_OFFSET, LastChId + LastNum - 1),
             counters:put(Cnt, ?C_SEGMENTS, length(Infos)),
-            ?INFO("~s:~s/~b: next offset ~b first offset ~b",
-                  [?MODULE,
-                   ?FUNCTION_NAME,
-                   ?FUNCTION_ARITY,
-                   element(1, TailInfo),
-                   FstChId]),
+            ?DEBUG("~s:~s/~b: next offset ~b first offset ~b",
+                   [?MODULE,
+                    ?FUNCTION_NAME,
+                    ?FUNCTION_ARITY,
+                    element(1, TailInfo),
+                    FstChId]),
             {ok, Fd} = open(Filename, ?FILE_OPTS_WRITE),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, Size} = file:position(Fd, Size),
@@ -687,8 +687,8 @@ chunk_id_index_scan0(Fd, ChunkId) ->
     end.
 
 delete_segment(#seg_info{file = File, index = Index}) ->
-    ?INFO("osiris_log: deleting segment ~s in ~s",
-          [filename:basename(File), filename:dirname(File)]),
+    ?DEBUG("osiris_log: deleting segment ~s in ~s",
+           [filename:basename(File), filename:dirname(File)]),
     ok = file:delete(File),
     ok = file:delete(Index),
     ok.
@@ -736,9 +736,9 @@ truncate_to(Name, Range, [{E, ChId} | NextEOs], SegInfos) ->
         {end_of_log, _Info} ->
             ok;
         {found, #seg_info{file = File, index = Idx}} ->
-            ?INFO("osiris_log: ~s on node ~s truncating to chunk "
-                  "id ~b in epoch ~b",
-                  [Name, node(), ChId, E]),
+            ?DEBUG("osiris_log: ~s on node ~s truncating to chunk "
+                   "id ~b in epoch ~b",
+                   [Name, node(), ChId, E]),
             %% this is the inclusive case
             %% next offset needs to be a chunk offset
             %% if it is not found we know the offset requested isn't a chunk
@@ -782,9 +782,9 @@ init_data_reader({StartOffset, PrevEO}, #{dir := Dir,
                                           readers_counter_fun := Fun} = Config) ->
     SegInfos = build_log_overview(Dir),
     Range = offset_range_from_segment_infos(SegInfos),
-    ?INFO("osiris_segment:init_data_reader/2 at ~b prev "
-          "~w range: ~w",
-          [StartOffset, PrevEO, Range]),
+    ?DEBUG("osiris_segment:init_data_reader/2 at ~b prev "
+           "~w range: ~w",
+           [StartOffset, PrevEO, Range]),
     %% Invariant:  there is always at least one segment left on disk
     case Range of
         {F, _L} when StartOffset < F ->
@@ -975,9 +975,9 @@ init_offset_reader(OffsetSpec,
     SegInfos = build_log_overview(Dir),
     ChunkRange = chunk_range_from_segment_infos(SegInfos),
     Range = offset_range_from_chunk_range(ChunkRange),
-    ?INFO("osiris_log:init_offset_reader/2 spec ~w range "
-          "~w ",
-          [OffsetSpec, Range]),
+    ?DEBUG("osiris_log:init_offset_reader/2 spec ~w range "
+           "~w ",
+           [OffsetSpec, Range]),
     StartOffset =
         case {OffsetSpec, Range} of
             {_, empty} ->
@@ -1512,8 +1512,8 @@ overview(Dir) ->
 update_retention(Retention,
                  #?MODULE{cfg = #cfg{retention = Retention0} = Cfg} = State0)
     when is_list(Retention) ->
-    ?INFO("osiris_log: update_retention from: ~w to ~w",
-          [Retention0, Retention]),
+    ?DEBUG("osiris_log: update_retention from: ~w to ~w",
+           [Retention0, Retention]),
     State = State0#?MODULE{cfg = Cfg#cfg{retention = Retention}},
     trigger_retention_eval(State).
 
