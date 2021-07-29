@@ -11,8 +11,9 @@
 
 -export([write/4,
          write_tracking/3,
-         read_tracking/3,
          read_tracking/1,
+         read_tracking/2,
+         read_tracking/3,
          fetch_writer_seq/2,
          init_reader/3,
          init_reader/4,
@@ -134,18 +135,26 @@ start_replica(Replica, Config) ->
 write(Pid, WriterId, Corr, Data) ->
     osiris_writer:write(Pid, self(), WriterId, Corr, Data).
 
--spec write_tracking(pid(), binary(), {tracking_type(), offset() | timestamp()}) -> ok.
+-spec write_tracking(pid(), binary(), {tracking_type(), offset() | timestamp()} | offset()) -> ok.
 write_tracking(Pid, TrackingId, {_TrkType, _TrkData} = Tracking) ->
-    osiris_writer:write_tracking(Pid, TrackingId, Tracking).
+    osiris_writer:write_tracking(Pid, TrackingId, Tracking);
+%% for backwards compatiblity
+write_tracking(Pid, TrackingId, Offset) when is_integer(Offset) ->
+    osiris_writer:write_tracking(Pid, TrackingId, {offset, Offset}).
+
+-spec read_tracking(pid()) -> map().
+read_tracking(Pid) ->
+    osiris_writer:read_tracking(Pid).
+
+%% for backwards compatiblity
+-spec read_tracking(pid(), binary()) -> {offset, offset()} | undefined.
+read_tracking(Pid, TrackingId) ->
+    osiris_writer:read_tracking(Pid, offset, TrackingId).
 
 -spec read_tracking(pid(), tracking_type(), binary()) ->
     {tracking_type(), offset() | timestamp()} | undefined.
 read_tracking(Pid, TrackingType, TrackingId) ->
     osiris_writer:read_tracking(Pid, TrackingType, TrackingId).
-
--spec read_tracking(pid()) -> map().
-read_tracking(Pid) ->
-    osiris_writer:read_tracking(Pid).
 
 -spec fetch_writer_seq(pid(), binary()) ->
                           non_neg_integer() | undefined.
