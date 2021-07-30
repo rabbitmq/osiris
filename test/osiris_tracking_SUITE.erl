@@ -17,6 +17,7 @@
 
 -define(TRK_TYPE_SEQUENCE, 0).
 -define(TRK_TYPE_OFFSET, 1).
+-define(TRK_TYPE_TIMESTAMP, 2).
 %%%===================================================================
 %%% Common Test callbacks
 %%%===================================================================
@@ -75,8 +76,37 @@ basics(_Config) ->
                    "t1", 99:64/unsigned>>,
                  iolist_to_binary(Trailer2)),
 
-    {Snap1, _T5} = osiris_tracking:snapshot(99, T4),
-    ?assertMatch(<<?TRK_TYPE_OFFSET:8/unsigned,
+    ChId3 = ?LINE,
+    Now = erlang:system_time(millisecond),
+    T5 = osiris_tracking:add(<<"t2">>, timestamp, Now, ChId3, T4),
+    ?assertEqual({ok, Now}, osiris_tracking:query(<<"t2">>, timestamp, T5)),
+    {Trailer3, T6} = osiris_tracking:flush(T5),
+    ?assertMatch(<<?TRK_TYPE_TIMESTAMP:8,
+                   2:8/unsigned,
+                   "t2", Now:64/signed>>,
+                 iolist_to_binary(Trailer3)),
+
+    %% ensure negative timestamps work (although they shouldn't be used in practice)
+    ChId4 = ?LINE,
+    NegativeTs = -9,
+    T7 = osiris_tracking:add(<<"t3">>, timestamp, NegativeTs, ChId4, T6),
+    ?assertEqual({ok, NegativeTs}, osiris_tracking:query(<<"t3">>, timestamp, T7)),
+    {Trailer4, T8} = osiris_tracking:flush(T7),
+    ?assertMatch(<<?TRK_TYPE_TIMESTAMP:8,
+                   2:8/unsigned,
+                   "t3", NegativeTs:64/signed>>,
+                 iolist_to_binary(Trailer4)),
+
+    {Snap1, _T9} = osiris_tracking:snapshot(99, NegativeTs, T8),
+    ?assertMatch(<<?TRK_TYPE_TIMESTAMP:8/unsigned,
+                   2:8/unsigned,
+                   "t3",
+                   NegativeTs:64/signed,
+                   ?TRK_TYPE_TIMESTAMP:8/unsigned,
+                   2:8/unsigned,
+                   "t2",
+                   Now:64/signed,
+                   ?TRK_TYPE_OFFSET:8/unsigned,
                    2:8/unsigned,
                    "t1",
                    99:64/unsigned,
@@ -85,8 +115,9 @@ basics(_Config) ->
                    "w1",
                    ChId1:64/unsigned,
                    55:64/unsigned>>, iolist_to_binary(Snap1)),
-    %% passing a first offset lower than the tracking id should discard it
-    {Snap2, _T6} = osiris_tracking:snapshot(100, T4),
+    %% tracking offsets lower than first offset in stream should be discarded
+    %% tracking timestamps lower than first timestamp in stream should be discarded
+    {Snap2, _T10} = osiris_tracking:snapshot(100, Now+1, T8),
     ?assertMatch(<<?TRK_TYPE_SEQUENCE:8/unsigned,
                    2:8/unsigned,
                    "w1",
@@ -97,10 +128,15 @@ basics(_Config) ->
 
 recover(_Config) ->
     ChId1 = ?LINE,
+    Now = erlang:system_time(millisecond),
     SnapBin = <<?TRK_TYPE_OFFSET:8/unsigned,
                 2:8/unsigned,
                 "t1",
                 99:64/unsigned,
+                ?TRK_TYPE_TIMESTAMP:8/unsigned,
+                2:8/unsigned,
+                "t2",
+                Now:64/signed,
                 ?TRK_TYPE_SEQUENCE:8/unsigned,
                 2:8/unsigned,
                 "w1",
@@ -110,11 +146,16 @@ recover(_Config) ->
     T0 = osiris_tracking:init(SnapBin),
     ?assertEqual({ok, {ChId1, 55}}, osiris_tracking:query(<<"w1">>, sequence, T0)),
     ?assertEqual({ok, 99}, osiris_tracking:query(<<"t1">>, offset, T0)),
+    ?assertEqual({ok, Now}, osiris_tracking:query(<<"t2">>, timestamp, T0)),
 
     Trailer = <<?TRK_TYPE_OFFSET:8/unsigned,
                 2:8/unsigned,
-                "t2",
+                "t3",
                 103:64/unsigned,
+                ?TRK_TYPE_TIMESTAMP:8/unsigned,
+                2:8/unsigned,
+                "t4",
+                11:64/signed,
                 ?TRK_TYPE_SEQUENCE:8/unsigned,
                 2:8/unsigned,
                 "w2",
@@ -125,5 +166,7 @@ recover(_Config) ->
     ?assertEqual({ok, {ChId1, 55}}, osiris_tracking:query(<<"w1">>, sequence, T1)),
     ?assertEqual({ok, {ChId2, 77}}, osiris_tracking:query(<<"w2">>, sequence, T1)),
     ?assertEqual({ok, 99}, osiris_tracking:query(<<"t1">>, offset, T1)),
-    ?assertEqual({ok, 103}, osiris_tracking:query(<<"t2">>, offset, T1)),
+    ?assertEqual({ok, Now}, osiris_tracking:query(<<"t2">>, timestamp, T1)),
+    ?assertEqual({ok, 103}, osiris_tracking:query(<<"t3">>, offset, T1)),
+    ?assertEqual({ok, 11}, osiris_tracking:query(<<"t4">>, timestamp, T1)),
     ok.
