@@ -28,6 +28,7 @@
          read_header/1,
          read_chunk/1,
          read_chunk_parsed/1,
+         read_chunk_parsed/2,
          committed_offset/1,
          get_current_epoch/1,
          get_directory/1,
@@ -1190,19 +1191,42 @@ read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
     end.
 
 -spec read_chunk_parsed(state()) ->
-                           {[record()], state()} | {end_of_stream, state()} |
+                           {[record()], state()} |
+                           {end_of_stream, state()} |
                            {error, {invalid_chunk_header, term()}}.
+read_chunk_parsed(State) ->
+    read_chunk_parsed(State, no_header).
+
+-spec read_chunk_parsed(state(), no_header | with_header) ->
+    {[record()], state()} |
+    {ok, header_map(), [record()], state()} |
+    {end_of_stream, state()} |
+    {error, {invalid_chunk_header, term()}}.
 read_chunk_parsed(#?MODULE{mode = #read{type = RType,
-                                        chunk_selector = Selector}} = State0) ->
+                                        chunk_selector = Selector}} = State0,
+                 HeaderOrNot) ->
     %% reads the next chunk of entries, parsed
     %% NB: this may return records before the requested index,
     %% that is fine - the reading process can do the appropriate filtering
-    case read_chunk(State0) of
-        {ok, {ChType, Offs, _Epoch, _Header, Data, _Trailer}, State} ->
+    case read_header0(State0) of
+        {ok,
+         #{type := ChType,
+           chunk_id := ChId,
+           crc := Crc,
+           num_records := NumRecords,
+           data_size := DataSize,
+           trailer_size := TrailerSize} = Header,
+         #?MODULE{fd = Fd, mode = #read{next_offset = _ChId} = Read} = State1} ->
+            {ok, Data} = file:read(Fd, DataSize),
+            {ok, _TrailerData} = file:read(Fd, TrailerSize),
+            validate_crc(ChId, Crc, Data),
+            State = State1#?MODULE{mode = incr_next_offset(NumRecords, Read)},
             case needs_handling(RType, Selector, ChType) of
-                true ->
+                true when HeaderOrNot == no_header ->
                     %% parse data into records
-                    {parse_records(Offs, Data, []), State};
+                    {parse_records(ChId, Data, []), State};
+                true ->
+                    {ok, Header, parse_records(ChId, Data, []), State};
                 false ->
                     %% skip
                     read_chunk_parsed(State)

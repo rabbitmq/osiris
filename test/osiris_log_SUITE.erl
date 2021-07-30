@@ -34,7 +34,9 @@ all_tests() ->
      subbatch,
      subbatch_compressed,
      read_chunk_parsed,
+     read_chunk_parsed_2,
      read_chunk_parsed_multiple_chunks,
+     read_chunk_parsed_2_multiple_chunks,
      read_header,
      write_multi_log,
      tail_info_empty,
@@ -232,6 +234,18 @@ read_chunk_parsed(Config) ->
     ?assertMatch({[{0, <<"hi">>}], _}, osiris_log:read_chunk_parsed(R1)),
     ok.
 
+read_chunk_parsed_2(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf),
+    {ok, R0} = osiris_log:init_data_reader({0, empty}, Conf),
+    {end_of_stream, R1} = osiris_log:read_chunk_parsed(R0, with_header),
+    _S1 = osiris_log:write([<<"hi">>], S0),
+    {ok,
+     #{num_records := 1},
+     [{0, <<"hi">>}], R2} = osiris_log:read_chunk_parsed(R1, with_header),
+    {end_of_stream, _} = osiris_log:read_chunk_parsed(R2, with_header),
+    ok.
+
 read_chunk_parsed_multiple_chunks(Config) ->
     Conf = ?config(osiris_conf, Config),
     S0 = osiris_log:init(Conf),
@@ -249,6 +263,26 @@ read_chunk_parsed_multiple_chunks(Config) ->
     {ok, R2} = osiris_log:init_data_reader({2, {1, 0, 0}}, Conf),
     ?assertMatch({[{2, <<"hi-again">>}], _},
                  osiris_log:read_chunk_parsed(R2)),
+    ok.
+
+read_chunk_parsed_2_multiple_chunks(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf),
+    Entries = [<<"hi">>, <<"hi-there">>],
+    %% osiris_writer passes entries in reversed order
+    S1 = osiris_log:write(
+             lists:reverse(Entries), S0),
+    _S2 = osiris_log:write([<<"hi-again">>], S1),
+    {ok, R0} = osiris_log:init_data_reader({0, empty}, Conf),
+    {ok, #{num_records := 2},
+     [{0, <<"hi">>}, {1, <<"hi-there">>}], R1} =
+        osiris_log:read_chunk_parsed(R0, with_header),
+    ?assertMatch({ok, #{num_records := 1}, [{2, <<"hi-again">>}], _},
+                 osiris_log:read_chunk_parsed(R1, with_header)),
+    %% open another reader at a later index
+    {ok, R2} = osiris_log:init_data_reader({2, {1, 0, 0}}, Conf),
+    ?assertMatch({ok, #{num_records := 1}, [{2, <<"hi-again">>}], _},
+                 osiris_log:read_chunk_parsed(R2, with_header)),
     ok.
 
 read_header(Config) ->
