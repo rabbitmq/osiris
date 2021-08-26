@@ -132,6 +132,8 @@ init(#{name := Name,
     case rpc:call(Node, osiris_writer, overview, [LeaderPid]) of
         {error, _} = Err ->
             {stop, Err};
+        {badrpc, Reason} ->
+            {error, Reason};
         {ok, {LeaderRange, LeaderEpochOffs}}  ->
             {ok, {Min, Max}} = application:get_env(port_range),
             RecBuf = application:get_env(osiris, replica_recbuf, ?DEF_REC_BUF),
