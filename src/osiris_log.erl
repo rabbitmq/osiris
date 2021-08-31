@@ -1037,7 +1037,7 @@ init_offset_reader(OffsetSpec,
                             IdxResult
                     end,
                     ?DEBUG("osiris_log:init_offset_reader/2 resolved chunk_id ~b"
-                           " at file pos: ~p ", [ChOffs, FilePos]),
+                           " at file pos: ~w ", [ChOffs, FilePos]),
                 {ok, _Pos} = file:position(Fd, FilePos),
                 Cnt = make_counter(Conf),
                 ReaderCounterFun(1),
