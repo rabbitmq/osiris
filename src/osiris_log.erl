@@ -1036,6 +1036,8 @@ init_offset_reader(OffsetSpec,
                         IdxResult when is_tuple(IdxResult) ->
                             IdxResult
                     end,
+                    ?DEBUG("osiris_log:init_offset_reader/2 resolved chunk_id ~b"
+                           " at file pos: ~b ", [ChOffs, FilePos]),
                 {ok, _Pos} = file:position(Fd, FilePos),
                 Cnt = make_counter(Conf),
                 ReaderCounterFun(1),
@@ -1934,7 +1936,8 @@ scan_idx(Offset, SegmentInfo = #seg_info{index = IndexFile, last = LastChunkInSe
     ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1000000]),
     Result.
 
-scan_idx(Fd, Offset, #chunk_info{id = LastChunkInSegmentId, num = LastChunkInSegmentNum}) ->
+scan_idx(Fd, Offset, #chunk_info{id = LastChunkInSegmentId,
+                                 num = LastChunkInSegmentNum}) ->
     case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
         {ok,
          <<ChunkId:64/unsigned,
@@ -1973,8 +1976,10 @@ scan_idx(Fd, Offset, PreviousChunk) ->
            _ChType:8/unsigned>>} ->
             case Offset < ChunkId of
                 true ->
-                    %% offset we are looking for is higher or equal to the start of the previous chunk
-                    %% but lower than the start of the current chunk -> return the previous chunk
+                    %% offset we are looking for is higher or equal
+                    %% to the start of the previous chunk
+                    %% but lower than the start of the current chunk ->
+                    %% return the previous chunk
                     PreviousChunk;
                 false ->
                     scan_idx(Fd, Offset, {ChunkId, FilePos})
