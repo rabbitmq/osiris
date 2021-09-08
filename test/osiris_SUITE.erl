@@ -895,7 +895,6 @@ retention_overtakes_offset_reader(Config) ->
     SegSize = 50000 * 1000,
     [LeaderNode | Replicas] =
         Nodes = [start_child_node(N, DataDir) || N <- [s1, s2, s3]],
-    % [Replica1, Replica2] = Replicas,
     Conf0 =
         #{name => Name,
           epoch => 1,

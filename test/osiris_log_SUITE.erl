@@ -48,6 +48,7 @@ all_tests() ->
      init_offset_reader_no_user_chunk_in_segments,
      init_offset_reader_timestamp,
      init_offset_reader_truncated,
+     init_data_reader_next,
      init_data_reader_empty_log,
      init_data_reader_truncated,
      init_epoch_offsets_empty,
@@ -331,8 +332,7 @@ write_multi_log(Config) ->
     ?assertEqual(2, length(Segments)),
 
     OffRef = atomics:new(2, []),
-    atomics:put(OffRef, 1,
-                1011), %% takes a single offset tracking data into account
+    atomics:put(OffRef, 1, 1011), %% takes a single offset tracking data into account
     %% ensure all records can be read
     {ok, R0} =
         osiris_log:init_offset_reader(first, Conf#{offset_ref => OffRef}),
@@ -371,7 +371,7 @@ init_offset_reader_empty(Config) ->
     LDir = ?config(leader_dir, Config),
     LLog0 = seed_log(LDir, [], Config),
     osiris_log:close(LLog0),
-    RConf = Conf#{dir => LDir, offset_ref => ?FUNCTION_NAME},
+    RConf = Conf#{dir => LDir},
     %% first and last falls back to next
     {ok, L1} = osiris_log:init_offset_reader(first, RConf),
     {ok, L2} = osiris_log:init_offset_reader(last, RConf),
@@ -404,9 +404,10 @@ init_offset_reader(Config, Mode) ->
         [{1, [<<"one">>]}, {2, [<<"two">>]}, {3, [<<"three">>, <<"four">>]}],
     LDir = ?config(leader_dir, Config),
     Conf = ?config(osiris_conf, Config),
+    set_offset_ref(Conf, 3),
     LLog0 = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(LLog0),
-    RConf = Conf#{dir => LDir, offset_ref => ?FUNCTION_NAME, mode => Mode},
+    RConf = Conf#{dir => LDir, mode => Mode},
 
     {ok, L1} = osiris_log:init_offset_reader(first, RConf),
     ?assertEqual(0, osiris_log:next_offset(L1)),
@@ -464,7 +465,8 @@ init_offset_reader_last_chunk_is_not_user_chunk(Config) ->
     osiris_log:close(S2),
 
     Conf = ?config(osiris_conf, Config),
-    RConf = Conf#{dir => LDir, offset_ref => ?FUNCTION_NAME},
+    RConf = Conf#{dir => LDir},
+    set_offset_ref(RConf, 4),
     % Test that 'last' returns last user chunk
     {ok, L1} = osiris_log:init_offset_reader(last, RConf),
     ?assertEqual(1, osiris_log:next_offset(L1)),
@@ -484,6 +486,7 @@ init_offset_reader_no_user_chunk_in_last_segment(Config) ->
     Conf0 = ?config(osiris_conf, Config),
     Conf = Conf0#{max_segment_size_bytes => 120},
     S0 = seed_log(Conf, [{1, [<<"one">>]}], Config),
+    set_offset_ref(Conf, 2),
     S1 = osiris_log:write([<<"1st tracking delta chunk">>],
                           ?CHNK_TRK_DELTA,
                           ?LINE,
@@ -496,7 +499,7 @@ init_offset_reader_no_user_chunk_in_last_segment(Config) ->
                           S1),
     osiris_log:close(S2),
 
-    RConf = Conf#{offset_ref => ?FUNCTION_NAME},
+    RConf = Conf,
     % test that 'last' returns last user chunk
     {ok, L1} = osiris_log:init_offset_reader(last, RConf),
     ?assertEqual(0, osiris_log:next_offset(L1)),
@@ -521,10 +524,11 @@ init_offset_reader_no_user_chunk_in_segments(Config) ->
     osiris_log:close(S1),
 
     Conf = ?config(osiris_conf, Config),
-    RConf = Conf#{dir => LDir, offset_ref => ?FUNCTION_NAME},
-    % Test that 'last' returns 0 when there is no user chunk
+    RConf = Conf#{dir => LDir},
+    % Test that 'last' falls back to `next` behaviour when there is no user chunk
+    % present in the log
     {ok, L1} = osiris_log:init_offset_reader(last, RConf),
-    ?assertEqual(0, osiris_log:next_offset(L1)),
+    ?assertEqual(1, osiris_log:next_offset(L1)),
     osiris_log:close(L1),
 
     {ok, L2} = osiris_log:init_offset_reader(next, RConf),
@@ -542,8 +546,9 @@ init_offset_reader_timestamp(Config) ->
     LDir = ?config(leader_dir, Config),
     Conf = ?config(osiris_conf, Config),
     LLog0 = seed_log(LDir, EpochChunks, Config),
+    set_offset_ref(Conf, 3),
     osiris_log:close(LLog0),
-    RConf = Conf#{dir => LDir, offset_ref => ?FUNCTION_NAME},
+    RConf = Conf#{dir => LDir},
 
     {ok, L1} =
         osiris_log:init_offset_reader({timestamp, Now - 8000}, RConf),
@@ -571,7 +576,8 @@ init_offset_reader_truncated(Config) ->
     Conf = ?config(osiris_conf, Config),
     LDir = ?config(leader_dir, Config),
     LLog0 = seed_log(LDir, EpochChunks, Config),
-    RConf = Conf#{dir => LDir, offset_ref => ?FUNCTION_NAME},
+    set_offset_ref(Conf, 1000),
+    RConf = Conf#{dir => LDir},
     osiris_log:close(LLog0),
 
     %% "Truncate" log by deleting first segment
@@ -606,6 +612,20 @@ init_offset_reader_truncated(Config) ->
     %% lower = first
     ?assert(5 < osiris_log:next_offset(L5)),
     osiris_log:close(L5),
+    ok.
+
+init_data_reader_next(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    LDir = ?config(leader_dir, Config),
+    FDir = ?config(follower1_dir, Config),
+    _LLog0 = seed_log(LDir, [{1, ["one"]}], Config),
+    %% seed is up to date
+    FLog0 = seed_log(FDir, [{1, ["one"]}], Config),
+    RRConf = Conf#{dir => LDir},
+    %% the next offset, i.e. offset 0
+    {ok, _RLog0} =
+        osiris_log:init_data_reader(
+            osiris_log:tail_info(FLog0), RRConf),
     ok.
 
 init_data_reader_empty_log(Config) ->
@@ -644,7 +664,7 @@ init_data_reader_truncated(Config) ->
     Conf = ?config(osiris_conf, Config),
     LDir = ?config(leader_dir, Config),
     LLog0 = seed_log(LDir, EpochChunks, Config),
-    RConf = Conf#{dir => LDir, offset_ref => ?FUNCTION_NAME},
+    RConf = Conf#{dir => LDir},
     osiris_log:close(LLog0),
 
     %% "Truncate" log by deleting first segment
@@ -656,10 +676,7 @@ init_data_reader_truncated(Config) ->
             filename:join(LDir, "00000000000000000000.segment")),
 
     %% when requesting a lower offset than the start of the log
-    %% it should automatically attach at the first available offset
-    {ok, L1} = osiris_log:init_data_reader({0, empty}, RConf),
-    ?assert(0 < osiris_log:next_offset(L1)),
-    osiris_log:close(L1),
+    {error, {offset_out_of_range, _}} = osiris_log:init_data_reader({0, empty}, RConf),
 
     %% attaching inside the log should be ok too
     {ok, L2} = osiris_log:init_data_reader({750, {1, 700, ?LINE}}, RConf),
@@ -1100,3 +1117,6 @@ make_trailer(Type, K, V) ->
       (byte_size(K)):8/unsigned,
       K/binary,
       V:64/unsigned>>.
+
+set_offset_ref(#{offset_ref := Ref}, Value) ->
+    atomics:put(Ref, 1, Value).
