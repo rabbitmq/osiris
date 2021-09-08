@@ -874,24 +874,14 @@ init_data_reader_at(ChunkId, FilePos, File,
              fd = Fd}.
 
 init_data_reader_from(ChunkId,
-                             {end_of_log, #seg_info{file = File} = SegInfo},
-                             Config) ->
-    case SegInfo of
-        #seg_info{file = File, last = undefined} ->
-            init_data_reader_at(0, ?LOG_HEADER_SIZE, File, Config);
-        #seg_info{file = File,
-                  last = #chunk_info{id = Id,
-                                     num = Num,
-                                     pos = Pos,
-                                     size = Size}} ->
-            ChunkId = Id + Num, %% assertion
-            AttachPos = Pos + Size + ?HEADER_SIZE_B,
-            init_data_reader_at(ChunkId, AttachPos, File, Config)
-    end;
+                      {end_of_log, #seg_info{file = File,
+                                             last = LastChunk}},
+                      Config) ->
+    {ChunkId, AttachPos} = next_location(LastChunk),
+    init_data_reader_at(ChunkId, AttachPos, File, Config);
 init_data_reader_from(ChunkId,
-                             {found, #seg_info{file = File} = SegInfo},
-                             Config) ->
-    %% TODO: next offset needs to be a chunk offset
+                      {found, #seg_info{file = File} = SegInfo},
+                      Config) ->
     {ChunkId, _Epoch, FilePos} = scan_idx(ChunkId, SegInfo),
     init_data_reader_at(ChunkId, FilePos, File, Config).
 
@@ -965,7 +955,7 @@ init_offset_reader({timestamp, Ts}, #{dir := Dir} = Conf) ->
 init_offset_reader(first, #{dir := Dir} = Conf) ->
     case build_log_overview(Dir) of
         [#seg_info{file = File,
-                   last = undefined}] ->
+                   first = undefined}] ->
             %% empty log, attach at 0
             open_offset_reader_at(File, 0, ?LOG_HEADER_SIZE, Conf);
         [#seg_info{file = File,
@@ -973,27 +963,17 @@ init_offset_reader(first, #{dir := Dir} = Conf) ->
                                        pos = FilePos}} | _] ->
             open_offset_reader_at(File, FirstChunkId, FilePos, Conf);
         _ ->
-            %% TODO
-            exit({?FUNCTION_NAME, first})
+            exit(no_segments_found)
     end;
 init_offset_reader(next, #{dir := Dir} = Conf) ->
     SegInfos = build_log_overview(Dir),
     case lists:reverse(SegInfos) of
         [#seg_info{file = File,
-                   last = undefined}] ->
-            %% empty log, attach at 0
-            open_offset_reader_at(File, 0, ?LOG_HEADER_SIZE, Conf);
-        [#seg_info{file = File,
-                   last = #chunk_info{size = Size,
-                                      num = LastNum,
-                                      id = LastChunkId,
-                                      pos = LastChPos}} | _] ->
-            FilePos = LastChPos + Size + ?HEADER_SIZE_B,
-            NextChunkId = LastChunkId + LastNum,
+                   last = LastChunk} | _] ->
+            {NextChunkId, FilePos} = next_location(LastChunk),
             open_offset_reader_at(File, NextChunkId, FilePos, Conf);
         _ ->
-            %% TODO
-            exit({?FUNCTION_NAME, next})
+            exit(no_segments_found)
     end;
 init_offset_reader(last, #{dir := Dir} = Conf) ->
     SegInfos = build_log_overview(Dir),
@@ -1018,7 +998,8 @@ init_offset_reader(last, #{dir := Dir} = Conf) ->
                     open_offset_reader_at(File, ChunkId, FilePos, Conf)
             end
     end;
-init_offset_reader(OffsetSpec, #{dir := Dir} = Conf) ->
+init_offset_reader(OffsetSpec, #{dir := Dir} = Conf)
+  when is_integer(OffsetSpec) ->
     SegInfos = build_log_overview(Dir),
     ChunkRange = chunk_range_from_segment_infos(SegInfos),
     Range = offset_range_from_chunk_range(ChunkRange),
@@ -1030,11 +1011,10 @@ init_offset_reader(OffsetSpec, #{dir := Dir} = Conf) ->
                 {_, empty} ->
                     0;
                 {Offset, {_, LastOffs}}
-                  when is_integer(Offset) andalso
-                       Offset > LastOffs ->
+                  when Offset > LastOffs ->
                     %% out of range, clamp as `next`
                     throw({retry_with, next, Conf});
-                {Offset, {FirstOffs, _LastOffs}} when is_integer(Offset) ->
+                {Offset, {FirstOffs, _LastOffs}} ->
                     max(FirstOffs, Offset)
             end,
         %% find the appopriate segment and scan the index to find the
@@ -1042,7 +1022,11 @@ init_offset_reader(OffsetSpec, #{dir := Dir} = Conf) ->
         case find_segment_for_offset(StartOffset, SegInfos) of
             not_found ->
                 {error, {offset_out_of_range, Range}};
-            {_, SegmentInfo = #seg_info{file = SegmentFile}} ->
+            {end_of_log, #seg_info{file = SegmentFile,
+                                   last = LastChunk}} ->
+                {ChunkId, FilePos} = next_location(LastChunk),
+                open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
+            {found, SegmentInfo = #seg_info{file = SegmentFile}} ->
                 {ChunkId, _Epoch, FilePos} =
                     case scan_idx(StartOffset, SegmentInfo) of
                         eof ->
@@ -1058,7 +1042,6 @@ init_offset_reader(OffsetSpec, #{dir := Dir} = Conf) ->
                     end,
                 ?DEBUG("osiris_log:init_offset_reader/2 resolved chunk_id ~b"
                        " at file pos: ~w ", [ChunkId, FilePos]),
-
                 open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf)
         end
     catch
@@ -1958,12 +1941,7 @@ scan_idx(Offset, #seg_info{index = IndexFile,
                        fun() ->
                                case offset_range_from_segment_infos([SegmentInfo]) of
                                    empty ->
-                                       %% TODO: this does not feel right
-                                       %% if the index is empty do we really know
-                                       %% the offset will be next
-                                       %% this relies on us always reducing the
-                                       %% Offset to within the log range
-                                       {0, 0, ?LOG_HEADER_SIZE};
+                                       eof;
                                    {SegmentStartOffs, SegmentEndOffs} ->
                                        case Offset < SegmentStartOffs orelse
                                             Offset > SegmentEndOffs of
@@ -2273,6 +2251,14 @@ trigger_retention_eval(#?MODULE{cfg =
                                       ok
                               end),
     State.
+
+next_location(undefined) ->
+    {0, ?LOG_HEADER_SIZE};
+next_location(#chunk_info{id = Id,
+                          num = Num,
+                          pos = Pos,
+                          size = Size}) ->
+    {Id + Num, Pos + Size + ?HEADER_SIZE_B}.
 
 -ifdef(TEST).
 
