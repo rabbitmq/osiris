@@ -907,7 +907,15 @@ init_data_reader_from(ChunkId,
                              {offset_out_of_range,
                               empty | {From :: offset(), To :: offset()}}} |
                             {error, {invalid_chunk_header, term()}}.
-init_offset_reader({abs, Offs}, #{dir := Dir} = Conf) ->
+init_offset_reader(OffsetSpec, Conf) ->
+    try
+        init_offset_reader0(OffsetSpec, Conf)
+    catch
+        missing_file ->
+            init_offset_reader0(OffsetSpec, Conf)
+    end.
+
+init_offset_reader0({abs, Offs}, #{dir := Dir} = Conf) ->
     Range = offset_range_from_segment_infos(build_log_overview(Dir)),
     case Range of
         empty ->
@@ -916,12 +924,12 @@ init_offset_reader({abs, Offs}, #{dir := Dir} = Conf) ->
             {error, {offset_out_of_range, Range}};
         _ ->
             %% it is in range, convert to standard offset
-            init_offset_reader(Offs, Conf)
+            init_offset_reader0(Offs, Conf)
     end;
-init_offset_reader({timestamp, Ts}, #{dir := Dir} = Conf) ->
+init_offset_reader0({timestamp, Ts}, #{dir := Dir} = Conf) ->
     case build_log_overview(Dir) of
         [] ->
-            init_offset_reader(next, Conf);
+            init_offset_reader0(next, Conf);
         [#seg_info{file = SegmentFile,
                    first = #chunk_info{timestamp = Fst,
                                        pos = FilePos,
@@ -949,10 +957,10 @@ init_offset_reader({timestamp, Ts}, #{dir := Dir} = Conf) ->
                     %% segment was not found, attach next
                     %% this should be rare so no need to call the more optimal
                     %% open_offset_reader_at/4 function
-                    init_offset_reader(next, Conf)
+                    init_offset_reader0(next, Conf)
             end
     end;
-init_offset_reader(first, #{dir := Dir} = Conf) ->
+init_offset_reader0(first, #{dir := Dir} = Conf) ->
     case build_log_overview(Dir) of
         [#seg_info{file = File,
                    first = undefined}] ->
@@ -965,7 +973,7 @@ init_offset_reader(first, #{dir := Dir} = Conf) ->
         _ ->
             exit(no_segments_found)
     end;
-init_offset_reader(next, #{dir := Dir} = Conf) ->
+init_offset_reader0(next, #{dir := Dir} = Conf) ->
     SegInfos = build_log_overview(Dir),
     case lists:reverse(SegInfos) of
         [#seg_info{file = File,
@@ -975,7 +983,7 @@ init_offset_reader(next, #{dir := Dir} = Conf) ->
         _ ->
             exit(no_segments_found)
     end;
-init_offset_reader(last, #{dir := Dir} = Conf) ->
+init_offset_reader0(last, #{dir := Dir} = Conf) ->
     SegInfos = build_log_overview(Dir),
     case lists:reverse(SegInfos) of
         [#seg_info{file = File,
@@ -993,17 +1001,17 @@ init_offset_reader(last, #{dir := Dir} = Conf) ->
                     ?DEBUG("~s:~s use chunk not found, fall back to next",
                            [?MODULE, ?FUNCTION_NAME]),
                     %% no user chunks in stream, this is awkward, fall back to next
-                    init_offset_reader(next, Conf);
+                    init_offset_reader0(next, Conf);
                 {ChunkId, FilePos, #seg_info{file = File}} ->
                     open_offset_reader_at(File, ChunkId, FilePos, Conf)
             end
     end;
-init_offset_reader(OffsetSpec, #{dir := Dir} = Conf)
+init_offset_reader0(OffsetSpec, #{dir := Dir} = Conf)
   when is_integer(OffsetSpec) ->
     SegInfos = build_log_overview(Dir),
     ChunkRange = chunk_range_from_segment_infos(SegInfos),
     Range = offset_range_from_chunk_range(ChunkRange),
-    ?DEBUG("osiris_log:init_offset_reader/2 spec ~w range ~w ",
+    ?DEBUG("osiris_log:init_offset_reader0/2 spec ~w range ~w ",
            [OffsetSpec, Range]),
     try
         StartOffset =
@@ -1040,7 +1048,7 @@ init_offset_reader(OffsetSpec, #{dir := Dir} = Conf)
                         IdxResult when is_tuple(IdxResult) ->
                             IdxResult
                     end,
-                ?DEBUG("osiris_log:init_offset_reader/2 resolved chunk_id ~b"
+                ?DEBUG("osiris_log:init_offset_reader0/2 resolved chunk_id ~b"
                        " at file pos: ~w ", [ChunkId, FilePos]),
                 open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf)
         end
@@ -1048,9 +1056,9 @@ init_offset_reader(OffsetSpec, #{dir := Dir} = Conf)
         missing_file ->
             %% Retention policies are likely being applied, let's try again
             %% TODO: should we limit the number of retries?
-            init_offset_reader(OffsetSpec, Conf);
+            init_offset_reader0(OffsetSpec, Conf);
         {retry_with, NewOffsSpec, NewConf} ->
-            init_offset_reader(NewOffsSpec, NewConf)
+            init_offset_reader0(NewOffsSpec, NewConf)
     end.
 
 open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
