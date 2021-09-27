@@ -1269,7 +1269,7 @@ read_chunk_parsed(#?MODULE{mode = #read{type = RType,
                     {ok, Header, parse_records(ChId, Data, []), State};
                 false ->
                     %% skip
-                    read_chunk_parsed(State)
+                    read_chunk_parsed(State, HeaderOrNot)
             end;
         Ret ->
             Ret
