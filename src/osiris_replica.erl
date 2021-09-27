@@ -180,7 +180,7 @@ init(#{name := Name,
             %% are only the IP(s) inside docker but the dns lookup happens
             %% outside the docker image (host machine).
             %% The host name is the last to leave the compatibility.
-            %% See: issues/3510
+            %% See: rabbitmq/rabbitmq-server#3510
             IpsHosts = lists:append(Ips, [HostName]),
             ?DEBUG("osiris_replica:init/1: available hosts: ~w",
             [IpsHosts]),
