@@ -174,8 +174,18 @@ init(#{name := Name,
             {ok, HostName} = inet:gethostname(),
             {ok, Ips} = inet:getaddrs(HostName, inet),
             Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
+            %% append the HostName to the Ip(s) list: in some cases
+            %% like NAT or redirect the local ip addresses are not enough.
+            %% ex: In docker with host network configuration the `inet:getaddrs`
+            %% are only the IP(s) inside docker but the dns lookup happens
+            %% outside the docker image (host machine).
+            %% The host name is the last to leave the compatibility.
+            %% See: rabbitmq/rabbitmq-server#3510
+            IpsHosts = lists:append(Ips, [HostName]),
+            ?DEBUG("osiris_replica:init/1: available hosts: ~w",
+            [IpsHosts]),
             ReplicaReaderConf =
-            #{hosts => Ips,
+            #{hosts => IpsHosts,
               port => Port,
               name => Name,
               replica_pid => self(),
