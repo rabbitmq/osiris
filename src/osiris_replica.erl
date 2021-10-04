@@ -20,7 +20,7 @@
          stop/2,
          delete/2]).
 %% Test
--export([get_port/1, maybe_add_hostname_from_node/3]).
+-export([get_port/1, combine_ips_hosts/3]).
 %% gen_server callbacks
 -export([init/1,
          handle_call/3,
@@ -195,7 +195,7 @@ init(#{name := Name,
             %% see: rabbitmq/osiris/issues/53 for more details
             HostNameFromHost = osiris_util:hostname_from_node(),
 
-            IpsHosts = maybe_add_hostname_from_node(Ips, HostName,
+            IpsHosts = combine_ips_hosts(Ips, HostName,
               HostNameFromHost),
 
             Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
@@ -251,10 +251,10 @@ init(#{name := Name,
                       parse_state = undefined}}
     end.
 
-maybe_add_hostname_from_node(IPs, HostName, HostNameFromHost) when
+combine_ips_hosts(IPs, HostName, HostNameFromHost) when
   HostName =/= HostNameFromHost ->
   lists:append(IPs, [HostName, HostNameFromHost]);
-maybe_add_hostname_from_node(IPs, HostName, _HostNameFromHost) ->
+combine_ips_hosts(IPs, HostName, _HostNameFromHost) ->
   lists:append(IPs, [HostName]).
 
 open_tcp_port(_RcvBuf, M, M) ->

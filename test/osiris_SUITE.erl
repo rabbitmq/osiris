@@ -292,15 +292,15 @@ cluster_reader_counters(Config) ->
     ?assertEqual(2, maps:get(readers, maps:get({'osiris_writer', Name}, Overview4))).
 
 
-may_add_host_name(_Config) ->
+combine_ips_hosts_test(_Config) ->
   Ip = ["192.168.23.23"],
   HostName = "myhostname.com",
   ?assertEqual(["192.168.23.23", "myhostname.com"],
-    osiris_replica:maybe_add_hostname_from_node(Ip, HostName, HostName)),
+    osiris_replica:combine_ips_hosts(Ip, HostName, HostName)),
 
   HostNameFromNode = osiris_util:hostname_from_node(),
   ?assertEqual(["192.168.23.23","myhostname.com", HostNameFromNode],
-    osiris_replica:maybe_add_hostname_from_node(Ip, HostName,
+    osiris_replica:combine_ips_hosts(Ip, HostName,
       HostNameFromNode)).
 
 
