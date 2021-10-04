@@ -1000,7 +1000,7 @@ offset_tracking(Config) ->
     Conf = ?config(osiris_conf, Config),
     S0 = osiris_log:init(Conf),
     T0 = osiris_tracking:add(<<"id1">>, offset, 0, undefined,
-                             osiris_tracking:init(undefined)),
+                             osiris_tracking:init(undefined, #{})),
     {Trailer, T1} = osiris_tracking:flush(T0),
     ?assertEqual(0, osiris_log:next_offset(S0)),
     S1 = osiris_log:write([<<"hi">>], ?CHNK_USER, ?LINE, Trailer, S0),
@@ -1029,7 +1029,7 @@ offset_tracking_snapshot(Config) ->
 
     T0 = osiris_tracking:add(<<"wid1">>, sequence, 2, 0,
            osiris_tracking:add(<<"id1">>, offset, 1, undefined,
-                             osiris_tracking:init(undefined))),
+                             osiris_tracking:init(undefined, #{}))),
     S0 = osiris_log:write([<<"hi">>],
                           ?CHNK_USER,
                           ?LINE,
@@ -1055,7 +1055,7 @@ offset_tracking_snapshot(Config) ->
 %% Utility
 
 seed_log(Conf, EpochChunks, Config) ->
-    Trk = osiris_tracking:init(undefined),
+    Trk = osiris_tracking:init(undefined, #{}),
     element(2, seed_log(Conf, EpochChunks, Config, Trk)).
 
 seed_log(Conf, EpochChunks, Config, Trk) when is_map(Conf) ->

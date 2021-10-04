@@ -112,6 +112,7 @@ single_node_write(Config) ->
           epoch => 1,
           leader_node => node(),
           replica_nodes => [],
+          tracking_max_writers => 255,
           dir => ?config(priv_dir, Config)},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     Wid = <<"wid1">>,
@@ -1316,6 +1317,8 @@ writers_retention(Config) ->
           leader_node => node(),
           replica_nodes => [],
           max_segment_size_bytes => SegSize,
+          %% set a value lower than default
+          tracking_config => #{max_sequences => 32},
           dir => ?config(priv_dir, Config)},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     %% perform writes from 255 unique writers
@@ -1336,7 +1339,7 @@ writers_retention(Config) ->
     Writers = osiris_writer:query_writers(Leader, fun(W) -> W end),
 
     ct:pal("Num writers ~w", [map_size(Writers)]),
-    ?assert(map_size(Writers) < 256),
+    ?assert(map_size(Writers) < 33),
     ct:pal("WRITERS ~p", [lists:min(maps:keys(Writers))]),
 
     %% validate there are only a single entry

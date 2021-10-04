@@ -26,7 +26,8 @@ all() ->
     [{group, tests}].
 
 all_tests() -> [basics,
-               recover].
+                max_writers,
+                recover].
 
 groups() ->
     [{tests, [], all_tests()}].
@@ -54,7 +55,7 @@ end_per_testcase(_TestCase, _Config) ->
 %%%===================================================================
 
 basics(_Config) ->
-    T0 = osiris_tracking:init(undefined),
+    T0 = osiris_tracking:init(undefined, #{}),
     ChId1 = ?LINE,
     T1 = osiris_tracking:add(<<"w1">>, sequence, 55, ChId1, T0),
     ?assert(osiris_tracking:needs_flush(T1)),
@@ -125,6 +126,22 @@ basics(_Config) ->
                    55:64/unsigned>>, iolist_to_binary(Snap2)),
     ok.
 
+max_writers(_Config) ->
+    Trk0 = osiris_tracking:init(undefined, #{max_sequences => 4}),
+    Trk1 = lists:foldl(
+      fun(I, T0) ->
+        osiris_tracking:add(integer_to_binary(I), sequence, I, I, T0)
+      end, Trk0, lists:seq(1, 8)),
+    [?assertEqual({ok, {I, I}}, osiris_tracking:query(integer_to_binary(I), sequence, Trk1))
+    || I <- lists:seq(1, 8)],
+
+    {_, Trk} = osiris_tracking:snapshot(1, 1, Trk1),
+    [?assertEqual({error, not_found}, osiris_tracking:query(integer_to_binary(I), sequence, Trk))
+    || I <- lists:seq(1, 4)],
+
+    [?assertEqual({ok, {I, I}}, osiris_tracking:query(integer_to_binary(I), sequence, Trk))
+    || I <- lists:seq(5, 8)],
+    ok.
 
 recover(_Config) ->
     ChId1 = ?LINE,
@@ -143,7 +160,7 @@ recover(_Config) ->
                 ChId1 :64/unsigned,
                 55:64/unsigned>>,
 
-    T0 = osiris_tracking:init(SnapBin),
+    T0 = osiris_tracking:init(SnapBin, #{}),
     ?assertEqual({ok, {ChId1, 55}}, osiris_tracking:query(<<"w1">>, sequence, T0)),
     ?assertEqual({ok, 99}, osiris_tracking:query(<<"t1">>, offset, T0)),
     ?assertEqual({ok, Now}, osiris_tracking:query(<<"t2">>, timestamp, T0)),

@@ -302,8 +302,30 @@ terminate(Reason,
     [osiris_replica_reader:stop(Pid) || {Pid, _} <- Listeners],
     ok.
 
-format_status(State) ->
-    State.
+format_status(#?MODULE{cfg = #cfg{name = Name,
+                                  directory = Dir,
+                                  replicas = Replicas,
+                                  reference = ExtRef},
+                       log = Log,
+                       tracking = Trk,
+                       pending_corrs = PendingCorrs,
+                       replica_state = ReplicaState,
+                       data_listeners = DataListeners,
+                       offset_listeners = OffsetListeners,
+                       committed_offset = CommittedOffset}) ->
+    #{name => Name,
+      directory => Dir,
+      external_reference => ExtRef,
+      replica_nodes => Replicas,
+      log => osiris_log:format_status(Log),
+      tracking => osiris_tracking:overview(Trk),
+      replica_state => ReplicaState,
+      %%TODO make lqueue for performance
+      num_pending_correlations => queue:len(PendingCorrs),
+      num_data_listeners => length(DataListeners),
+      num_offset_listeners => length(OffsetListeners),
+      committed_offset => CommittedOffset
+     }.
 
 %% Internal
 
