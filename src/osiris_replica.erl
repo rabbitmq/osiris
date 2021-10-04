@@ -171,9 +171,7 @@ init(#{name := Name,
             ?INFO("osiris_replica:init/1: next offset ~b",
                   [NextOffset]),
             %% spawn reader process on leader node
-            {ok, HostName} = inet:gethostname(),
-            {ok, Ips} = inet:getaddrs(HostName, inet),
-            Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
+
             %% HostName: append the HostName to the Ip(s) list: in some cases
             %% like NAT or redirect the local ip addresses are not enough.
             %% ex: In docker with host network configuration the `inet:getaddrs`
@@ -181,17 +179,26 @@ init(#{name := Name,
             %% outside the docker image (host machine).
             %% The host name is the last to leave the compatibility.
             %% See: rabbitmq/rabbitmq-server#3510
+            {ok, HostName} = inet:gethostname(),
 
-            %% HostNameFromHost: The rabbit@hostname from host can be different
-            %% from the machine host name.
-            %% In case of docker with bridge and extra_hosts, the result can be like:
-            %% rabbit@hostmachine but the docker hostname is a docker standard name
-            %% like: `114f4317c264`
-            %% 99% of the time the HostNameFromHost is equal to HostName.
+            %% Ips: are the first values used to connect the
+            %% replicas
+            {ok, Ips} = inet:getaddrs(HostName, inet),
+
+            %% HostNameFromHost: The hostname value from RABBITMQ_NODENAME
+            %% can be different from the machine hostname.
+            %% In case of docker with bridge and extra_hosts the use case can be:
+            %% RABBITMQ_NODENAME=rabbit@my-domain
+            %% docker hostname = "114f4317c264"
+            %% the HostNameFromHost will be "my-domain".
+            %% btw 99% of the time the HostNameFromHost is equal to HostName.
             %% see: rabbitmq/osiris/issues/53 for more details
-            IpsHosts = maybe_add_hostname_from_node(Ips, HostName,
-              osiris_util:hostname_from_node()),
+            HostNameFromHost = osiris_util:hostname_from_node(),
 
+            IpsHosts = maybe_add_hostname_from_node(Ips, HostName,
+              HostNameFromHost),
+
+            Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
             ?DEBUG("osiris_replica:init/1: available hosts: ~w",
             [IpsHosts]),
             ReplicaReaderConf =
