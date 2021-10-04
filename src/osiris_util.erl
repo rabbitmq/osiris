@@ -61,7 +61,7 @@ lists_find(Pred, [Item | Rem]) ->
 
 hostname_from_node() ->
   case re:split(
-    rabbit_data_coercion:to_list(node()), "@",
+    atom_to_list(node()), "@",
     [{return, list}, {parts, 2}])
   of
     [_, Hostname] ->
