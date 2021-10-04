@@ -62,7 +62,7 @@ all_tests() ->
      writers_retention,
      single_node_reader_counters,
      cluster_reader_counters,
-     may_add_host_name].
+      combine_ips_hosts_test].
 
 -define(BIN_SIZE, 800).
 
