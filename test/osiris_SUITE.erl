@@ -295,8 +295,9 @@ cluster_reader_counters(Config) ->
 may_add_host_name(_Config) ->
   Ip = ["192.168.23.23"],
   HostName = "myhostname.com",
-  ?assertEqual(["192.168.23.23","myhostname.com"],
+  ?assertEqual(["192.168.23.23", "myhostname.com"],
     osiris_replica:maybe_add_hostname_from_node(Ip, HostName, HostName)),
+
   HostNameFromNode = osiris_util:hostname_from_node(),
   ?assertEqual(["192.168.23.23","myhostname.com", HostNameFromNode],
     osiris_replica:maybe_add_hostname_from_node(Ip, HostName,
