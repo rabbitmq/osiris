@@ -20,7 +20,7 @@
          stop/2,
          delete/2]).
 %% Test
--export([get_port/1]).
+-export([get_port/1, maybe_add_hostname_from_node/3]).
 %% gen_server callbacks
 -export([init/1,
          handle_call/3,
@@ -174,14 +174,24 @@ init(#{name := Name,
             {ok, HostName} = inet:gethostname(),
             {ok, Ips} = inet:getaddrs(HostName, inet),
             Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
-            %% append the HostName to the Ip(s) list: in some cases
+            %% HostName: append the HostName to the Ip(s) list: in some cases
             %% like NAT or redirect the local ip addresses are not enough.
             %% ex: In docker with host network configuration the `inet:getaddrs`
             %% are only the IP(s) inside docker but the dns lookup happens
             %% outside the docker image (host machine).
             %% The host name is the last to leave the compatibility.
             %% See: rabbitmq/rabbitmq-server#3510
-            IpsHosts = lists:append(Ips, [HostName]),
+
+            %% HostNameFromHost: The rabbit@hostname from host can be different
+            %% from the machine host name.
+            %% In case of docker with bridge and extra_hosts, the result can be like:
+            %% rabbit@hostmachine but the docker hostname is a docker standard name
+            %% like: `114f4317c264`
+            %% 99% of the time the HostNameFromHost is equal to HostName.
+            %% see: rabbitmq/osiris/issues/53 for more details
+            IpsHosts = maybe_add_hostname_from_node(Ips, HostName,
+              osiris_util:hostname_from_node()),
+
             ?DEBUG("osiris_replica:init/1: available hosts: ~w",
             [IpsHosts]),
             ReplicaReaderConf =
@@ -233,6 +243,12 @@ init(#{name := Name,
                       log = Log,
                       parse_state = undefined}}
     end.
+
+maybe_add_hostname_from_node(IPs, HostName, HostNameFromHost) when
+  HostName =/= HostNameFromHost ->
+  lists:append(IPs, [HostName, HostNameFromHost]);
+maybe_add_hostname_from_node(IPs, HostName, _HostNameFromHost) ->
+  lists:append(IPs, [HostName]).
 
 open_tcp_port(_RcvBuf, M, M) ->
     throw({error, all_busy});
