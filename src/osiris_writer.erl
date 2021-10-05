@@ -303,7 +303,6 @@ terminate(Reason,
     ok.
 
 format_status(#?MODULE{cfg = #cfg{name = Name,
-                                  directory = Dir,
                                   replicas = Replicas,
                                   reference = ExtRef},
                        log = Log,
@@ -314,7 +313,6 @@ format_status(#?MODULE{cfg = #cfg{name = Name,
                        offset_listeners = OffsetListeners,
                        committed_offset = CommittedOffset}) ->
     #{name => Name,
-      directory => Dir,
       external_reference => ExtRef,
       replica_nodes => Replicas,
       log => osiris_log:format_status(Log),

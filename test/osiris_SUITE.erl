@@ -126,6 +126,7 @@ single_node_write(Config) ->
         exit(osiris_written_timeout)
     end,
     ?assertEqual(42, osiris:fetch_writer_seq(Leader, Wid)),
+    ct:pal("format status~n~p", [sys:get_status(Leader)]),
     ok.
 
 cluster_write(Config) ->

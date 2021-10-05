@@ -1585,8 +1585,35 @@ overview(Dir) ->
     end.
 
 -spec format_status(state()) -> map().
-format_status(#?MODULE{}) ->
-    #{}.
+format_status(#?MODULE{cfg = #cfg{directory = Dir,
+                                  max_segment_size_bytes  = MSSB,
+                                  max_segment_size_chunks  = MSSC,
+                                  tracking_config = TrkConf,
+                                  retention = Retention},
+                       mode = Mode0,
+                       current_file = File}) ->
+    Mode = case Mode0 of
+               #read{type = T,
+                     next_offset = Next} ->
+                   #{mode => read,
+                     type => T,
+                     next_offset => Next};
+               #write{type = T,
+                      current_epoch =E,
+                      tail_info = Tail} ->
+                   #{mode => write,
+                     type => T,
+                     tail => Tail,
+                     epoch => E}
+           end,
+
+    #{mode => Mode,
+      directory => Dir,
+      max_segment_size_bytes  => MSSB,
+      max_segment_size_chunks  => MSSC,
+      tracking_config => TrkConf,
+      retention => Retention,
+      file => filename:basename(File)}.
 
 -spec update_retention([retention_spec()], state()) -> state().
 update_retention(Retention,
