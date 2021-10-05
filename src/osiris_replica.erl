@@ -20,7 +20,7 @@
          stop/2,
          delete/2]).
 %% Test
--export([get_port/1]).
+-export([get_port/1, combine_ips_hosts/3]).
 %% gen_server callbacks
 -export([init/1,
          handle_call/3,
@@ -171,17 +171,34 @@ init(#{name := Name,
             ?INFO("osiris_replica:init/1: next offset ~b",
                   [NextOffset]),
             %% spawn reader process on leader node
-            {ok, HostName} = inet:gethostname(),
-            {ok, Ips} = inet:getaddrs(HostName, inet),
-            Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
-            %% append the HostName to the Ip(s) list: in some cases
+
+            %% HostName: append the HostName to the Ip(s) list: in some cases
             %% like NAT or redirect the local ip addresses are not enough.
             %% ex: In docker with host network configuration the `inet:getaddrs`
             %% are only the IP(s) inside docker but the dns lookup happens
             %% outside the docker image (host machine).
             %% The host name is the last to leave the compatibility.
             %% See: rabbitmq/rabbitmq-server#3510
-            IpsHosts = lists:append(Ips, [HostName]),
+            {ok, HostName} = inet:gethostname(),
+
+            %% Ips: are the first values used to connect the
+            %% replicas
+            {ok, Ips} = inet:getaddrs(HostName, inet),
+
+            %% HostNameFromHost: The hostname value from RABBITMQ_NODENAME
+            %% can be different from the machine hostname.
+            %% In case of docker with bridge and extra_hosts the use case can be:
+            %% RABBITMQ_NODENAME=rabbit@my-domain
+            %% docker hostname = "114f4317c264"
+            %% the HostNameFromHost will be "my-domain".
+            %% btw 99% of the time the HostNameFromHost is equal to HostName.
+            %% see: rabbitmq/osiris/issues/53 for more details
+            HostNameFromHost = osiris_util:hostname_from_node(),
+
+            IpsHosts = combine_ips_hosts(Ips, HostName,
+              HostNameFromHost),
+
+            Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
             ?DEBUG("osiris_replica:init/1: available hosts: ~w",
             [IpsHosts]),
             ReplicaReaderConf =
@@ -233,6 +250,12 @@ init(#{name := Name,
                       log = Log,
                       parse_state = undefined}}
     end.
+
+combine_ips_hosts(IPs, HostName, HostNameFromHost) when
+  HostName =/= HostNameFromHost ->
+  lists:append(IPs, [HostName, HostNameFromHost]);
+combine_ips_hosts(IPs, HostName, _HostNameFromHost) ->
+  lists:append(IPs, [HostName]).
 
 open_tcp_port(_RcvBuf, M, M) ->
     throw({error, all_busy});

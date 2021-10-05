@@ -10,7 +10,8 @@
 -export([validate_base64uri/1,
          to_base64uri/1,
          id/1,
-         lists_find/2]).
+         lists_find/2,
+         hostname_from_node/0]).
 
 -define(BASE64_URI_CHARS,
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01"
@@ -56,3 +57,16 @@ lists_find(Pred, [Item | Rem]) ->
         false ->
             lists_find(Pred, Rem)
     end.
+
+
+hostname_from_node() ->
+  case re:split(
+    atom_to_list(node()), "@",
+    [{return, list}, {parts, 2}])
+  of
+    [_, Hostname] ->
+      Hostname;
+    [_] ->
+      {ok, H} = inet:gethostname(),
+      rabbit_data_coercion:to_list(H)
+  end.

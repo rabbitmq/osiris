@@ -61,7 +61,8 @@ all_tests() ->
      cluster_deduplication,
      writers_retention,
      single_node_reader_counters,
-     cluster_reader_counters].
+     cluster_reader_counters,
+      combine_ips_hosts_test].
 
 -define(BIN_SIZE, 800).
 
@@ -289,6 +290,19 @@ cluster_reader_counters(Config) ->
     osiris_log:close(Log1),
     Overview4 = osiris_counters:overview(),
     ?assertEqual(2, maps:get(readers, maps:get({'osiris_writer', Name}, Overview4))).
+
+
+combine_ips_hosts_test(_Config) ->
+  Ip = ["192.168.23.23"],
+  HostName = "myhostname.com",
+  ?assertEqual(["192.168.23.23", "myhostname.com"],
+    osiris_replica:combine_ips_hosts(Ip, HostName, HostName)),
+
+  HostNameFromNode = osiris_util:hostname_from_node(),
+  ?assertEqual(["192.168.23.23","myhostname.com", HostNameFromNode],
+    osiris_replica:combine_ips_hosts(Ip, HostName,
+      HostNameFromNode)).
+
 
 single_node_offset_listener2(Config) ->
     %% writes before registering
@@ -1505,3 +1519,5 @@ node_setup(DataDir) ->
 simple(Bin) ->
     S = byte_size(Bin),
     <<0:1, S:31, Bin/binary>>.
+
+
