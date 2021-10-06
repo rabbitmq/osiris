@@ -1,7 +1,7 @@
 -module(osiris_tracking).
 
 -export([
-         init/1,
+         init/2,
          add/5,
          flush/1,
          snapshot/3,
@@ -9,16 +9,19 @@
          append_trailer/3,
          needs_flush/1,
          is_empty/1,
-         overview/1
+         overview/1,
+         max_sequences/1
          ]).
 
 
 -define(TRK_TYPE_SEQUENCE, 0).
 -define(TRK_TYPE_OFFSET, 1).
 -define(TRK_TYPE_TIMESTAMP, 2).
--define(MAX_WRITERS, 255).
+-define(MAX_SEQUENCES, 255).
 %% holds static or rarely changing fields
--record(cfg, {}).
+-record(cfg, {max_sequences = ?MAX_SEQUENCES :: non_neg_integer()}).
+
+-type config() :: #{max_sequences => non_neg_integer()}.
 
 -type tracking_id() :: binary().
 -type tracking_type() :: sequence | offset | timestamp.
@@ -36,6 +39,7 @@
 
 -export_type([
               state/0,
+              config/0,
               tracking_type/0,
               tracking_id/0
               ]).
@@ -45,11 +49,15 @@ init_pending() ->
       offsets => #{},
       timestamps => #{}}.
 
--spec init(undefined | binary()) -> state().
-init(undefined) ->
-    #?MODULE{};
-init(Bin) when is_binary(Bin) ->
-    parse_snapshot(Bin, #?MODULE{}).
+-spec init(undefined | binary(), config() | state()) -> state().
+init(From, Config) when is_map(Config) ->
+    init(From, #?MODULE{cfg =
+                        #cfg{max_sequences =
+                             maps:get(max_sequences, Config, ?MAX_SEQUENCES)}});
+init(undefined, #?MODULE{cfg = Cfg}) ->
+    #?MODULE{cfg = Cfg};
+init(Bin, #?MODULE{cfg = Cfg}) when is_binary(Bin) ->
+    parse_snapshot(Bin, #?MODULE{cfg = Cfg}).
 
 -spec add(tracking_id(), tracking_type(), tracking(), osiris:offset() | undefined,
           state()) -> state().
@@ -90,16 +98,18 @@ flush(#?MODULE{pending = Pending} = State) ->
 
 -spec snapshot(osiris:offset(), osiris:timestamp(), state()) ->
     {iodata(), state()}.
-snapshot(FirstOffset, FirstTimestamp, #?MODULE{sequences = Seqs0,
-                                               offsets = Offsets0,
-                                               timestamps = Timestamps0} = State) ->
+snapshot(FirstOffset, FirstTimestamp,
+         #?MODULE{cfg = #cfg{max_sequences = MaxSeqs},
+                  sequences = Seqs0,
+                  offsets = Offsets0,
+                  timestamps = Timestamps0} = State) ->
     %% discard any tracking info with offsets lower than the first offset
     %% in the stream
     Offsets = maps:filter(fun(_, Off) -> Off >= FirstOffset end, Offsets0),
     %% discard any tracking info with timestamps lower than the first
     %% timestamp in the stream
     Timestamps = maps:filter(fun(_, Ts) -> Ts >= FirstTimestamp end, Timestamps0),
-    Seqs = trim_writers(?MAX_WRITERS, Seqs0),
+    Seqs = trim_sequences(MaxSeqs, Seqs0),
 
     Data0 = maps:fold(fun(TrkId, {ChId, Seq} , Acc) ->
                                 [<<?TRK_TYPE_SEQUENCE:8/unsigned,
@@ -178,6 +188,10 @@ overview(#?MODULE{sequences = Seqs, offsets = Offs, timestamps = Timestamps}) ->
       sequences => Seqs,
       timestamps => Timestamps}.
 
+-spec max_sequences(state()) -> non_neg_integer().
+max_sequences(#?MODULE{cfg = #cfg{max_sequences = MaxSequences}}) ->
+    MaxSequences.
+
 %% INTERNAL
 update_tracking(TrkId, sequence, Tracking, ChId,
                 #?MODULE{sequences = Seqs0} = State) when is_integer(ChId) ->
@@ -232,10 +246,10 @@ parse_trailer(<<?TRK_TYPE_TIMESTAMP:8/unsigned,
               ChId, #?MODULE{timestamps = Timestamps} = State) ->
     parse_trailer(Rem, ChId, State#?MODULE{timestamps = Timestamps#{TrkId => Ts}}).
 
-trim_writers(Max, Writers) when map_size(Writers) =< Max ->
-    Writers;
-trim_writers(Max, Writers) ->
+trim_sequences(Max, Sequences) when map_size(Sequences) =< Max ->
+     Sequences;
+trim_sequences(Max, Sequences) ->
     Sorted = lists:sort(fun ({_, {C0, _}}, {_, {C1, _}}) ->
                                 C0 < C1
-                        end, maps:to_list(Writers)),
-    maps:from_list(lists:nthtail(map_size(Writers) - Max, Sorted)).
+                        end, maps:to_list(Sequences)),
+    maps:from_list(lists:nthtail(map_size(Sequences) - Max, Sorted)).

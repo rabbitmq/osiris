@@ -27,7 +27,8 @@
          handle_cast/2,
          handle_info/2,
          terminate/2,
-         code_change/3]).
+         code_change/3,
+         format_status/1]).
 
 %% holds static or rarely changing fields
 -record(cfg,
@@ -474,6 +475,20 @@ terminate(Reason, #?MODULE{cfg = #cfg{name = Name}, log = Log}) ->
 %%--------------------------------------------------------------------
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
+
+format_status(#?MODULE{cfg = #cfg{name = Name,
+                                  reference = ExtRef},
+                       log = Log,
+                       parse_state = ParseState,
+                       offset_listeners = OffsetListeners,
+                       committed_offset = CommittedOffset}) ->
+    #{name => Name,
+      external_reference => ExtRef,
+      has_parse_state => ParseState /= undefined,
+      log => osiris_log:format_status(Log),
+      num_offset_listeners => length(OffsetListeners),
+      committed_offset => CommittedOffset
+     }.
 
 %%%===================================================================
 %%% Internal functions

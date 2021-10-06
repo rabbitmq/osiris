@@ -38,6 +38,7 @@
          counters_ref/1,
          close/1,
          overview/1,
+         format_status/1,
          update_retention/2,
          evaluate_retention/2,
          directory/1,
@@ -329,6 +330,8 @@
       epoch => non_neg_integer(),
       first_offset_fun => fun((integer()) -> ok),
       max_segment_size_bytes => non_neg_integer(),
+      %% max number of writer ids to keep around
+      tracking_config => osiris_tracking:config(),
       counter_spec => counter_spec(),
       %% used when initialising a log from an offset other than 0
       initial_offset => osiris:offset()}.
@@ -354,6 +357,7 @@
          name :: string(),
          max_segment_size_bytes = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer(),
          max_segment_size_chunks = ?DEFAULT_MAX_SEGMENT_SIZE_C :: non_neg_integer(),
+         tracking_config = #{} :: osiris_tracking:config(),
          retention = [] :: [osiris:retention_spec()],
          counter :: counters:counters_ref(),
          counter_id :: term(),
@@ -454,6 +458,7 @@ init(#{dir := Dir,
                name = Name,
                max_segment_size_bytes = MaxSizeBytes,
                max_segment_size_chunks = MaxSizeChunks,
+               tracking_config = maps:get(tracking_config, Config, #{}),
                retention = Retention,
                counter = Cnt,
                counter_id = counter_id(Config),
@@ -1579,6 +1584,37 @@ overview(Dir) ->
             {Range, OffsEpochs}
     end.
 
+-spec format_status(state()) -> map().
+format_status(#?MODULE{cfg = #cfg{directory = Dir,
+                                  max_segment_size_bytes  = MSSB,
+                                  max_segment_size_chunks  = MSSC,
+                                  tracking_config = TrkConf,
+                                  retention = Retention},
+                       mode = Mode0,
+                       current_file = File}) ->
+    Mode = case Mode0 of
+               #read{type = T,
+                     next_offset = Next} ->
+                   #{mode => read,
+                     type => T,
+                     next_offset => Next};
+               #write{type = T,
+                      current_epoch =E,
+                      tail_info = Tail} ->
+                   #{mode => write,
+                     type => T,
+                     tail => Tail,
+                     epoch => E}
+           end,
+
+    #{mode => Mode,
+      directory => Dir,
+      max_segment_size_bytes  => MSSB,
+      max_segment_size_chunks  => MSSC,
+      tracking_config => TrkConf,
+      retention => Retention,
+      file => filename:basename(File)}.
+
 -spec update_retention([retention_spec()], state()) -> state().
 update_retention(Retention,
                  #?MODULE{cfg = #cfg{retention = Retention0} = Cfg} = State0)
@@ -2087,14 +2123,15 @@ part(Len, [B | L]) when Len > 0 ->
 
 -spec recover_tracking(state()) ->
     osiris_tracking:state().
-recover_tracking(#?MODULE{fd = Fd}) ->
+recover_tracking(#?MODULE{cfg = #cfg{tracking_config = TrkConfig},
+                          fd = Fd}) ->
     %% TODO: if the first chunk in the segment isn't a tracking snapshot and
     %% there are prior segments we could scan at least two segments increasing
     %% the chance of encountering a snapshot and thus ensure we don't miss any
     %% tracking entries
     {ok, 0} = file:position(Fd, 0),
     {ok, ?LOG_HEADER_SIZE} = file:position(Fd, ?LOG_HEADER_SIZE),
-    Trk = osiris_tracking:init(undefined),
+    Trk = osiris_tracking:init(undefined, TrkConfig),
     recover_tracking(Fd, Trk).
 
 recover_tracking(Fd, Trk0) ->
@@ -2125,7 +2162,7 @@ recover_tracking(Fd, Trk0) ->
                 ?CHNK_TRK_SNAPSHOT ->
                     {ok, <<0:1, S:31, Data:S/binary>>} = file:read(Fd, Size),
                     {ok, _} = file:read(Fd, TSize),
-                    Trk = osiris_tracking:init(Data),
+                    Trk = osiris_tracking:init(Data, Trk0),
                     recover_tracking(Fd, Trk);
                 ?CHNK_USER ->
                     {ok, _} = file:position(Fd, {cur, Size}),
