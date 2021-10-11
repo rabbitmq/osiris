@@ -62,8 +62,10 @@ maybe_connect(tcp, [H | T], Port, Options) ->
     end;
 maybe_connect(ssl, [H | T], Port, Options) ->
     ?DEBUG("trying to connect to ~p", [H]),
-    case ssl:connect(H, Port, Options ++
-        application:get_env(osiris, replication_client_ssl_options, [])) of
+    Opts = Options ++
+        application:get_env(osiris, replication_client_ssl_options, []) ++
+        maybe_add_sni_option(H),
+    case ssl:connect(H, Port, Opts) of
         {ok, Sock} ->
             {ok, Sock, H};
         {error, {tls_alert, {handshake_failure, _}}} ->
@@ -74,6 +76,13 @@ maybe_connect(ssl, [H | T], Port, Options) ->
             ?DEBUG("error while trying to establish TLS connection ~p", [E]),
             {error, connection_refused}
     end.
+
+maybe_add_sni_option(H) when is_binary(H) ->
+    [{server_name_indication, binary_to_list(H)}];
+maybe_add_sni_option(H) when is_list(H) ->
+    [{server_name_indication, H}];
+maybe_add_sni_option(_) ->
+    [].
 
 %%%===================================================================
 %%% API functions

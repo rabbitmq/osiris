@@ -89,7 +89,7 @@ init_per_testcase(TestCase, Config) ->
     application:stop(osiris),
     application:load(osiris),
     application:set_env(osiris, data_dir, Dir),
-    ok = extra_init(TestCase, Config),
+    ok = extra_init(TestCase),
     {ok, Apps} = application:ensure_all_started(osiris),
     ok = logger:set_primary_config(level, all),
     % file:make_dir(Dir),
@@ -99,27 +99,29 @@ init_per_testcase(TestCase, Config) ->
      {started_apps, Apps}
      | Config].
 
-extra_init(cluster_write_replication_tls, Config) ->
+extra_init(cluster_write_replication_tls) ->
+    TlsGenDir = os:getenv("DEPS_DIR") ++ "/tls_gen/basic",
+    os:cmd("make -C " ++ TlsGenDir),
+    TlsConfDir = TlsGenDir ++ "/result/",
     application:set_env(osiris, replication_transport, ssl),
-    ConfDir = ?config(data_dir, Config) ++ "tls/",
     application:set_env(osiris, replication_server_ssl_options, [
-        {cacertfile, ConfDir ++ "ca_certificate.pem"},
-        {certfile, ConfDir ++ "server_certificate.pem"},
-        {keyfile, ConfDir ++ "server_key.pem"},
+        {cacertfile, TlsConfDir ++ "ca_certificate.pem"},
+        {certfile, TlsConfDir ++ "server_certificate.pem"},
+        {keyfile, TlsConfDir ++ "server_key.pem"},
         {secure_renegotiate, true},
         {verify,verify_peer},
         {fail_if_no_peer_cert, true}
     ]),
     application:set_env(osiris, replication_client_ssl_options, [
-        {cacertfile, ConfDir ++ "ca_certificate.pem"},
-        {certfile, ConfDir ++ "client_certificate.pem"},
-        {keyfile, ConfDir ++ "client_key.pem"},
+        {cacertfile, TlsConfDir ++ "ca_certificate.pem"},
+        {certfile, TlsConfDir ++ "client_certificate.pem"},
+        {keyfile, TlsConfDir ++ "client_key.pem"},
         {secure_renegotiate, true},
         {verify,verify_peer},
         {fail_if_no_peer_cert, true}
     ]),
     ok;
-extra_init(_, _) ->
+extra_init(_) ->
     application:set_env(osiris, replication_transport, tcp),
     ok.
 

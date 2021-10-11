@@ -16,7 +16,8 @@ dep_seshat = git https://github.com/rabbitmq/seshat.git main
 DEPS = gen_batch_server seshat
 
 # TEST_DEPS=eunit_formatters looking_glass
-TEST_DEPS=eunit_formatters
+dep_tls_gen = git https://github.com/michaelklishin/tls-gen.git master
+TEST_DEPS=eunit_formatters tls_gen
 
 dep_looking_glass = git https://github.com/rabbitmq/looking-glass.git master
 # PLT_APPS += eunit syntax_tools erts kernel stdlib common_test inets ssh ssl meck looking_glass gen_batch_server inet_tcp_proxy
