@@ -350,6 +350,7 @@
       trailer_size => non_neg_integer(),
       header_data => binary(),
       position => non_neg_integer()}.
+-type transport() :: tcp | ssl.
 
 %% holds static or rarely changing fields
 -record(cfg,
@@ -370,7 +371,7 @@
          offset_ref :: undefined | atomics:atomics_ref(),
          last_offset = 0 :: offset(),
          next_offset = 0 :: offset(),
-         transport :: tcp | ssl,
+         transport :: transport(),
          chunk_selector :: all | user_data}).
 -record(write,
         {type = writer :: writer | acceptor,

@@ -101,10 +101,10 @@ overview(Pid) when node(Pid) == node() ->
             {error, no_process}
     end.
 
-init_data_reader(Pid, TailInfo, {_, _} = CounterSpec)
+init_data_reader(Pid, TailInfo, Config)
   when node(Pid) == node() ->
     Ctx0 = gen_batch_server:call(Pid, get_reader_context),
-    Ctx = Ctx0#{counter_spec => CounterSpec},
+    Ctx = maps:merge(Ctx0, Config),
     osiris_log:init_data_reader(TailInfo, Ctx).
 
 register_data_listener(Pid, Offset) ->
