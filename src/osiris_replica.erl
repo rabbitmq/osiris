@@ -56,7 +56,8 @@
          log :: osiris_log:state(),
          committed_offset = -1 :: -1 | osiris:offset(),
          offset_listeners = [] ::
-             [{pid(), osiris:offset(), mfa() | undefined}]}).
+             [{pid(), osiris:offset(), mfa() | undefined}]
+        }).
 
 -opaque state() :: #?MODULE{}.
 
@@ -203,7 +204,7 @@ init(#{name := Name,
               HostNameFromHost),
 
             Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
-            ?DEBUG("osiris_repliaca:init/1: available hosts: ~p", [IpsHosts]),
+            ?DEBUG("osiris_replica:init/1: available hosts: ~p", [IpsHosts]),
             ReplicaReaderConf =
             #{hosts => IpsHosts,
               port => Port,
@@ -308,13 +309,23 @@ accept(tcp, LSock, Process) ->
     _ = gen_tcp:close(LSock),
     ok;
 accept(ssl, LSock, Process) ->
+    ?DEBUG("~s: Starting listening on socket for replication over TLS", [?MODULE]),
     {ok, Sock0} = ssl:transport_accept(LSock),
-    {ok, Sock} = ssl:handshake(Sock0, application:get_env(osiris, replication_server_ssl_options, [])),
-    ?DEBUG("~s: TLS socket accepted opts ~w",
-           [?MODULE, ssl:getopts(Sock, [buffer, recbuf])]),
-    Process ! {socket, Sock},
-    ssl:controlling_process(Sock, Process),
-    _ = ssl:close(LSock),
+    case ssl:handshake(Sock0, application:get_env(osiris, replication_server_ssl_options, [])) of
+        {ok, Sock} ->
+            ?DEBUG("~s: TLS socket accepted opts ~w",
+               [?MODULE, ssl:getopts(Sock, [buffer, recbuf])]),
+            Process ! {socket, Sock},
+            ssl:controlling_process(Sock, Process),
+            _ = ssl:close(LSock);
+        {error, {tls_alert, {handshake_failure, _}}} ->
+            ?DEBUG("~s: Handshake failure, restarting listener...", [?MODULE]),
+            spawn_link(fun() -> accept(ssl, LSock, Process) end);
+        {error, E} ->
+            ?DEBUG("~s: Error during handshake ~p", [?MODULE, E]);
+        H ->
+            ?DEBUG("~s: Unexpected result from TLS handshake ~p", [?MODULE, H])
+    end,
     ok.
 
 %%--------------------------------------------------------------------

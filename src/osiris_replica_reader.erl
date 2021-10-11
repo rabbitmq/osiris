@@ -66,9 +66,13 @@ maybe_connect(ssl, [H | T], Port, Options) ->
         application:get_env(osiris, replication_client_ssl_options, [])) of
         {ok, Sock} ->
             {ok, Sock, H};
-        {error, _} ->
+        {error, {tls_alert, {handshake_failure, _}}} ->
             ?WARN("osiris replica TLS connection refused, host:~p - port: ~p", [H, Port]),
-            maybe_connect(ssl, T, Port, Options)
+            maybe_connect(ssl, T, Port, Options);
+        {error, E} ->
+            ?WARN("osiris replica TLS connection refused, host:~p - port: ~p", [H, Port]),
+            ?DEBUG("error while trying to establish TLS connection ~p", [E]),
+            {error, connection_refused}
     end.
 
 %%%===================================================================
