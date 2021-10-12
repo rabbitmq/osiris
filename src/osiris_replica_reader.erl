@@ -61,7 +61,7 @@ maybe_connect(tcp, [H | T], Port, Options) ->
             maybe_connect(tcp, T, Port, Options)
     end;
 maybe_connect(ssl, [H | T], Port, Options) ->
-    ?DEBUG("trying to connect to ~p", [H]),
+    ?DEBUG("trying to establish TLS connection to ~p", [H]),
     Opts = Options ++
         application:get_env(osiris, replication_client_ssl_options, []) ++
         maybe_add_sni_option(H),
