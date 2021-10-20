@@ -115,7 +115,7 @@ init(#{hosts := Hosts,
                 {ok, Log} =
                     osiris_writer:init_data_reader(LeaderPid, TailInfo, CntSpec),
                 CntRef = osiris_log:counters_ref(Log),
-                ?INFO("starting replica reader ~s at offset ~b Args: ~p",
+                ?INFO("starting replica reader ~s at offset ~b Args: ~0p",
                       [Name, osiris_log:next_offset(Log), Args]),
 
                 ok = gen_tcp:send(Sock, Token),
