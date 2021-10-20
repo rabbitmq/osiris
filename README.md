@@ -6,7 +6,7 @@ Osiris is a foundation of the log-based streaming subsystem for RabbitMQ.
 
 ## Project Maturity
 
-Work in progress. Subject to frequent changes.
+Stable, shipped in RabbitMQ 3.9.
 
 ## Documentation
 
