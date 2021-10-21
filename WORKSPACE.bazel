@@ -33,13 +33,13 @@ github_bazel_erlang_lib(
 
 http_archive(
     name = "tls_gen",
-    urls = ["https://github.com/michaelklishin/tls-gen/archive/refs/heads/master.zip"],
-    strip_prefix = "tls-gen-master",
     build_file_content = """
 filegroup(
     name = "basic",
     srcs = glob(["common.mk", "basic/**/*", "tls_gen/**/*"]),
     visibility = ["//visibility:public"],
 )
-"""
+""",
+    strip_prefix = "tls-gen-master",
+    urls = ["https://github.com/michaelklishin/tls-gen/archive/refs/heads/master.zip"],
 )

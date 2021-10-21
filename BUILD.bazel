@@ -60,10 +60,14 @@ dialyze(
 
 [ct_suite(
     name = f.replace("test/", "").replace(".erl", ""),
-) for f in glob(["test/*_SUITE.erl"], exclude = ["test/osiris_SUITE.erl"])]
+) for f in glob(
+    ["test/*_SUITE.erl"],
+    exclude = ["test/osiris_SUITE.erl"],
+)]
 
 ct_suite(
     name = "osiris_SUITE",
+    size = "large",
     data = [
         "@tls_gen//:basic",
     ],
