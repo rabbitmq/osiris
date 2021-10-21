@@ -67,7 +67,6 @@ dialyze(
 
 ct_suite(
     name = "osiris_SUITE",
-    size = "large",
     data = [
         "@tls_gen//:basic",
     ],
