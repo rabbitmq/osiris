@@ -101,7 +101,9 @@ init_per_testcase(TestCase, Config) ->
 
 extra_init(cluster_write_replication_tls) ->
     TlsGenDir = os:getenv("DEPS_DIR") ++ "/tls_gen/basic",
-    os:cmd("make -C " ++ TlsGenDir),
+    TlsGenCmd = "make -C " ++ TlsGenDir,
+    TlsGenBasicOutput = os:cmd(TlsGenCmd),
+    ct:pal(?LOW_IMPORTANCE, "~s: ~s", [TlsGenCmd, TlsGenBasicOutput]),
     TlsConfDir = TlsGenDir ++ "/result/",
     application:set_env(osiris, replication_transport, ssl),
     application:set_env(osiris, replication_server_ssl_options, [
