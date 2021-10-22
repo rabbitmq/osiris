@@ -17,12 +17,9 @@
          get_replication_configuration_from_tls_dist/0,
          get_replication_configuration_from_tls_dist/1]).
 
--ifdef(TEST).
-
+%% For testing
 -export([inet_tls_enabled/1,
          replication_over_tls_configuration/2]).
-
--endif.
 
 -define(BASE64_URI_CHARS,
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01"
@@ -234,6 +231,4 @@ inet_tls_enabled([]) ->
 inet_tls_enabled([{proto_dist, ["inet_tls"]} | _]) ->
     true;
 inet_tls_enabled([_Opt | Tail]) ->
-    inet_tls_enabled(Tail);
-inet_tls_enabled(_Opt) ->
-    false.
+    inet_tls_enabled(Tail).
