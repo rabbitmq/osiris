@@ -33,7 +33,7 @@ jobs:
     strategy:
       matrix:
         erlang_version:
-        - "23.2"
+        - "23.3"
         - "24.0"
     steps:
     - name: CHECKOUT
