@@ -9,23 +9,22 @@ on:
 jobs:
 
   build:
-
     runs-on: ubuntu-latest
-
     strategy:
       matrix:
         erlang_version:
         - "23.3.4.5"
         - "24.0"
-
-    container:
-      image: erlang:${{ matrix.erlang_version }}
-
     steps:
-    - uses: actions/checkout@v2
-    - name: Build
+    - name: CHECKOUT
+      uses: actions/checkout@v2
+    - name: CONFIGURE ERLANG
+      uses: gleam-lang/setup-erlang@v1.1.2
+      with:
+        otp-version: ${{ matrix.erlang_version }}
+    - name: BUILD
       run: make
-    - name: Check
+    - name: CHECK
       run: make check
 
   build-bazel:
