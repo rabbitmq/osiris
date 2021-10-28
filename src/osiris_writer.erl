@@ -386,7 +386,7 @@ handle_command({cast, {write, Pid, WriterId, Corr, R}},
              Replies,
              Corrs0,
              Trk,
-             [{ChId, Pid, WriterId, Corr} | Dupes]}
+             Dupes ++ [{ChId, Pid, WriterId, Corr}]}
     end;
 handle_command({cast, {write_tracking, TrackingId, TrackingType, TrackingData}},
                {#?MODULE{log = Log} = State, Records, Replies, Corrs, Trk0, Dupes}) ->
