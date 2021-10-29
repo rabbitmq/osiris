@@ -348,7 +348,7 @@ handle_duplicates(CommittedOffset, Dupes, #cfg{} = Cfg)
     when is_list(Dupes) ->
     %% turn list of dupes into corr map
     {Rem, Corrs} =
-        lists:foldl(fun ({ChId, Pid, WriterId, Seq}, {Rem, Corrs0})
+        lists:foldr(fun ({ChId, Pid, WriterId, Seq}, {Rem, Corrs0})
                             when ChId =< CommittedOffset ->
                             Corrs =
                                 maps:update_with({Pid, WriterId},
@@ -386,7 +386,7 @@ handle_command({cast, {write, Pid, WriterId, Corr, R}},
              Replies,
              Corrs0,
              Trk,
-             Dupes ++ [{ChId, Pid, WriterId, Corr}]}
+             [{ChId, Pid, WriterId, Corr} | Dupes]}
     end;
 handle_command({cast, {write_tracking, TrackingId, TrackingType, TrackingData}},
                {#?MODULE{log = Log} = State, Records, Replies, Corrs, Trk0, Dupes}) ->
