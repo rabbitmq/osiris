@@ -30,7 +30,8 @@
 -record(state,
         {log :: osiris_log:state(),
          name :: string(),
-         socket :: gen_tcp:socket(),
+         transport :: osiris_log:transport(),
+         socket :: gen_tcp:socket() | ssl:sslsocket(),
          replica_pid :: pid(),
          leader_pid :: pid(),
          leader_monitor_ref :: reference(),
@@ -46,18 +47,42 @@
         ]
        ).
 
--spec maybe_connect(list(), integer(), list()) ->
+-spec maybe_connect(osiris_log:transport(), list(), integer(), list()) ->
                        {ok, term(), term()} | {error, term()}.
-maybe_connect([], _Port, _Options) ->
+maybe_connect(_, [], _Port, _Options) ->
     {error, connection_refused};
-maybe_connect([H | T], Port, Options) ->
+maybe_connect(tcp, [H | T], Port, Options) ->
+    ?DEBUG("trying to connect to ~p", [H]),
     case gen_tcp:connect(H, Port, Options) of
         {ok, Sock} ->
             {ok, Sock, H};
         {error, _} ->
             ?WARN("osiris replica connection refused, host:~p - port: ~p", [H, Port]),
-            maybe_connect(T, Port, Options)
+            maybe_connect(tcp, T, Port, Options)
+    end;
+maybe_connect(ssl, [H | T], Port, Options) ->
+    ?DEBUG("trying to establish TLS connection to ~p", [H]),
+    Opts = Options ++
+        application:get_env(osiris, replication_client_ssl_options, []) ++
+        maybe_add_sni_option(H),
+    case ssl:connect(H, Port, Opts) of
+        {ok, Sock} ->
+            {ok, Sock, H};
+        {error, {tls_alert, {handshake_failure, _}}} ->
+            ?WARN("osiris replica TLS connection refused, host:~p - port: ~p", [H, Port]),
+            maybe_connect(ssl, T, Port, Options);
+        {error, E} ->
+            ?WARN("osiris replica TLS connection refused, host:~p - port: ~p", [H, Port]),
+            ?DEBUG("error while trying to establish TLS connection ~p", [E]),
+            {error, connection_refused}
     end.
+
+maybe_add_sni_option(H) when is_binary(H) ->
+    [{server_name_indication, binary_to_list(H)}];
+maybe_add_sni_option(H) when is_list(H) ->
+    [{server_name_indication, H}];
+maybe_add_sni_option(_) ->
+    [].
 
 %%%===================================================================
 %%% API functions
@@ -93,6 +118,7 @@ stop(Pid) ->
 %%--------------------------------------------------------------------
 init(#{hosts := Hosts,
        port := Port,
+       transport := Transport,
        name := Name,
        replica_pid := ReplicaPid,
        leader_pid := LeaderPid,
@@ -103,28 +129,31 @@ init(#{hosts := Hosts,
     process_flag(trap_exit, true),
 
     SndBuf = 146988 * 10,
+    ?DEBUG("trying to connect replica to ~p", [Hosts]),
 
-    case maybe_connect(Hosts, Port,
+    case maybe_connect(Transport, Hosts, Port,
                        [binary, {packet, 0}, {nodelay, true}, {sndbuf, SndBuf}])
     of
         {ok, Sock, Host} ->
             CntId = {?MODULE, ExtRef, Host, Port},
             CntSpec = {CntId, ?COUNTER_FIELDS},
+            Config = #{counter_spec => CntSpec, transport => Transport},
             %% TODO: handle errors
             try
                 {ok, Log} =
-                    osiris_writer:init_data_reader(LeaderPid, TailInfo, CntSpec),
+                    osiris_writer:init_data_reader(LeaderPid, TailInfo, Config),
                 CntRef = osiris_log:counters_ref(Log),
                 ?INFO("starting replica reader ~s at offset ~b Args: ~p",
                       [Name, osiris_log:next_offset(Log), Args]),
 
-                ok = gen_tcp:send(Sock, Token),
+                ok = send(Transport, Sock, Token),
                 %% register data listener with osiris_proc
                 ok = osiris_writer:register_data_listener(LeaderPid, StartOffset),
                 MRef = monitor(process, LeaderPid),
                 State =
                     maybe_send_committed_offset(#state{log = Log,
                                                        name = Name,
+                                                       transport = Transport,
                                                        socket = Sock,
                                                        replica_pid = ReplicaPid,
                                                        leader_pid = LeaderPid,
@@ -210,6 +239,7 @@ handle_info({osiris_offset, _, _Offs}, State0) ->
     {noreply, State};
 handle_info({'DOWN', Ref, _, _, Info},
             #state{name = Name,
+                   transport = Transport,
                    socket = Sock,
                    leader_monitor_ref = Ref} =
                 State) ->
@@ -218,11 +248,16 @@ handle_info({'DOWN', Ref, _, _, Info},
            "with ~W - exiting...",
            [Name, Info, 10]),
     %% this should be enough to make the replica shut down
-    ok = gen_tcp:close(Sock),
+    ok = close(Transport, Sock),
     {stop, Info, State};
 handle_info({tcp_closed, Socket},
             #state{name = Name, socket = Socket} = State) ->
     ?DEBUG("osiris_replica_reader: '~s' Socket closed. Exiting...",
+           [Name]),
+    {stop, normal, State};
+handle_info({ssl_closed, Socket},
+            #state{name = Name, socket = Socket} = State) ->
+    ?DEBUG("osiris_replica_reader: '~s' TLS socket closed. Exiting...",
            [Name]),
     {stop, normal, State};
 handle_info({tcp_error, Socket, Error},
@@ -231,6 +266,12 @@ handle_info({tcp_error, Socket, Error},
            "Exiting...",
            [Name, Error]),
     {stop, {tcp_error, Error}, State};
+handle_info({ssl_error, Socket, Error},
+            #state{name = Name, socket = Socket} = State) ->
+    ?DEBUG("osiris_replica_reader: '~s' TLS socket error ~p. "
+           "Exiting...",
+           [Name, Error]),
+    {stop, {ssl_error, Error}, State};
 handle_info({'EXIT', Ref, Info}, State) ->
     ?DEBUG("osiris_replica_reader:handle_info/2: EXIT received "
            "~w, Info: ~w",
@@ -300,3 +341,13 @@ maybe_send_committed_offset(#state{log = Log,
 
 formatter(Evt) ->
     Evt.
+
+send(tcp, Socket, Data) ->
+    gen_tcp:send(Socket, Data);
+send(ssl, Socket, Data) ->
+    ssl:send(Socket, Data).
+
+close(tcp, Socket) ->
+    gen_tcp:close(Socket);
+close(ssl, Socket) ->
+    ssl:close(Socket).

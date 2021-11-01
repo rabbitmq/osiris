@@ -24,7 +24,8 @@ all() ->
 
 all_tests() ->
     [single_node_write,
-     cluster_write,
+     cluster_write_replication_plain,
+     cluster_write_replication_tls,
      quorum_write,
      cluster_batch_write,
      read_validate_single_node,
@@ -62,7 +63,7 @@ all_tests() ->
      writers_retention,
      single_node_reader_counters,
      cluster_reader_counters,
-      combine_ips_hosts_test].
+     combine_ips_hosts_test].
 
 -define(BIN_SIZE, 800).
 
@@ -88,6 +89,7 @@ init_per_testcase(TestCase, Config) ->
     application:stop(osiris),
     application:load(osiris),
     application:set_env(osiris, data_dir, Dir),
+    ok = extra_init(TestCase),
     {ok, Apps} = application:ensure_all_started(osiris),
     ok = logger:set_primary_config(level, all),
     % file:make_dir(Dir),
@@ -96,6 +98,34 @@ init_per_testcase(TestCase, Config) ->
      {cluster_name, atom_to_list(TestCase)},
      {started_apps, Apps}
      | Config].
+
+extra_init(cluster_write_replication_tls) ->
+    TlsGenDir = os:getenv("DEPS_DIR") ++ "/tls_gen/basic",
+    TlsGenCmd = "make -C " ++ TlsGenDir,
+    TlsGenBasicOutput = os:cmd(TlsGenCmd),
+    ct:pal(?LOW_IMPORTANCE, "~s: ~s", [TlsGenCmd, TlsGenBasicOutput]),
+    TlsConfDir = TlsGenDir ++ "/result/",
+    application:set_env(osiris, replication_transport, ssl),
+    application:set_env(osiris, replication_server_ssl_options, [
+        {cacertfile, TlsConfDir ++ "ca_certificate.pem"},
+        {certfile, TlsConfDir ++ "server_certificate.pem"},
+        {keyfile, TlsConfDir ++ "server_key.pem"},
+        {secure_renegotiate, true},
+        {verify,verify_peer},
+        {fail_if_no_peer_cert, true}
+    ]),
+    application:set_env(osiris, replication_client_ssl_options, [
+        {cacertfile, TlsConfDir ++ "ca_certificate.pem"},
+        {certfile, TlsConfDir ++ "client_certificate.pem"},
+        {keyfile, TlsConfDir ++ "client_key.pem"},
+        {secure_renegotiate, true},
+        {verify,verify_peer},
+        {fail_if_no_peer_cert, true}
+    ]),
+    ok;
+extra_init(_) ->
+    application:set_env(osiris, replication_transport, tcp),
+    ok.
 
 end_per_testcase(_TestCase, Config) ->
     [application:stop(App)
@@ -130,12 +160,18 @@ single_node_write(Config) ->
     ct:pal("format status~n~p", [sys:get_status(Leader)]),
     ok.
 
+cluster_write_replication_plain(Config) ->
+    cluster_write(Config).
+
+cluster_write_replication_tls(Config) ->
+    cluster_write(Config).
+
 cluster_write(Config) ->
     ok = logger:set_primary_config(level, all),
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
     [LeaderNode | Replicas] =
-        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+        Nodes = [start_child_node(N, PrivDir, application:get_all_env(osiris)) || N <- [s1, s2, s3]],
     WriterId = undefined,
     Conf0 =
         #{name => Name,
@@ -258,7 +294,7 @@ single_node_reader_counters(Config) ->
     {ok, Log0} = osiris:init_reader(Leader, next, {test, []}),
     Overview = osiris_counters:overview(),
     ?assertEqual(1, maps:get(readers, maps:get({'osiris_writer', Name}, Overview))),
-    {ok, Log1} = osiris_writer:init_data_reader(Leader, {0, empty}, {'test_data', []}),
+    {ok, Log1} = osiris_writer:init_data_reader(Leader, {0, empty}, #{counter_spec => {'test_data', []}}),
     Overview1 = osiris_counters:overview(),
     ?assertEqual(2, maps:get(readers, maps:get({'osiris_writer', Name}, Overview1))),
     osiris_log:close(Log0),
@@ -283,7 +319,7 @@ cluster_reader_counters(Config) ->
     {ok, Log0} = osiris:init_reader(Leader, next, {test, []}),
     Overview1 = osiris_counters:overview(),
     ?assertEqual(3, maps:get(readers, maps:get({'osiris_writer', Name}, Overview1))),
-    {ok, Log1} = osiris_writer:init_data_reader(Leader, {0, empty}, {'test_data', []}),
+    {ok, Log1} = osiris_writer:init_data_reader(Leader, {0, empty}, #{counter_spec => {'test_data', []}}),
     Overview2 = osiris_counters:overview(),
     ?assertEqual(4, maps:get(readers, maps:get({'osiris_writer', Name}, Overview2))),
     osiris_log:close(Log0),
@@ -298,11 +334,19 @@ combine_ips_hosts_test(_Config) ->
   Ip = ["192.168.23.23"],
   HostName = "myhostname.com",
   ?assertEqual(["192.168.23.23", "myhostname.com"],
-    osiris_replica:combine_ips_hosts(Ip, HostName, HostName)),
+    osiris_replica:combine_ips_hosts(tcp, Ip, HostName, HostName)),
 
   HostNameFromNode = osiris_util:hostname_from_node(),
   ?assertEqual(["192.168.23.23","myhostname.com", HostNameFromNode],
-    osiris_replica:combine_ips_hosts(Ip, HostName,
+    osiris_replica:combine_ips_hosts(tcp, Ip, HostName,
+      HostNameFromNode)),
+
+  ?assertEqual(["myhostname.com", "192.168.23.23"],
+    osiris_replica:combine_ips_hosts(ssl, Ip, HostName, HostName)),
+
+  HostNameFromNode = osiris_util:hostname_from_node(),
+  ?assertEqual(["myhostname.com", HostNameFromNode, "192.168.23.23"],
+    osiris_replica:combine_ips_hosts(ssl, Ip, HostName,
       HostNameFromNode)).
 
 
@@ -424,7 +468,7 @@ read_validate_single_node(Config) ->
     ct:pal("writing ~b", [Num]),
     write_n(Leader, Num, #{}),
     % stop_profile(Config),
-    {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}, {'test', []}),
+    {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}, #{counter_spec => {'test', []}}),
 
     ct:pal("~w counters ~p", [node(), osiris_counters:overview()]),
 
@@ -485,7 +529,7 @@ read_validate(Config) ->
      end
      || N <- Replicas],
 
-    {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}, {'test', []}),
+    {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}, #{counter_spec => {'test', []}}),
     {_, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
 
     %% test reading on slave
@@ -493,7 +537,7 @@ read_validate(Config) ->
     Self = self(),
     _ = spawn(node(R),
               fun() ->
-                 {ok, RLog0} = osiris_writer:init_data_reader(R, {0, empty}, {'test', []}),
+                 {ok, RLog0} = osiris_writer:init_data_reader(R, {0, empty}, #{counter_spec => {'test', []}}),
                  {_, _} = timer:tc(fun() -> validate_read(Num, RLog0) end),
                  Self ! validate_read_done
               end),
@@ -1411,6 +1455,9 @@ validate_read(Max, Next, Log0) ->
     end.
 
 start_child_node(N, PrivDir) ->
+    start_child_node(N, PrivDir, []).
+
+start_child_node(N, PrivDir, ExtraAppConfig) ->
     _ = file:make_dir(PrivDir),
     Dir0 = filename:join(PrivDir, N),
     ok = file:make_dir(Dir0),
@@ -1424,10 +1471,27 @@ start_child_node(N, PrivDir) ->
     ct:pal("started child node ~w ~w~n", [S, Host]),
     ok = rpc:call(S, ?MODULE, node_setup, [Dir0]),
     ok = rpc:call(S, osiris, configure_logger, [logger]),
-    Res = rpc:call(S, application, ensure_all_started, [osiris]),
+    AppsToStart = case proplists:lookup(replication_transport, ExtraAppConfig) of
+        {_, ssl} ->
+            [osiris, ssl];
+        _ ->
+            [osiris]
+    end,
+    [begin
+        Res = rpc:call(S, application, ensure_all_started, [App]),
+        ct:pal("application start result ~p", [Res])
+    end || App <- AppsToStart],
     ok = rpc:call(S, logger, set_primary_config, [level, all]),
 
-    ct:pal("application start result ~p", [Res]),
+    [begin
+        case proplists:lookup(K, ExtraAppConfig) of
+            none ->
+                ok;
+            {K, V} ->
+                ok = rpc:call(S, application, set_env, [osiris, K, V])
+        end
+    end
+     || K <- [replication_transport, replication_server_ssl_options, replication_client_ssl_options]],
     S.
 
 flush() ->
@@ -1474,7 +1538,7 @@ search_paths() ->
 validate_log(Leader, Exp) when is_pid(Leader) ->
     case node(Leader) == node() of
         true ->
-            {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}, {'test', []}),
+            {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}, #{counter_spec => {'test', []}}),
             validate_log(Log0, Exp);
         false ->
             ok = rpc:call(node(Leader), ?MODULE, ?FUNCTION_NAME, [Leader, Exp])

@@ -20,7 +20,7 @@
          stop/2,
          delete/2]).
 %% Test
--export([get_port/1, combine_ips_hosts/3]).
+-export([get_port/1, combine_ips_hosts/4]).
 %% gen_server callbacks
 -export([init/1,
          handle_call/3,
@@ -36,7 +36,8 @@
          leader_pid :: pid(),
          directory :: file:filename(),
          port :: non_neg_integer(),
-         socket :: undefined | gen_tcp:socket(),
+         transport :: osiris_log:transport(),
+         socket :: undefined | gen_tcp:socket() | ssl:sslsocket(),
          gc_interval :: non_neg_integer(),
          reference :: term(),
          offset_ref :: atomics:atomics_ref(),
@@ -55,7 +56,8 @@
          log :: osiris_log:state(),
          committed_offset = -1 :: -1 | osiris:offset(),
          offset_listeners = [] ::
-             [{pid(), osiris:offset(), mfa() | undefined}]}).
+             [{pid(), osiris:offset(), mfa() | undefined}]
+        }).
 
 -opaque state() :: #?MODULE{}.
 
@@ -138,9 +140,11 @@ init(#{name := Name,
         {ok, {LeaderRange, LeaderEpochOffs}}  ->
             {ok, {Min, Max}} = application:get_env(port_range),
             RecBuf = application:get_env(osiris, replica_recbuf, ?DEF_REC_BUF),
-            {Port, LSock} = open_tcp_port(RecBuf, Min, Max),
+            Transport = application:get_env(osiris, replication_transport, tcp),
+            ?DEBUG("Using ~s transport for replication", [Transport]),
+            {Port, LSock} = open_port(Transport, RecBuf, Min, Max),
             Self = self(),
-            spawn_link(fun() -> accept(LSock, Self) end),
+            spawn_link(fun() -> accept(Transport, LSock, Self) end),
             CntName = {?MODULE, ExtRef},
 
             ORef = atomics:new(2, [{signed, true}]),
@@ -196,15 +200,15 @@ init(#{name := Name,
             %% see: rabbitmq/osiris/issues/53 for more details
             HostNameFromHost = osiris_util:hostname_from_node(),
 
-            IpsHosts = combine_ips_hosts(Ips, HostName,
+            IpsHosts = combine_ips_hosts(Transport, Ips, HostName,
               HostNameFromHost),
 
             Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
-            ?DEBUG("osiris_replica:init/1: available hosts: ~w",
-            [IpsHosts]),
+            ?DEBUG("osiris_replica:init/1: available hosts: ~p", [IpsHosts]),
             ReplicaReaderConf =
             #{hosts => IpsHosts,
               port => Port,
+              transport => Transport,
               name => Name,
               replica_pid => self(),
               leader_pid => LeaderPid,
@@ -247,20 +251,26 @@ init(#{name := Name,
                            offset_ref = ORef,
                            event_formatter = EvtFmt,
                            counter = CntRef,
-                           token = Token},
+                           token = Token,
+                           transport = Transport},
                       log = Log,
                       parse_state = undefined}}
     end.
 
-combine_ips_hosts(IPs, HostName, HostNameFromHost) when
+combine_ips_hosts(tcp, IPs, HostName, HostNameFromHost) when
   HostName =/= HostNameFromHost ->
   lists:append(IPs, [HostName, HostNameFromHost]);
-combine_ips_hosts(IPs, HostName, _HostNameFromHost) ->
-  lists:append(IPs, [HostName]).
+combine_ips_hosts(tcp, IPs, HostName, _HostNameFromHost) ->
+  lists:append(IPs, [HostName]);
+combine_ips_hosts(ssl, IPs, HostName, HostNameFromHost) when
+  HostName =/= HostNameFromHost ->
+  lists:append([HostName, HostNameFromHost], IPs);
+combine_ips_hosts(ssl, IPs, HostName, _HostNameFromHost) ->
+  lists:append([HostName], IPs).
 
-open_tcp_port(_RcvBuf, M, M) ->
+open_port(_Transport,_RcvBuf, M, M) ->
     throw({error, all_busy});
-open_tcp_port(RcvBuf, Min, Max) ->
+open_port(tcp, RcvBuf, Min, Max) ->
     case gen_tcp:listen(Min,
                         [binary,
                          {packet, raw},
@@ -271,19 +281,51 @@ open_tcp_port(RcvBuf, Min, Max) ->
         {ok, LSock} ->
             {Min, LSock};
         {error, eaddrinuse} ->
-            open_tcp_port(RcvBuf, Min + 1, Max);
+            open_port(tcp, RcvBuf, Min + 1, Max);
+        E ->
+            throw(E)
+    end;
+open_port(ssl, RcvBuf, Min, Max) ->
+    R = ssl:listen(Min, [binary,
+                          {packet, raw},
+                          {active, false},
+                          {buffer, RcvBuf * 2},
+                          {recbuf, RcvBuf}]),
+    case R of
+        {ok, LSock} ->
+            {Min, LSock};
+        {error, eaddrinuse} ->
+            open_port(ssl, RcvBuf, Min + 1, Max);
         E ->
             throw(E)
     end.
 
-accept(LSock, Process) ->
+accept(tcp, LSock, Process) ->
     {ok, Sock} = gen_tcp:accept(LSock),
-
     ?DEBUG("~s: socket accepted opts ~w",
            [?MODULE, inet:getopts(Sock, [buffer, recbuf])]),
     Process ! {socket, Sock},
     gen_tcp:controlling_process(Sock, Process),
     _ = gen_tcp:close(LSock),
+    ok;
+accept(ssl, LSock, Process) ->
+    ?DEBUG("~s: Starting listening on socket for replication over TLS", [?MODULE]),
+    {ok, Sock0} = ssl:transport_accept(LSock),
+    case ssl:handshake(Sock0, application:get_env(osiris, replication_server_ssl_options, [])) of
+        {ok, Sock} ->
+            ?DEBUG("~s: TLS socket accepted opts ~w",
+               [?MODULE, ssl:getopts(Sock, [buffer, recbuf])]),
+            Process ! {socket, Sock},
+            ssl:controlling_process(Sock, Process),
+            _ = ssl:close(LSock);
+        {error, {tls_alert, {handshake_failure, _}}} ->
+            ?DEBUG("~s: Handshake failure, restarting listener...", [?MODULE]),
+            spawn_link(fun() -> accept(ssl, LSock, Process) end);
+        {error, E} ->
+            ?DEBUG("~s: Error during handshake ~p", [?MODULE, E]);
+        H ->
+            ?DEBUG("~s: Unexpected result from TLS handshake ~p", [?MODULE, H])
+    end,
     ok.
 
 %%--------------------------------------------------------------------
@@ -378,13 +420,14 @@ handle_info(force_gc,
     erlang:send_after(Interval, self(), force_gc),
     {noreply, State};
 handle_info({socket, Socket}, #?MODULE{cfg = #cfg{name = Name,
-                                                  token = Token} = Cfg} = State) ->
+                                                  token = Token,
+                                                  transport = Transport} = Cfg} = State) ->
     Timeout = application:get_env(osiris, one_time_token_timeout,
                                   ?DEFAULT_ONE_TIME_TOKEN_TIMEOUT),
-    case gen_tcp:recv(Socket, ?TOKEN_SIZE, Timeout) of
+    case recv(Transport, Socket, ?TOKEN_SIZE, Timeout) of
         {ok, Token} ->
             %% token validated, all good we can let the flood of data begin
-            ok = inet:setopts(Socket, [{active, 5}]),
+            ok = setopts(Transport, Socket, [{active, 5}]),
             {noreply, State#?MODULE{cfg = Cfg#cfg{socket = Socket}}};
         {ok, Other} ->
             ?WARN("~s: ~s invalid token received ~w",
@@ -394,10 +437,54 @@ handle_info({socket, Socket}, #?MODULE{cfg = #cfg{name = Name,
             ?WARN("~s: ~s error awaiting token ~w",
                   [?MODULE, Name, Reason])
     end;
-handle_info({tcp, Socket, Bin},
+handle_info({tcp, Socket, Bin}, State) ->
+    handle_incoming_data(Socket, Bin, State);
+handle_info({ssl, Socket, Bin}, State) ->
+    handle_incoming_data(Socket, Bin, State);
+handle_info({tcp_passive, Socket},
+            #?MODULE{cfg = #cfg{socket = Socket}} = State) ->
+    %% we always top up before processing each packet so no need to do anything
+    %% here
+    {noreply, State};
+handle_info({ssl_passive, Socket},
+            #?MODULE{cfg = #cfg{socket = Socket}} = State) ->
+    %% we always top up before processing each packet so no need to do anything
+    %% here
+    {noreply, State};
+handle_info({tcp_closed, Socket},
+            #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
+    ?DEBUG("osiris_replica: ~s Socket closed. Exiting...", [Name]),
+    {stop, normal, State};
+handle_info({ssl_closed, Socket},
+            #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
+    ?DEBUG("osiris_replica: ~s TLS socket closed. Exiting...", [Name]),
+    {stop, normal, State};
+handle_info({tcp_error, Socket, Error},
+            #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
+    ?DEBUG("osiris_replica: ~s Socket error ~p. Exiting...",
+           [Name, Error]),
+    {stop, {tcp_error, Error}, State};
+handle_info({ssl_error, Socket, Error},
+            #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
+    ?DEBUG("osiris_replica: ~s TLS socket error ~p. Exiting...",
+           [Name, Error]),
+    {stop, {ssl_error, Error}, State};
+handle_info({'DOWN', _Ref, process, Pid, Info}, State) ->
+    ?DEBUG("osiris_replica:handle_info/2: DOWN received Pid "
+           "~w, Info: ~w",
+           [Pid, Info]),
+    {noreply, State};
+handle_info({'EXIT', Ref, Info}, State) ->
+    ?DEBUG("osiris_replica:handle_info/2: EXIT received "
+           "~w, Info: ~w",
+           [Ref, Info]),
+    {noreply, State}.
+
+handle_incoming_data(Socket, Bin,
             #?MODULE{cfg =
                          #cfg{socket = Socket,
                               leader_pid = LeaderPid,
+                              transport = Transport,
                               counter = Cnt},
                      parse_state = ParseState0,
                      log = Log0} =
@@ -406,7 +493,7 @@ handle_info({tcp, Socket, Bin},
     %% deliberately ignoring return value here as it would fail if the
     %% tcp connection has been closed and we still want to try to process
     %% any messages still in the mailbox
-    _ = inet:setopts(Socket, [{active, 1}]),
+    _ = setopts(Transport, Socket, [{active, 1}]),
     %% validate chunk
     {ParseState, OffsetChunks} = parse_chunk(Bin, ParseState0, []),
     {OffsetTimestamp, Log} =
@@ -423,31 +510,7 @@ handle_info({tcp, Socket, Bin},
             State = notify_offset_listeners(State1),
             ok = osiris_writer:ack(LeaderPid, OffsetTimestamp),
             {noreply, State}
-    end;
-handle_info({tcp_passive, Socket},
-            #?MODULE{cfg = #cfg{socket = Socket}} = State) ->
-    %% we always top up before processing each packet so no need to do anything
-    %% here
-    {noreply, State};
-handle_info({tcp_closed, Socket},
-            #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
-    ?DEBUG("osiris_replica: ~s Socket closed. Exiting...", [Name]),
-    {stop, normal, State};
-handle_info({tcp_error, Socket, Error},
-            #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
-    ?DEBUG("osiris_replica: ~s Socket error ~p. Exiting...",
-           [Name, Error]),
-    {stop, {tcp_error, Error}, State};
-handle_info({'DOWN', _Ref, process, Pid, Info}, State) ->
-    ?DEBUG("osiris_replica:handle_info/2: DOWN received Pid "
-           "~w, Info: ~w",
-           [Pid, Info]),
-    {noreply, State};
-handle_info({'EXIT', Ref, Info}, State) ->
-    ?DEBUG("osiris_replica:handle_info/2: EXIT received "
-           "~w, Info: ~w",
-           [Ref, Info]),
-    {noreply, State}.
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -591,3 +654,12 @@ select_formatter(undefined, Fmt) ->
 select_formatter(Fmt, _) ->
     Fmt.
 
+recv(tcp, Socket, Length, Timeout) ->
+    gen_tcp:recv(Socket, Length, Timeout);
+recv(ssl, Socket, Length, Timeout) ->
+    ssl:recv(Socket, Length, Timeout).
+
+setopts(tcp, Socket, Options) ->
+    inet:setopts(Socket, Options);
+setopts(ssl, Socket, Options) ->
+    ssl:setopts(Socket, Options).
