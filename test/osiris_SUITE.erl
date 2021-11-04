@@ -55,10 +55,12 @@ all_tests() ->
      tracking_timestamp_all,
      tracking_retention,
      single_node_deduplication,
+     single_node_deduplication_order,
      single_node_deduplication_2,
      single_node_deduplication_sub_batch,
      cluster_minority_deduplication,
      cluster_deduplication,
+     cluster_deduplication_order,
      writers_retention,
      single_node_reader_counters,
      cluster_reader_counters,
@@ -1224,6 +1226,32 @@ single_node_deduplication(Config) ->
     validate_log(Leader, [{0, <<"data1">>}, {1, <<"data2">>}]),
     ok.
 
+single_node_deduplication_order(Config) ->
+    Name = ?config(cluster_name, Config),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          replica_nodes => [],
+          dir => ?config(priv_dir, Config)},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    WID = <<"wid1">>,
+    SEQ = lists:seq(1,148),
+    %% step 1: standard insert
+   [osiris:write(Leader, WID, N, [<<N:64/integer>>])
+    || N <- SEQ],
+
+     wait_for_written(SEQ),
+    %% here we send the same messages
+    %% and osiris send back the messages ids.
+    %% The test is meant to check if the messages order
+    %% is the same from the step 1 (osiris_writer:handle_duplicates/3)
+    [osiris:write(Leader, WID, N, [<<N:64/integer>>])
+    || N <- SEQ],
+    %% the messages received must be in order
+    wait_for_written_order(SEQ),
+    ok.
+
 single_node_deduplication_2(Config) ->
     Name = ?config(cluster_name, Config),
     Conf0 =
@@ -1323,6 +1351,35 @@ cluster_deduplication(Config) ->
     [slave:stop(N) || N <- Nodes],
     ok.
 
+cluster_deduplication_order(Config) ->
+    %% cluster test for deduplication order
+    %% see: single_node_deduplication_order/1
+    %% for details
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    WriterId = atom_to_binary(?FUNCTION_NAME, utf8),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => LeaderNode,
+          replica_nodes => Replicas},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    SEQ = lists:seq(1,207),
+
+    [osiris:write(Leader, WriterId, N, [<<N:64/integer>>])
+    || N <- SEQ],
+
+    wait_for_written(SEQ),
+
+    [osiris:write(Leader, WriterId, N, [<<N:64/integer>>])
+    || N <- SEQ],
+
+    wait_for_written_order(SEQ),
+    [slave:stop(N) || N <- Nodes],
+    ok.
+
 writers_retention(Config) ->
     Name = ?config(cluster_name, Config),
     SegSize = 1000 * 10000,
@@ -1380,8 +1437,7 @@ wait_for_written(Written0) when is_list(Written0) ->
 wait_for_written(Written0) ->
     receive
         {osiris_written, _Name, _WriterId, Corrs} ->
-            Written = maps:without(Corrs, Written0),
-            % ct:pal("written ~w", [Corrs]),
+          Written = maps:without(Corrs, Written0),
             case maps:size(Written) of
                 0 ->
                     ok;
@@ -1393,6 +1449,33 @@ wait_for_written(Written0) ->
         print_counters(),
         exit(osiris_written_timeout)
     end.
+
+wait_for_written_order([]) ->
+  ok;
+wait_for_written_order(Written0) ->
+  receive
+    {osiris_written, _Name, _WriterId, Corrs} ->
+      %% remove Corrs from Written0
+      Written = lists:sublist(Written0, length(Corrs) + 1,
+        length(Written0)-length(Corrs) ),
+
+      Sub = lists:sublist(Written0, length(Corrs)),
+      %% check if the Corrs received are
+      %% equals to the SubList from Written0
+      %% they must be the same
+      case Sub =:= Corrs of
+        true -> ok;
+        false -> flush(),
+          print_counters(),
+          exit(osiris_written_out_of_order)
+      end,
+      wait_for_written_order(Written)
+
+  after 1000 * 8 ->
+    flush(),
+    print_counters(),
+    exit(osiris_written_timeout)
+  end.
 
 validate_read(N, Log) ->
     validate_read(N, 0, Log).
