@@ -804,7 +804,7 @@ truncate_to(Name, Range, [{E, ChId} | NextEOs], SegInfos) ->
                            {offset_out_of_range,
                             empty | {offset(), offset()}}} |
                           {error,
-                           {invalid_last_offset_epoch, offset(), offset()}}.
+                           {invalid_last_epoch_offset, epoch(), offset()}}.
 init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir} = Config) ->
     SegInfos = build_log_overview(Dir),
     Range = offset_range_from_segment_infos(SegInfos),
@@ -844,7 +844,7 @@ check_chunk_has_expected_epoch(ChunkId, Epoch, SegInfos) ->
         not_found ->
             %% this is unexpected and thus an error
             {error,
-             {invalid_last_offset_epoch, Epoch, unknown}};
+             {invalid_last_epoch_offset, Epoch, unknown}};
         {found, SegmentInfo = #seg_info{file = _PrevSeg}} ->
             %% prev segment exists, does it have the correct
             %% epoch?
@@ -853,7 +853,7 @@ check_chunk_has_expected_epoch(ChunkId, Epoch, SegInfos) ->
                     ok;
                 {ChunkId, OtherEpoch, _} ->
                     {error,
-                     {invalid_last_offset_epoch, Epoch, OtherEpoch}}
+                     {invalid_last_epoch_offset, Epoch, OtherEpoch}}
             end
     end.
 
@@ -1574,15 +1574,15 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
             Acc0
     end.
 
--spec overview(term()) -> {range(), [{offset(), epoch()}]}.
+-spec overview(term()) -> {range(), [{epoch(), offset()}]}.
 overview(Dir) ->
     case build_log_overview(Dir) of
         [] ->
             {empty, []};
         SegInfos ->
             Range = offset_range_from_segment_infos(SegInfos),
-            OffsEpochs = last_offset_epochs(SegInfos),
-            {Range, OffsEpochs}
+            EpochOffsets = last_epoch_offsets(SegInfos),
+            {Range, EpochOffsets}
     end.
 
 -spec format_status(state()) -> map().
@@ -1693,35 +1693,38 @@ eval_max_bytes(SegInfos, MaxSize) ->
             end
     end.
 
-%% returns a list of the last offset in each epoch
-last_offset_epochs([#seg_info{first = undefined,
+%% returns a list of the last offset by epoch
+last_epoch_offsets([#seg_info{first = undefined,
                               last = undefined}]) ->
     [];
-last_offset_epochs([#seg_info{index = IdxFile,
+last_epoch_offsets([#seg_info{index = IdxFile,
                               first = #chunk_info{epoch = FstE, id = FstChId}}
                     | SegInfos]) ->
-    {Time, Result} = timer:tc(
-                       fun() -> 
-                               FstFd = open_index_read(IdxFile),
-                               {LastE, LastO, Res} =
-                               lists:foldl(fun(#seg_info{index = I}, Acc) ->
-                                                   Fd = open_index_read(I),
-                                                   last_offset_epoch(file:read(Fd, ?INDEX_RECORD_SIZE_B),
-                                                                     Fd, Acc)
-                                           end,
-                                           last_offset_epoch(file:read(FstFd, ?INDEX_RECORD_SIZE_B),
-                                                             FstFd, {FstE, FstChId, []}),
-                                           SegInfos),
-                               lists:reverse([{LastE, LastO} | Res])
-                       end),
-    ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1000000]),
+    {Time, Result} =
+        timer:tc(
+          fun() ->
+                  FstFd = open_index_read(IdxFile),
+                  {LastE, LastO, Res} =
+                      lists:foldl(
+                        fun(#seg_info{index = I}, Acc) ->
+                                Fd = open_index_read(I),
+                                last_epoch_offset(file:read(Fd, ?INDEX_RECORD_SIZE_B),
+                                                  Fd, Acc)
+                        end,
+                        last_epoch_offset(file:read(FstFd, ?INDEX_RECORD_SIZE_B),
+                                          FstFd, {FstE, FstChId, []}),
+                        SegInfos),
+                  lists:reverse([{LastE, LastO} | Res])
+          end),
+    ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME,
+                                         ?FUNCTION_ARITY, Time/1000000]),
     Result.
 
 %% aggregates the chunk offsets for each epoch
-last_offset_epoch(eof, Fd, Acc) ->
+last_epoch_offset(eof, Fd, Acc) ->
     ok = file:close(Fd),
     Acc;
-last_offset_epoch({ok,
+last_epoch_offset({ok,
                    <<O:64/unsigned,
                      _T:64/signed,
                      CurEpoch:64/unsigned,
@@ -1729,17 +1732,17 @@ last_offset_epoch({ok,
                      _ChType:8/unsigned>>},
                   Fd, {CurEpoch, _LastOffs, Acc}) ->
     %% epoch is unchanged
-    last_offset_epoch(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
+    last_epoch_offset(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
                       {CurEpoch, O, Acc});
-last_offset_epoch({ok,
+last_epoch_offset({ok,
                    <<O:64/unsigned,
                      _T:64/signed,
                      Epoch:64/unsigned,
                      _:32/unsigned,
                      _ChType:8/unsigned>>},
                   Fd, {CurEpoch, LastOffs, Acc})
-    when Epoch > CurEpoch ->
-    last_offset_epoch(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
+  when Epoch > CurEpoch ->
+    last_epoch_offset(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
                       {Epoch, O, [{CurEpoch, LastOffs} | Acc]}).
 
 segment_from_index_file(IdxFile) ->
