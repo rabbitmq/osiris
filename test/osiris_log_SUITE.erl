@@ -684,7 +684,7 @@ init_data_reader_truncated(Config) ->
     osiris_log:close(L2),
 
     % %% however attaching with a different epoch should be disallowed
-    ?assertEqual({error, {invalid_last_offset_epoch, 2, 1}},
+    ?assertEqual({error, {invalid_last_epoch_offset, 2, 1}},
                  osiris_log:init_data_reader({750, {2, 700, ?LINE}}, RConf)),
     osiris_log:close(L2),
     ok.
