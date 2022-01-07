@@ -1,6 +1,7 @@
 load("@rules_erlang//:erlang_app.bzl", "erlang_app")
 load("@rules_erlang//:xref.bzl", "xref")
-load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
+load("@rules_erlang//:plt.bzl", "plt")
+load("@rules_erlang//:dialyze.bzl", "dialyze")
 load("@rules_erlang//:ct_sharded.bzl", "ct_suite")
 
 NAME = "osiris"
