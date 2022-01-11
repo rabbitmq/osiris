@@ -38,7 +38,7 @@ jobs:
     - name: CHECKOUT
       uses: actions/checkout@v2
     - name: CONFIGURE ERLANG
-      uses: gleam-lang/setup-erlang@v1.1.2
+      uses: erlef/setup-beam@v1
       with:
         otp-version: ${{ matrix.erlang_version }}
     - name: CONFIGURE BAZEL
