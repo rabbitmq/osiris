@@ -13,8 +13,8 @@ jobs:
     strategy:
       matrix:
         erlang_version:
-        - "23.3.4.5"
-        - "24.0"
+        - "23.3"
+        - "24.1"
     steps:
     - name: CHECKOUT
       uses: actions/checkout@v2
@@ -32,8 +32,8 @@ jobs:
     strategy:
       matrix:
         erlang_version:
-        - "23.3.4.5"
-        - "24.0"
+        - "23.3"
+        - "24.1"
     steps:
     - name: CHECKOUT
       uses: actions/checkout@v2
