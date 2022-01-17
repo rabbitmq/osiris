@@ -1025,7 +1025,11 @@ init_offset_reader0(OffsetSpec, #{dir := Dir} = Conf)
                 {_, empty} ->
                     0;
                 {Offset, {_, LastOffs}}
-                  when Offset > LastOffs ->
+                  when Offset == LastOffs + 1 ->
+                    %% next but we can't use `next` due to race conditions
+                    Offset;
+                {Offset, {_, LastOffs}}
+                  when Offset > LastOffs + 1 ->
                     %% out of range, clamp as `next`
                     throw({retry_with, next, Conf});
                 {Offset, {FirstOffs, _LastOffs}} ->
