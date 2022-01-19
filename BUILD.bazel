@@ -1,4 +1,4 @@
-load("@rules_erlang//:erlang_app.bzl", "erlang_app")
+load("@rules_erlang//:erlang_app.bzl", "erlang_app", "test_erlang_app")
 load("@rules_erlang//:xref.bzl", "xref")
 load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
 load("@rules_erlang//:ct_sharded.bzl", "ct_suite")
@@ -27,6 +27,15 @@ RUNTIME_DEPS = [
 ]
 
 erlang_app(
+    app_env = APP_ENV,
+    app_name = NAME,
+    app_version = VERSION,
+    extra_apps = EXTRA_APPS,
+    runtime_deps = RUNTIME_DEPS,
+    deps = DEPS,
+)
+
+test_erlang_app(
     app_env = APP_ENV,
     app_name = NAME,
     app_version = VERSION,
