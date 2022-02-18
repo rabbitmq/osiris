@@ -382,8 +382,8 @@ single_node_offset_listener2(Config) ->
 cluster_offset_listener(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    [_ | Replicas] =
-        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    [_ | Replicas] = Nodes = [NodeName || {_Ref, NodeName} <- PeerStates],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -398,23 +398,23 @@ cluster_offset_listener(Config) ->
             ct:pal("got offset ~w", [O]),
             {[{0, <<"mah-data">>}], Log} = osiris_log:read_chunk_parsed(Log0),
             %% stop all replicas
-            [?PEER_MODULE:stop(N) || N <- Replicas],
+            [?PEER_MODULE:stop(Ref) || {Ref, _} <- PeerStates],
             ok = osiris:write(Leader, undefined, 43, <<"mah-data2">>),
             timer:sleep(10),
             {end_of_stream, _} = osiris_log:read_chunk_parsed(Log),
             ok
     after 2000 ->
         flush(),
+        [?PEER_MODULE:stop(Ref) || {Ref, _} <- PeerStates],
         exit(osiris_offset_timeout)
     end,
-    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 replica_offset_listener(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    [_ | Replicas] =
-        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    [_ | Replicas] = Nodes = [NodeName || {_Ref, NodeName} <- PeerStates],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -448,10 +448,10 @@ replica_offset_listener(Config) ->
             ok
     after 5000 ->
         flush(),
-        [?PEER_MODULE:stop(N) || N <- Nodes],
+        [?PEER_MODULE:stop(Ref) || {Ref, _} <- PeerStates],
         exit(timeout)
     end,
-    [?PEER_MODULE:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(Ref) || {Ref, _} <- PeerStates],
     ok.
 
 read_validate_single_node(Config) ->
@@ -528,7 +528,7 @@ read_validate(Config) ->
     ct:pal("~w counters ~p", [node(), osiris_counters:overview()]),
     [begin
          ct:pal("~w counters ~p",
-                [N, rpc:call(N, osiris_counters, overview, [])])
+                [N, erpc:call(N, osiris_counters, overview, [])])
      end
      || N <- Replicas],
 
@@ -611,14 +611,14 @@ cluster_restart_large(Config) ->
           leader_node => LeaderNode},
     {ok, #{leader_pid := Leader} = Conf} = osiris:start_cluster(Conf0),
     write_n(Leader, 255, 0, 1000000, #{}),
-    CountersPre = rpc:call(LeaderNode, osiris_counters, overview, []),
+    CountersPre = erpc:call(LeaderNode, osiris_counters, overview, []),
 
     osiris:stop_cluster(Conf),
     {ok, #{leader_pid := _Leader1}} =
         osiris:start_cluster(Conf0#{epoch => 2}),
     %% give leader some time to discover the committed offset
     timer:sleep(1000),
-    CountersPost = rpc:call(LeaderNode, osiris_counters, overview, []),
+    CountersPost = erpc:call(LeaderNode, osiris_counters, overview, []),
     %% assert key countesr are recovered
     ct:pal("Counters ~p", [CountersPost]),
     Keys = [first_offset, offset],
@@ -776,7 +776,7 @@ restart_replica(Config) ->
      || N <- Msgs],
     wait_for_written(Msgs),
     timer:sleep(100),
-    ok = rpc:call(node(R1Pid), gen_server, stop, [R1Pid]),
+    ok = erpc:call(node(R1Pid), gen_server, stop, [R1Pid]),
     [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>])
      || N <- Msgs],
     wait_for_written(Msgs),
@@ -1068,10 +1068,10 @@ update_retention_replica(Config) ->
              Files = filelib:wildcard(Wc),
              length(Files)
           end,
-    ?assertEqual(1, rpc:call(node(R1), erlang, apply, [Fun, [R1]])),
-    ?assertEqual(1, rpc:call(node(R2), erlang, apply, [Fun, [R2]])),
+    ?assertEqual(1, erpc:call(node(R1), erlang, apply, [Fun, [R1]])),
+    ?assertEqual(1, erpc:call(node(R2), erlang, apply, [Fun, [R2]])),
     ?assertEqual(1,
-                 rpc:call(node(Leader), erlang, apply, [Fun, [Leader]])),
+                 erpc:call(node(Leader), erlang, apply, [Fun, [Leader]])),
     [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
@@ -1538,23 +1538,30 @@ validate_read(Max, Next, Log0) ->
             validate_read(Max, Next + length(Recs), Log)
     end.
 
-start_child_node(N, PrivDir) ->
-    start_child_node(N, PrivDir, []).
+start_child_node(NodeNamePrefix, PrivDir) ->
+    start_child_node(NodeNamePrefix, PrivDir, []).
 
-start_child_node(N, PrivDir, ExtraAppConfig) ->
+start_child_node(NodeNamePrefix, PrivDir, ExtraAppConfig) ->
     _ = file:make_dir(PrivDir),
-    Dir0 = filename:join(PrivDir, N),
+    NodeName = make_node_name(NodeNamePrefix),
+    Dir0 = filename:join(PrivDir, NodeName),
     ok = file:make_dir(Dir0),
     Host = get_current_host(),
-    Dir = "'\"" ++ Dir0 ++ "\"'",
-    Pa = string:join(["-pa" | search_paths()]
-                     ++ ["-osiris data_dir", Dir],
-                     " "),
-    ct:pal("starting child node with ~s~n", [Pa]),
-    {ok, S} = ?PEER_MODULE:start_link(Host, N, Pa),
-    ct:pal("started child node ~w ~w~n", [S, Host]),
-    ok = rpc:call(S, ?MODULE, node_setup, [Dir0]),
-    ok = rpc:call(S, osiris, configure_logger, [logger]),
+    Dir = "\"" ++ Dir0 ++ "\"",
+    Args = ["-pa" | search_paths()] ++ ["-osiris data_dir", Dir],
+    ct:pal("starting child node ~p with ~p~n", [NodeName, Args]),
+    {Ref, FinalNodeName} = Result = case start_peer_node(Host, NodeName, Args) of
+        {ok, Pid, FinalNodeName0} when is_atom(FinalNodeName0) ->
+            {Pid, FinalNodeName0};
+        {ok, FinalNodeName0} when is_atom(FinalNodeName0) ->
+            %% before Erlang 25, the "ref" is the name of the node
+            {FinalNodeName0, FinalNodeName0}
+    end,
+    %% ct:pal("started child node ~w~n", [FinalNodeName]),
+    ok = erpc:call(FinalNodeName, ?MODULE, node_setup, [Dir0]),
+    ct:pal("performed node setup on child node ~w", [FinalNodeName]),
+    ok = erpc:call(FinalNodeName, osiris, configure_logger, [logger]),
+    %% ct:pal("configured logger on child node ~w", [FinalNodeName]),
     AppsToStart = case proplists:lookup(replication_transport, ExtraAppConfig) of
         {_, ssl} ->
             [osiris, ssl];
@@ -1562,21 +1569,21 @@ start_child_node(N, PrivDir, ExtraAppConfig) ->
             [osiris]
     end,
     [begin
-        Res = rpc:call(S, application, ensure_all_started, [App]),
-        ct:pal("application start result ~p", [Res])
+        Res = erpc:call(FinalNodeName, application, ensure_all_started, [App]),
+        ct:pal("application start result on node ~s: ~p", [FinalNodeName, Res])
     end || App <- AppsToStart],
-    ok = rpc:call(S, logger, set_primary_config, [level, all]),
+    ok = erpc:call(FinalNodeName, logger, set_primary_config, [level, all]),
 
     [begin
         case proplists:lookup(K, ExtraAppConfig) of
             none ->
                 ok;
             {K, V} ->
-                ok = rpc:call(S, application, set_env, [osiris, K, V])
+                ok = erpc:call(FinalNodeName, application, set_env, [osiris, K, V])
         end
-    end
-     || K <- [replication_transport, replication_server_ssl_options, replication_client_ssl_options]],
-    S.
+    end || K <- [replication_transport, replication_server_ssl_options, replication_client_ssl_options]],
+
+    Result.
 
 flush() ->
     receive
@@ -1587,9 +1594,32 @@ flush() ->
         ok
     end.
 
+start_peer_node(Host, NodeName, Args) ->
+    case list_to_integer(erlang:system_info(otp_release)) of
+        N when N >= 25 ->
+            start_peer_node_25(Host, NodeName, Args);
+        _ ->
+            start_peer_node_pre_25(Host, NodeName, Args)
+    end.
+
+start_peer_node_25(Host, NodeName, Args) ->
+    Opts = #{
+        %% the caller is responsible for computing the final name,
+        %% as the peer module implies that both node name prefix and
+        %% hostname are strings, which is not always true in our case
+        name      => NodeName,
+        args      => Args,
+        longnames => false
+    },
+    ?PEER_MODULE:start_link(Opts).
+
+start_peer_node_pre_25(Host, NodeName, Args) ->
+    ArgString = string:join(Args, " "),
+    ?PEER_MODULE:start_link(Host, NodeName, ArgString).
+
 get_current_host() ->
     {ok, H} = inet:gethostname(),
-    list_to_atom(H).
+    H.
 
 make_node_name(N) ->
     {ok, H} = inet:gethostname(),
@@ -1625,7 +1655,7 @@ validate_log(Leader, Exp) when is_pid(Leader) ->
             {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}, #{counter_spec => {'test', []}}),
             validate_log(Log0, Exp);
         false ->
-            ok = rpc:call(node(Leader), ?MODULE, ?FUNCTION_NAME, [Leader, Exp])
+            ok = erpc:call(node(Leader), ?MODULE, ?FUNCTION_NAME, [Leader, Exp])
     end;
 validate_log(Log, []) ->
     ok = osiris_log:close(Log),
@@ -1641,7 +1671,7 @@ validate_log(Log0, Expected) ->
 print_counters() ->
     [begin
          ct:pal("~w counters ~p",
-                [N, rpc:call(N, osiris_counters, overview, [])])
+                [N, erpc:call(N, osiris_counters, overview, [])])
      end
      || N <- nodes()].
 

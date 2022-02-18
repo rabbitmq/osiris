@@ -107,20 +107,39 @@ do_metrics(O0) ->
     timer:sleep(?METRICS_INT_S * 1000),
     do_metrics(O).
 
-start_secondary(N, RunDir) ->
-    Dir0 = filename:join(RunDir, N),
+start_secondary(NodeName, RunDir) ->
+    Dir0 = filename:join(RunDir, NodeName),
     Host = get_current_host(),
     Dir = "'\"" ++ Dir0 ++ "\"'",
-    Pa = string:join(["-pa" | search_paths()]
-                     ++ ["-osiris data_dir", Dir],
-                     " "),
-    ?INFO("osiris_bench: starting a secondary node with ~s~n", [Pa]),
-    {ok, S} = ?PEER_MODULE:start_link(Host, N, Pa),
-    ?INFO("osiris_bench: started a secondary node ~w ~w~n", [S, Host]),
+    Args = ["-pa" | search_paths()] ++ ["-osiris data_dir", Dir],
+    ?INFO("osiris_bench: starting child node ~p with ~s~n", [NodeName, Args]),
+    {ok, S} = start_peer_node(Host, NodeName, Args),
+    ?INFO("osiris_bench: started child node ~w ~w~n", [S, Host]),
     Res = rpc:call(S, application, ensure_all_started, [osiris]),
     ok = rpc:call(S, logger, set_primary_config, [level, all]),
     ?INFO("osiris_bench: application start result ~p", [Res]),
     S.
+
+
+start_peer_node(Host, NodeName, Args) ->
+    case list_to_integer(erlang:system_info(otp_release)) of
+        N when N >= 25 ->
+            start_peer_node_25(Host, NodeName, Args);
+        _ ->
+            start_peer_node_pre_25(Host, NodeName, Args)
+    end.
+
+start_peer_node_25(Host, NodeName, Args) ->
+    Opts = #{
+        name => string:trim(NodeName),
+        host => Host,
+        args => Args
+    },
+    ?PEER_MODULE:start_link(Opts).
+
+start_peer_node_pre_25(Host, NodeName, Args) ->
+    ArgString = string:join(Args, " "),
+    ?PEER_MODULE:start_link(Host, NodeName, ArgString).
 
 get_current_host() ->
     {ok, H} = inet:gethostname(),
