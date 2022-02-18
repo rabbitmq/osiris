@@ -14,6 +14,7 @@
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
+-include("osiris.hrl").
 
 %%%===================================================================
 %%% Common Test callbacks
@@ -204,7 +205,7 @@ cluster_write(Config) ->
     [begin
          ok = validate_log(P, [{0, <<"mah-data">>}, {1, <<"mah-data2">>}])
      end || P <- [Leader | ReplicaPids]],
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 quorum_write(Config) ->
@@ -218,7 +219,7 @@ quorum_write(Config) ->
           leader_node => LeaderNode,
           replica_nodes => Replicas},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-    slave:stop(hd(Replicas)),
+    ?PEER_MODULE:stop(hd(Replicas)),
     ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
     receive
         {osiris_written, _, _WriterId, [42]} ->
@@ -228,7 +229,7 @@ quorum_write(Config) ->
         exit(osiris_written_timeout)
     end,
     ok = validate_log(Leader, [{0, <<"mah-data">>}]),
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 cluster_batch_write(Config) ->
@@ -257,7 +258,7 @@ cluster_batch_write(Config) ->
     timer:sleep(1000),
     ok = validate_log(ReplicaPid, [{0, <<"mah-data">>}]),
     ok = validate_log(ReplicaPid2, [{0, <<"mah-data">>}]),
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 single_node_offset_listener(Config) ->
@@ -397,7 +398,7 @@ cluster_offset_listener(Config) ->
             ct:pal("got offset ~w", [O]),
             {[{0, <<"mah-data">>}], Log} = osiris_log:read_chunk_parsed(Log0),
             %% stop all replicas
-            [slave:stop(N) || N <- Replicas],
+            [?PEER_MODULE:stop(N) || N <- Replicas],
             ok = osiris:write(Leader, undefined, 43, <<"mah-data2">>),
             timer:sleep(10),
             {end_of_stream, _} = osiris_log:read_chunk_parsed(Log),
@@ -406,7 +407,7 @@ cluster_offset_listener(Config) ->
         flush(),
         exit(osiris_offset_timeout)
     end,
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 replica_offset_listener(Config) ->
@@ -447,10 +448,10 @@ replica_offset_listener(Config) ->
             ok
     after 5000 ->
         flush(),
-        [slave:stop(N) || N <- Nodes],
+        [?PEER_MODULE:stop(N) || N <- Nodes],
         exit(timeout)
     end,
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 read_validate_single_node(Config) ->
@@ -534,7 +535,7 @@ read_validate(Config) ->
     {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}, #{counter_spec => {'test', []}}),
     {_, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
 
-    %% test reading on slave
+    %% test reading on a secondary
     R = hd(ReplicaPids),
     Self = self(),
     _ = spawn(node(R),
@@ -551,7 +552,7 @@ read_validate(Config) ->
         exit(validate_read_done_timeout)
     end,
 
-    [slave:stop(N) || N <- Replicas],
+    [?PEER_MODULE:stop(N) || N <- Replicas],
     ok.
 
 cluster_restart(Config) ->
@@ -594,7 +595,7 @@ cluster_restart(Config) ->
     ok =
         validate_log(Leader1,
                      [{0, <<"before-restart">>}, {1, <<"after-restart">>}]),
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 cluster_restart_large(Config) ->
@@ -626,7 +627,7 @@ cluster_restart_large(Config) ->
             maps:with(Keys, CountersPost)
            ),
 
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 cluster_restart_new_leader(Config) ->
@@ -674,7 +675,7 @@ cluster_restart_new_leader(Config) ->
     ok =
         validate_log(Leader1,
                      [{0, <<"before-restart">>}, {1, <<"after-restart">>}]),
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 cluster_delete(Config) ->
@@ -698,7 +699,7 @@ cluster_delete(Config) ->
     end,
 
     osiris:delete_cluster(Conf),
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 cluster_failure(Config) ->
@@ -740,7 +741,7 @@ cluster_failure(Config) ->
     [] =
         supervisor:which_children({osiris_replica_reader_sup, node(Leader)}),
 
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 start_cluster_invalid_replicas(Config) ->
@@ -928,7 +929,7 @@ retention_add_replica_after(Config) ->
     check_last_entry(ReplicaPid1, <<"last">>),
     check_last_entry(ReplicaPid2, <<"last">>),
     ok = osiris:stop_cluster(Conf2),
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 check_last_entry(Pid, Entry) when is_pid(Pid) ->
@@ -1005,7 +1006,7 @@ retention_overtakes_offset_reader(Config) ->
     after 30000 -> exit({done_timeout, Pid3})
     end,
 
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     %% read til the end
     ok.
 
@@ -1071,7 +1072,7 @@ update_retention_replica(Config) ->
     ?assertEqual(1, rpc:call(node(R2), erlang, apply, [Fun, [R2]])),
     ?assertEqual(1,
                  rpc:call(node(Leader), erlang, apply, [Fun, [Leader]])),
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 tracking_offset(Config) ->
@@ -1347,7 +1348,7 @@ cluster_minority_deduplication(Config) ->
           leader_node => LeaderNode,
           replica_nodes => Replicas},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-    [slave:stop(N) || N <- Replicas],
+    [?PEER_MODULE:stop(N) || N <- Replicas],
     ok = osiris:write(Leader, WriterId, 42, <<"data1">>),
     ok = osiris:write(Leader, WriterId, 42, <<"data1b">>),
     timer:sleep(50),
@@ -1360,7 +1361,7 @@ cluster_minority_deduplication(Config) ->
         ok
     end,
     ok = validate_log(Leader, [{0, <<"data1">>}, {1, <<"data2">>}]),
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 cluster_deduplication(Config) ->
@@ -1392,7 +1393,7 @@ cluster_deduplication(Config) ->
         exit(osiris_written_timeout_2)
     end,
     ok = validate_log(Leader, [{0, <<"mah-data">>}]),
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 cluster_deduplication_order(Config) ->
@@ -1421,7 +1422,7 @@ cluster_deduplication_order(Config) ->
     || N <- SEQ],
 
     wait_for_written_order(SEQ),
-    [slave:stop(N) || N <- Nodes],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 writers_retention(Config) ->
@@ -1550,7 +1551,7 @@ start_child_node(N, PrivDir, ExtraAppConfig) ->
                      ++ ["-osiris data_dir", Dir],
                      " "),
     ct:pal("starting child node with ~s~n", [Pa]),
-    {ok, S} = slave:start_link(Host, N, Pa),
+    {ok, S} = ?PEER_MODULE:start_link(Host, N, Pa),
     ct:pal("started child node ~w ~w~n", [S, Host]),
     ok = rpc:call(S, ?MODULE, node_setup, [Dir0]),
     ok = rpc:call(S, osiris, configure_logger, [logger]),

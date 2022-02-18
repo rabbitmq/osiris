@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2021 VMware, Inc. or its affiliates.  All rights reserved.
+%% Copyright (c) 2007-2022 VMware, Inc. or its affiliates.  All rights reserved.
 %%
 
 -module(osiris_bench).
@@ -39,7 +39,7 @@ run(#{name := Name} = Spec) ->
     Dir = filename:join([Dir0, ?MODULE, Name]),
     %% create cluster (if needed)
     [LeaderNode | Replicas] =
-        Nodes = [start_slave(N, Dir) || N <- [s1, s2, s3]],
+        Nodes = [start_secondary(N, Dir) || N <- [s1, s2, s3]],
 
     %% declare osiris cluster
     Conf0 =
@@ -63,7 +63,7 @@ run(#{name := Name} = Spec) ->
     Nodes.
 
 stop(Nodes) ->
-    [slave:stop(N) || N <- Nodes].
+    [?PEER_MODULE:stop(N) || N <- Nodes].
 
 start_publisher(Node, Conf) ->
     erlang:spawn(Node, ?MODULE, do_publish, [Conf]).
@@ -107,16 +107,16 @@ do_metrics(O0) ->
     timer:sleep(?METRICS_INT_S * 1000),
     do_metrics(O).
 
-start_slave(N, RunDir) ->
+start_secondary(N, RunDir) ->
     Dir0 = filename:join(RunDir, N),
     Host = get_current_host(),
     Dir = "'\"" ++ Dir0 ++ "\"'",
     Pa = string:join(["-pa" | search_paths()]
                      ++ ["-osiris data_dir", Dir],
                      " "),
-    ?INFO("osiris_bench: starting slave node with ~s~n", [Pa]),
-    {ok, S} = slave:start_link(Host, N, Pa),
-    ?INFO("osiris_bench: started slave node ~w ~w~n", [S, Host]),
+    ?INFO("osiris_bench: starting a secondary node with ~s~n", [Pa]),
+    {ok, S} = ?PEER_MODULE:start_link(Host, N, Pa),
+    ?INFO("osiris_bench: started a secondary node ~w ~w~n", [S, Host]),
     Res = rpc:call(S, application, ensure_all_started, [osiris]),
     ok = rpc:call(S, logger, set_primary_config, [level, all]),
     ?INFO("osiris_bench: application start result ~p", [Res]),

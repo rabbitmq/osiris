@@ -15,7 +15,7 @@
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 
--include("src/osiris.hrl").
+-include("osiris.hrl").
 
 %%%===================================================================
 %%% Common Test callbacks
