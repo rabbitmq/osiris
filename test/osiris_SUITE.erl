@@ -847,7 +847,7 @@ diverged_replica(Config) ->
              {ok, D} =
                  file:read_file(
                      filename:join([PrivDir,
-                                    N,
+                                    hd(string:split(atom_to_list(N), "@")),
                                     ?FUNCTION_NAME,
                                     "00000000000000000000.index"])),
              D
@@ -861,7 +861,7 @@ diverged_replica(Config) ->
              {ok, D} =
                  file:read_file(
                      filename:join([PrivDir,
-                                    N,
+                                    hd(string:split(atom_to_list(N), "@")),
                                     ?FUNCTION_NAME,
                                     "00000000000000000000.segment"])),
              D
@@ -1072,7 +1072,7 @@ update_retention_replica(Config) ->
     timer:sleep(1000),
     %% validate
     Fun = fun(Pid) ->
-             Node = node(Pid),
+             Node = hd(string:split(atom_to_list(node(Pid)), "@")),
              Wc = filename:join([DataDir, Node, ?FUNCTION_NAME, "*.segment"]),
              Files = filelib:wildcard(Wc),
              length(Files)
