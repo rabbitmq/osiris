@@ -1551,9 +1551,8 @@ validate_read(Max, Next, Log0) ->
 start_child_node(NodeNamePrefix, PrivDir) ->
     start_child_node(NodeNamePrefix, PrivDir, []).
 
-start_child_node(NodeNamePrefix, PrivDir, ExtraAppConfig0) ->
+start_child_node(NodeName, PrivDir, ExtraAppConfig0) ->
     _ = file:make_dir(PrivDir),
-    NodeName = make_node_name(NodeNamePrefix),
     Dir = filename:join(PrivDir, NodeName),
     ok = file:make_dir(Dir),
 
