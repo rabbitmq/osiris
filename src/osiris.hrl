@@ -19,6 +19,12 @@
 -define(ERR(Fmt, Args), ?DISPATCH_LOG(error, Fmt, Args)).
 -define(ERROR(Fmt, Args), ?DISPATCH_LOG(error, Fmt, Args)).
 
+-if(?OTP_RELEASE >= 25).
+-define(PEER_MODULE, peer).
+-else.
+-define(PEER_MODULE, slave).
+-endif.
+
 -define(DISPATCH_LOG(Level, Fmt, Args),
         %% same as OTP logger does when using the macro
         catch (persistent_term:get('$osiris_logger')):log(Level, Fmt, Args,

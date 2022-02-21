@@ -14,7 +14,7 @@
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
--include("src/osiris_peer_shim.hrl").
+-include("osiris.hrl").
 
 %%%===================================================================
 %%% Common Test callbacks
@@ -81,7 +81,6 @@ end_per_suite(_Config) ->
     ok.
 
 init_per_group(_Group, Config) ->
-    application:set_env(kernel, prevent_overlapping_partitions, false),
     Config.
 
 end_per_group(_Group, _Config) ->
@@ -161,6 +160,7 @@ single_node_write(Config) ->
         exit(osiris_written_timeout)
     end,
     ?assertEqual(42, osiris:fetch_writer_seq(Leader, Wid)),
+    ct:pal("format status~n~p", [sys:get_status(Leader)]),
     ok.
 
 cluster_write_replication_plain(Config) ->
@@ -173,8 +173,8 @@ cluster_write(Config) ->
     ok = logger:set_primary_config(level, all),
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    PeerStates = [start_child_node(N, PrivDir, application:get_all_env(osiris)) || N <- [s1, s2, s3]],
-    [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir, application:get_all_env(osiris)) || N <- [s1, s2, s3]],
     WriterId = undefined,
     Conf0 =
         #{name => Name,
@@ -205,41 +205,38 @@ cluster_write(Config) ->
     [begin
          ok = validate_log(P, [{0, <<"mah-data">>}, {1, <<"mah-data2">>}])
      end || P <- [Leader | ReplicaPids]],
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 quorum_write(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
-    [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
           leader_node => LeaderNode,
           replica_nodes => Replicas},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-    [_ | ReplicaPeers] = PeerStates,
-    {FirstReplicaRef, _} = hd(ReplicaPeers),
-    stop_peer(FirstReplicaRef),
+    ?PEER_MODULE:stop(hd(Replicas)),
     ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
     receive
         {osiris_written, _, _WriterId, [42]} ->
             ok
     after 2000 ->
         flush(),
-        [stop_peer(Ref) || {Ref, _} <- PeerStates],
         exit(osiris_written_timeout)
     end,
     ok = validate_log(Leader, [{0, <<"mah-data">>}]),
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 cluster_batch_write(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
-    [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -261,7 +258,7 @@ cluster_batch_write(Config) ->
     timer:sleep(1000),
     ok = validate_log(ReplicaPid, [{0, <<"mah-data">>}]),
     ok = validate_log(ReplicaPid2, [{0, <<"mah-data">>}]),
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 single_node_offset_listener(Config) ->
@@ -313,8 +310,7 @@ single_node_reader_counters(Config) ->
 cluster_reader_counters(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
-    [_ | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [_ | Replicas] = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -334,9 +330,7 @@ cluster_reader_counters(Config) ->
     ?assertEqual(3, maps:get(readers, maps:get({'osiris_writer', Name}, Overview3))),
     osiris_log:close(Log1),
     Overview4 = osiris_counters:overview(),
-    ?assertEqual(2, maps:get(readers, maps:get({'osiris_writer', Name}, Overview4))),
-
-    [stop_peer(Ref) || {Ref, _} <- PeerStates].
+    ?assertEqual(2, maps:get(readers, maps:get({'osiris_writer', Name}, Overview4))).
 
 
 combine_ips_hosts_test(_Config) ->
@@ -389,7 +383,7 @@ cluster_offset_listener(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
     PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
-    [_ | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [_ | Replicas] = Nodes = [NodeName || {_Ref, NodeName} <- PeerStates],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -404,14 +398,14 @@ cluster_offset_listener(Config) ->
             ct:pal("got offset ~w", [O]),
             {[{0, <<"mah-data">>}], Log} = osiris_log:read_chunk_parsed(Log0),
             %% stop all replicas
-            [stop_peer(Ref) || {Ref, _} <- PeerStates],
+            [?PEER_MODULE:stop(Ref) || {Ref, _} <- PeerStates],
             ok = osiris:write(Leader, undefined, 43, <<"mah-data2">>),
             timer:sleep(10),
             {end_of_stream, _} = osiris_log:read_chunk_parsed(Log),
             ok
     after 2000 ->
         flush(),
-        [stop_peer(Ref) || {Ref, _} <- PeerStates],
+        [?PEER_MODULE:stop(Ref) || {Ref, _} <- PeerStates],
         exit(osiris_offset_timeout)
     end,
     ok.
@@ -420,7 +414,7 @@ replica_offset_listener(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
     PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
-    [_ | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [_ | Replicas] = Nodes = [NodeName || {_Ref, NodeName} <- PeerStates],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -454,10 +448,10 @@ replica_offset_listener(Config) ->
             ok
     after 5000 ->
         flush(),
-        [stop_peer(Ref) || {Ref, _} <- PeerStates],
+        [?PEER_MODULE:stop(Ref) || {Ref, _} <- PeerStates],
         exit(timeout)
     end,
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(Ref) || {Ref, _} <- PeerStates],
     ok.
 
 read_validate_single_node(Config) ->
@@ -493,8 +487,7 @@ read_validate(Config) ->
     Name = ?config(cluster_name, Config),
     NumWriters = 2,
     Num = 1000000 * NumWriters,
-    PeerStates = [start_child_node(N, PrivDir) || N <- [r1, r2]],
-    Replicas = [NodeName || {_Ref, NodeName} <- PeerStates],
+    Replicas = [start_child_node(N, PrivDir) || N <- [r1, r2]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -559,14 +552,14 @@ read_validate(Config) ->
         exit(validate_read_done_timeout)
     end,
 
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(N) || N <- Replicas],
     ok.
 
 cluster_restart(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
-    [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -602,14 +595,14 @@ cluster_restart(Config) ->
     ok =
         validate_log(Leader1,
                      [{0, <<"before-restart">>}, {1, <<"after-restart">>}]),
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 cluster_restart_large(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
-    [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -634,14 +627,14 @@ cluster_restart_large(Config) ->
             maps:with(Keys, CountersPost)
            ),
 
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 cluster_restart_new_leader(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
-    [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -682,14 +675,14 @@ cluster_restart_new_leader(Config) ->
     ok =
         validate_log(Leader1,
                      [{0, <<"before-restart">>}, {1, <<"after-restart">>}]),
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 cluster_delete(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
-    [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -706,7 +699,7 @@ cluster_delete(Config) ->
     end,
 
     osiris:delete_cluster(Conf),
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 cluster_failure(Config) ->
@@ -714,8 +707,8 @@ cluster_failure(Config) ->
     %% should also exit
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
-    [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -748,7 +741,7 @@ cluster_failure(Config) ->
     [] =
         supervisor:which_children({osiris_replica_reader_sup, node(Leader)}),
 
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 start_cluster_invalid_replicas(Config) ->
@@ -765,9 +758,9 @@ start_cluster_invalid_replicas(Config) ->
 restart_replica(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    Prefixes = [s1, s2, s3],
-    PeerStates = [start_child_node(N, PrivDir) || N <- Prefixes],
-    [LeaderE1, Replica1, Replica2] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    Nodes = [s1, s2, s3],
+    [LeaderE1, Replica1, Replica2] =
+        [start_child_node(N, PrivDir) || N <- Nodes],
     InitConf =
         #{name => Name,
           reference => Name,
@@ -796,9 +789,9 @@ restart_replica(Config) ->
 diverged_replica(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    Prefixes = [s1, s2, s3],
-    PeerStates = [start_child_node(N, PrivDir) || N <- Prefixes],
-    [LeaderE1, LeaderE2, LeaderE3] = Nodes = [NodeName || {_Ref, NodeName} <- PeerStates],
+    Nodes = [s1, s2, s3],
+    [LeaderE1, LeaderE2, LeaderE3] =
+        [start_child_node(N, PrivDir) || N <- Nodes],
     ConfE1 =
         #{name => Name,
           reference => Name,
@@ -899,9 +892,8 @@ retention_add_replica_after(Config) ->
     Num = 150000,
     Name = ?config(cluster_name, Config),
     SegSize = 50000 * 1000,
-    Prefixes = [s1, s2, s3],
-    PeerStates = [start_child_node(N, DataDir) || N <- Prefixes],
-    [LeaderNode, Replica1, Replica2] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [LeaderNode, Replica1, Replica2]  =
+        Nodes = [start_child_node(N, DataDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -937,7 +929,7 @@ retention_add_replica_after(Config) ->
     check_last_entry(ReplicaPid1, <<"last">>),
     check_last_entry(ReplicaPid2, <<"last">>),
     ok = osiris:stop_cluster(Conf2),
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 check_last_entry(Pid, Entry) when is_pid(Pid) ->
@@ -964,9 +956,8 @@ retention_overtakes_offset_reader(Config) ->
     Num = 150000,
     Name = ?config(cluster_name, Config),
     SegSize = 50000 * 1000,
-    Prefixes = [s1, s2, s3],
-    PeerStates = [start_child_node(N, DataDir) || N <- Prefixes],
-    [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, DataDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -975,7 +966,8 @@ retention_overtakes_offset_reader(Config) ->
           max_segment_size_bytes => SegSize,
           replica_nodes => Replicas},
     {ok, #{leader_pid := Leader,
-           replica_pids := [ReplicaPid1, ReplicaPid2]}} = osiris:start_cluster(Conf0),
+           replica_pids := [ReplicaPid1, ReplicaPid2]}} =
+        osiris:start_cluster(Conf0),
     ok = osiris:write(Leader, undefined, 0, <<"first">>),
     timer:sleep(500),
     Self = self(),
@@ -1014,7 +1006,7 @@ retention_overtakes_offset_reader(Config) ->
     after 30000 -> exit({done_timeout, Pid3})
     end,
 
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     %% read til the end
     ok.
 
@@ -1050,9 +1042,8 @@ update_retention_replica(Config) ->
     Num = 150000,
     SegSize = 50000 * 1000,
     Name = ?config(cluster_name, Config),
-    Prefixes = [s1, s2, s3],
-    PeerStates = [start_child_node(N, DataDir) || N <- Prefixes],
-    [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, DataDir) || N <- [s1, s2, s3]],
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -1072,7 +1063,7 @@ update_retention_replica(Config) ->
     timer:sleep(1000),
     %% validate
     Fun = fun(Pid) ->
-             Node = node(Pid),
+             Node = hd(string:split(atom_to_list(node(Pid)), "@")),
              Wc = filename:join([DataDir, Node, ?FUNCTION_NAME, "*.segment"]),
              Files = filelib:wildcard(Wc),
              length(Files)
@@ -1081,7 +1072,7 @@ update_retention_replica(Config) ->
     ?assertEqual(1, erpc:call(node(R2), erlang, apply, [Fun, [R2]])),
     ?assertEqual(1,
                  erpc:call(node(Leader), erlang, apply, [Fun, [Leader]])),
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 tracking_offset(Config) ->
@@ -1348,10 +1339,8 @@ single_node_deduplication_sub_batch(Config) ->
 cluster_minority_deduplication(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    Prefixes = [s1, s2, s3],
-    PeerStates = [start_child_node(N, PrivDir) || N <- Prefixes],
-    [_ | ReplicaStates] = PeerStates,
-    [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     WriterId = atom_to_binary(?FUNCTION_NAME, utf8),
     Conf0 =
         #{name => Name,
@@ -1359,7 +1348,7 @@ cluster_minority_deduplication(Config) ->
           leader_node => LeaderNode,
           replica_nodes => Replicas},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-    [stop_peer(Ref) || {Ref, _} <- ReplicaStates],
+    [?PEER_MODULE:stop(N) || N <- Replicas],
     ok = osiris:write(Leader, WriterId, 42, <<"data1">>),
     ok = osiris:write(Leader, WriterId, 42, <<"data1b">>),
     timer:sleep(50),
@@ -1372,15 +1361,14 @@ cluster_minority_deduplication(Config) ->
         ok
     end,
     ok = validate_log(Leader, [{0, <<"data1">>}, {1, <<"data2">>}]),
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 cluster_deduplication(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    Prefixes = [s1, s2, s3],
-    PeerStates = [start_child_node(N, PrivDir) || N <- Prefixes],
-    [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     WriterId = atom_to_binary(?FUNCTION_NAME, utf8),
     Conf0 =
         #{name => Name,
@@ -1405,7 +1393,7 @@ cluster_deduplication(Config) ->
         exit(osiris_written_timeout_2)
     end,
     ok = validate_log(Leader, [{0, <<"mah-data">>}]),
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 cluster_deduplication_order(Config) ->
@@ -1414,9 +1402,8 @@ cluster_deduplication_order(Config) ->
     %% for details
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    Prefixes = [s1, s2, s3],
-    PeerStates = [start_child_node(N, PrivDir) || N <- Prefixes],
-    [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    [LeaderNode | Replicas] =
+        Nodes = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     WriterId = atom_to_binary(?FUNCTION_NAME, utf8),
     Conf0 =
         #{name => Name,
@@ -1435,7 +1422,7 @@ cluster_deduplication_order(Config) ->
     || N <- SEQ],
 
     wait_for_written_order(SEQ),
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    [?PEER_MODULE:stop(N) || N <- Nodes],
     ok.
 
 writers_retention(Config) ->
@@ -1468,7 +1455,9 @@ writers_retention(Config) ->
     %% roll over
     Writers = osiris_writer:query_writers(Leader, fun(W) -> W end),
 
+    ct:pal("Num writers ~w", [map_size(Writers)]),
     ?assert(map_size(Writers) < 33),
+    ct:pal("WRITERS ~p", [lists:min(maps:keys(Writers))]),
 
     %% validate there are only a single entry
     ok.
@@ -1487,6 +1476,7 @@ write_n(Pid, N, Next, BinSize, Written) ->
     write_n(Pid, N, Next + 1, BinSize, Written#{Next => ok}).
 
 wait_for_written(Written0) when is_list(Written0) ->
+    ct:pal("wait_for_written num: ~w", [length(Written0)]),
     wait_for_written(lists:foldl(fun(N, Acc) -> maps:put(N, ok, Acc) end,
                                  #{}, Written0));
 wait_for_written(Written0) ->
@@ -1551,21 +1541,16 @@ validate_read(Max, Next, Log0) ->
 start_child_node(NodeNamePrefix, PrivDir) ->
     start_child_node(NodeNamePrefix, PrivDir, []).
 
-start_child_node(NodeNamePrefix, PrivDir, ExtraAppConfig0) ->
+start_child_node(NodeNamePrefix, PrivDir, ExtraAppConfig) ->
     _ = file:make_dir(PrivDir),
     NodeName = make_node_name(NodeNamePrefix),
-    Dir = filename:join(PrivDir, NodeName),
-    ok = file:make_dir(Dir),
-
-    %% make sure the data dir computed above is passed on to the peers
-    ExtraAppConfig1 = proplists:delete(data_dir, ExtraAppConfig0),
-    ExtraAppConfig = [{data_dir, Dir} | ExtraAppConfig1],
-
+    Dir0 = filename:join(PrivDir, NodeName),
+    ok = file:make_dir(Dir0),
     Host = get_current_host(),
-    Args = ["-pa" | search_paths()] ++
-           ["-kernel", "prevent_overlapping_partitions", "false"],
-    %% ct:pal("starting child node ~p with ~p~n", [NodeName, Args]),
-    {_Ref, FinalNodeName} = Result = case start_peer_node(Host, NodeName, Args) of
+    Dir = "\"" ++ Dir0 ++ "\"",
+    Args = ["-pa" | search_paths()] ++ ["-osiris data_dir", Dir],
+    ct:pal("starting child node ~p with ~p~n", [NodeName, Args]),
+    {Ref, FinalNodeName} = Result = case start_peer_node(Host, NodeName, Args) of
         {ok, Pid, FinalNodeName0} when is_atom(FinalNodeName0) ->
             {Pid, FinalNodeName0};
         {ok, FinalNodeName0} when is_atom(FinalNodeName0) ->
@@ -1573,9 +1558,8 @@ start_child_node(NodeNamePrefix, PrivDir, ExtraAppConfig0) ->
             {FinalNodeName0, FinalNodeName0}
     end,
     %% ct:pal("started child node ~w~n", [FinalNodeName]),
-    ct:pal("node ~s will use data dir at ~s", [FinalNodeName, Dir]),
-    ok = erpc:call(FinalNodeName, ?MODULE, node_setup, [Dir]),
-    %% ct:pal("performed node setup on child node ~w", [FinalNodeName]),
+    ok = erpc:call(FinalNodeName, ?MODULE, node_setup, [Dir0]),
+    ct:pal("performed node setup on child node ~w", [FinalNodeName]),
     ok = erpc:call(FinalNodeName, osiris, configure_logger, [logger]),
     %% ct:pal("configured logger on child node ~w", [FinalNodeName]),
     AppsToStart = case proplists:lookup(replication_transport, ExtraAppConfig) of
@@ -1584,9 +1568,12 @@ start_child_node(NodeNamePrefix, PrivDir, ExtraAppConfig0) ->
         _ ->
             [osiris]
     end,
+    [begin
+        Res = erpc:call(FinalNodeName, application, ensure_all_started, [App]),
+        ct:pal("application start result on node ~s: ~p", [FinalNodeName, Res])
+    end || App <- AppsToStart],
+    ok = erpc:call(FinalNodeName, logger, set_primary_config, [level, all]),
 
-    Keys = proplists:get_keys(ExtraAppConfig),
-    AllKeys = lists:usort([replication_transport, replication_server_ssl_options, replication_client_ssl_options] ++ Keys),
     [begin
         case proplists:lookup(K, ExtraAppConfig) of
             none ->
@@ -1594,12 +1581,7 @@ start_child_node(NodeNamePrefix, PrivDir, ExtraAppConfig0) ->
             {K, V} ->
                 ok = erpc:call(FinalNodeName, application, set_env, [osiris, K, V])
         end
-    end || K <- AllKeys],
-
-    [begin
-        erpc:call(FinalNodeName, application, ensure_all_started, [App])
-    end || App <- AppsToStart],
-    ok = erpc:call(FinalNodeName, logger, set_primary_config, [level, all]),
+    end || K <- [replication_transport, replication_server_ssl_options, replication_client_ssl_options]],
 
     Result.
 
@@ -1620,7 +1602,7 @@ start_peer_node(Host, NodeName, Args) ->
             start_peer_node_pre_25(Host, NodeName, Args)
     end.
 
-start_peer_node_25(_Host, NodeName, Args) ->
+start_peer_node_25(Host, NodeName, Args) ->
     Opts = #{
         %% the caller is responsible for computing the final name,
         %% as the peer module implies that both node name prefix and
@@ -1634,25 +1616,6 @@ start_peer_node_25(_Host, NodeName, Args) ->
 start_peer_node_pre_25(Host, NodeName, Args) ->
     ArgString = string:join(Args, " "),
     ?PEER_MODULE:start_link(Host, NodeName, ArgString).
-
-stop_peer(RefOrName) ->
-    case list_to_integer(erlang:system_info(otp_release)) of
-        N when N >= 25 ->
-            stop_peer_25(RefOrName);
-        _ ->
-            stop_peer_pre25(RefOrName)
-    end.
-
-stop_peer_25(RefOrName) ->
-    %% peer:stop/1 not idempotent
-    try
-        ?PEER_MODULE:stop(RefOrName)
-    catch exit:_:_Stacktrace ->
-        ok
-    end.
-
-stop_peer_pre25(RefOrName) ->
-    ?PEER_MODULE:stop(RefOrName).
 
 get_current_host() ->
     {ok, H} = inet:gethostname(),
@@ -1728,19 +1691,11 @@ node_setup(DataDir) ->
     logger:set_primary_config(level, debug),
     Config = #{config => #{type => {file, LogFile}}, level => debug},
     logger:add_handler(ra_handler, logger_std_h, Config),
-
-    application:load(kernel),
-    application:set_env(kernel, prevent_overlapping_partitions, false),
-
     application:load(sasl),
     application:set_env(sasl, sasl_error_logger, {file, SaslFile}),
     application:stop(sasl),
     application:start(sasl),
     _ = error_logger:tty(false),
-
-    application:load(osiris),
-    application:set_env(osiris, data_dir, DataDir),
-
     ok.
 
 simple(Bin) ->
