@@ -135,6 +135,7 @@ init(#{hosts := Hosts,
                        [binary, {packet, 0}, {nodelay, true}, {sndbuf, SndBuf}])
     of
         {ok, Sock, Host} ->
+            ?DEBUG("successfully connected to host ~p", [Host]),
             CntId = {?MODULE, ExtRef, Host, Port},
             CntSpec = {CntId, ?COUNTER_FIELDS},
             Config = #{counter_spec => CntSpec, transport => Transport},
@@ -160,6 +161,7 @@ init(#{hosts := Hosts,
                                                        leader_monitor_ref = MRef,
                                                        counter = CntRef,
                                                        counter_id = CntId}),
+                ?DEBUG("sent committed offset information to the leader at ~p", [LeaderPid]),
                 {ok, State}
             catch
                 exit:{noproc, _} ->

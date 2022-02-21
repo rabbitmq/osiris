@@ -7,7 +7,8 @@
 
 -module(osiris_bench).
 
--include("osiris.hrl").
+-include("src/osiris.hrl").
+-include("src/osiris_peer_shim.hrl").
 
 -export([run/1,
          stop/1,
@@ -62,8 +63,27 @@ run(#{name := Name} = Spec) ->
                     #{leader => Leader2, in_flight => InFlight}),
     Nodes.
 
-stop(Nodes) ->
-    [?PEER_MODULE:stop(N) || N <- Nodes].
+stop(Nodes) when is_list(Nodes) ->
+    [stop_peer(N) || N <- Nodes].
+
+stop_peer(RefOrName) ->
+    case list_to_integer(erlang:system_info(otp_release)) of
+        N when N >= 25 ->
+            stop_peer_25(RefOrName);
+        _ ->
+            stop_peer_pre25(RefOrName)
+    end.
+
+stop_peer_25(RefOrName) ->
+    %% peer:stop/1 not idempotent
+    try
+        ?PEER_MODULE:stop(RefOrName)
+    catch exit:_:_Stacktrace ->
+        ok
+    end.
+
+stop_peer_pre25(RefOrName) ->
+    ?PEER_MODULE:stop(RefOrName).
 
 start_publisher(Node, Conf) ->
     erlang:spawn(Node, ?MODULE, do_publish, [Conf]).
