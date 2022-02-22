@@ -7,8 +7,8 @@
 
 -module(osiris_bench).
 
--include("src/osiris.hrl").
--include("src/osiris_peer_shim.hrl").
+-include("osiris.hrl").
+-include("osiris_peer_shim.hrl").
 
 -export([run/1,
          stop/1,
