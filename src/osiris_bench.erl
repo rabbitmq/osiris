@@ -110,20 +110,21 @@ do_metrics(O0) ->
     O = osiris_counters:overview(),
     O1 = maps:with(
              maps:keys(O0), O),
-    maps:map(fun(K, CC) ->
-                M = element(1, K),
-                N = element(2, K),
-                %% get last counters
-                CL = maps:get(K, O0),
-                Rates =
-                    maps:fold(fun(F, V, Acc) ->
-                                 LV = maps:get(F, CL),
-                                 [{F, (V - LV) / ?METRICS_INT_S} | Acc]
-                              end,
-                              [], CC),
-                io:format("~s: ~s/~s - Rates ~w~n~n", [node(), M, N, Rates])
-             end,
-             O1),
+    _ = maps:map(
+          fun(K, CC) ->
+                  M = element(1, K),
+                  N = element(2, K),
+                  %% get last counters
+                  CL = maps:get(K, O0),
+                  Rates =
+                      maps:fold(fun(F, V, Acc) ->
+                                        LV = maps:get(F, CL),
+                                        [{F, (V - LV) / ?METRICS_INT_S} | Acc]
+                                end,
+                                [], CC),
+                  io:format("~s: ~s/~s - Rates ~w~n~n", [node(), M, N, Rates])
+          end,
+          O1),
     timer:sleep(?METRICS_INT_S * 1000),
     do_metrics(O).
 
@@ -141,25 +142,19 @@ start_secondary(NodeName, RunDir) ->
     S.
 
 
-start_peer_node(Host, NodeName, Args) ->
-    case list_to_integer(erlang:system_info(otp_release)) of
-        N when N >= 25 ->
-            start_peer_node_25(Host, NodeName, Args);
-        _ ->
-            start_peer_node_pre_25(Host, NodeName, Args)
-    end.
-
-start_peer_node_25(Host, NodeName, Args) ->
+-if(?OTP_RELEASE >= 25).
+start_peer_node(Host, NodeName, Args) when is_atom(NodeName) ->
     Opts = #{
-        name => string:trim(NodeName),
+        name => string:trim(atom_to_list(NodeName)),
         host => Host,
         args => Args
     },
     ?PEER_MODULE:start_link(Opts).
-
-start_peer_node_pre_25(Host, NodeName, Args) ->
+-else.
+start_peer_node(Host, NodeName, Args) when is_atom(NodeName) ->
     ArgString = string:join(Args, " "),
     ?PEER_MODULE:start_link(Host, NodeName, ArgString).
+-endif.
 
 get_current_host() ->
     {ok, H} = inet:gethostname(),

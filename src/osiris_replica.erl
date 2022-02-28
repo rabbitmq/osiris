@@ -305,7 +305,7 @@ accept(tcp, LSock, Process) ->
     ?DEBUG("~s: socket accepted opts ~w",
            [?MODULE, inet:getopts(Sock, [buffer, recbuf])]),
     Process ! {socket, Sock},
-    gen_tcp:controlling_process(Sock, Process),
+    ok = gen_tcp:controlling_process(Sock, Process),
     _ = gen_tcp:close(LSock),
     ok;
 accept(ssl, LSock, Process) ->
@@ -628,15 +628,16 @@ notify_offset_listeners(#?MODULE{cfg =
             %% available locally yet
             {Notify, L} =
                 lists:splitwith(fun({_Pid, O, _}) -> O =< Max end, L0),
-            [begin
-                 Evt =
-                 wrap_osiris_event(%% the per offset listener event formatter takes precedence of
-                   %% the process scoped one
-                   select_formatter(Fmt, EvtFmt),
-                   {osiris_offset, Ref, COffs}),
-                 P ! Evt
-             end
-             || {P, _, Fmt} <- Notify],
+            _ = [begin
+                     Evt =
+                         %% the per offset listener event formatter takes precedence of
+                         %% the process scoped one
+                         wrap_osiris_event(
+                           select_formatter(Fmt, EvtFmt),
+                           {osiris_offset, Ref, COffs}),
+                     P ! Evt
+                 end
+                 || {P, _, Fmt} <- Notify],
             State#?MODULE{offset_listeners = L};
         _ ->
             State

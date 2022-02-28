@@ -532,15 +532,16 @@ notify_offset_listeners(#?MODULE{cfg =
                             State) ->
     {Notify, L} =
         lists:partition(fun({_Pid, O, _}) -> O =< COffs end, L0),
-    [begin
-         Evt =
-             wrap_osiris_event(%% the per offset listener event formatter takes precedence of
-                               %% the process scoped one
-                               select_formatter(Fmt, EvtFmt),
-                               {osiris_offset, Ref, COffs}),
-         P ! Evt
-     end
-     || {P, _, Fmt} <- Notify],
+    _ = [begin
+             Evt =
+                 %% the per offset listener event formatter takes precedence of
+                 %% the process scoped one
+                 wrap_osiris_event(
+                   select_formatter(Fmt, EvtFmt),
+                   {osiris_offset, Ref, COffs}),
+             P ! Evt
+         end
+         || {P, _, Fmt} <- Notify],
     State#?MODULE{offset_listeners = L}.
 
 select_formatter(undefined, Fmt) ->

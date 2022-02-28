@@ -255,7 +255,7 @@ start_replicas(Config, [Node | Nodes], ReplicaPids) ->
                 start_replicas(Config, Nodes, [Pid | ReplicaPids]);
             {ok, Pid, _} ->
                 start_replicas(Config, Nodes, [Pid | ReplicaPids]);
-            {already_started, Pid} ->
+            {error, {already_started, Pid}} ->
                 start_replicas(Config, Nodes, [Pid | ReplicaPids]);
             {error, Reason} ->
                 error_logger:info_msg("osiris:start_replicas failed to start replica "
