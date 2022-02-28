@@ -1,6 +1,6 @@
 load("@rules_erlang//:erlang_app.bzl", "erlang_app", "test_erlang_app")
 load("@rules_erlang//:xref.bzl", "xref")
-load("@rules_erlang//:dialyze.bzl", "dialyze", "plt")
+load("@rules_erlang//:dialyze.bzl", "DEFAULT_PLT_APPS", "dialyze", "plt")
 load("@rules_erlang//:ct_sharded.bzl", "ct_suite")
 
 NAME = "osiris"
@@ -44,14 +44,21 @@ test_erlang_app(
     deps = DEPS,
 )
 
-xref()
+xref(
+    size = "small",
+    tags = ["xref"],
+)
 
 plt(
     name = "base_plt",
+    apps = DEFAULT_PLT_APPS + EXTRA_APPS,
+    deps = DEPS + RUNTIME_DEPS,
 )
 
 dialyze(
+    size = "small",
     plt = ":base_plt",
+    tags = ["dialyze"],
 )
 
 [ct_suite(
