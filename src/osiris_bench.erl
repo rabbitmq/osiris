@@ -66,24 +66,18 @@ run(#{name := Name} = Spec) ->
 stop(Nodes) when is_list(Nodes) ->
     [stop_peer(N) || N <- Nodes].
 
+-if(?OTP_RELEASE >= 25).
 stop_peer(RefOrName) ->
-    case list_to_integer(erlang:system_info(otp_release)) of
-        N when N >= 25 ->
-            stop_peer_25(RefOrName);
-        _ ->
-            stop_peer_pre25(RefOrName)
-    end.
-
-stop_peer_25(RefOrName) ->
     %% peer:stop/1 not idempotent
     try
         ?PEER_MODULE:stop(RefOrName)
     catch exit:_:_Stacktrace ->
         ok
     end.
-
-stop_peer_pre25(RefOrName) ->
+-else.
+stop_peer(RefOrName) ->
     ?PEER_MODULE:stop(RefOrName).
+-endif.
 
 start_publisher(Node, Conf) ->
     erlang:spawn(Node, ?MODULE, do_publish, [Conf]).
@@ -134,12 +128,12 @@ start_secondary(NodeName, RunDir) ->
     Dir = "'\"" ++ Dir0 ++ "\"'",
     Args = ["-pa" | search_paths()] ++ ["-osiris data_dir", Dir],
     ?INFO("osiris_bench: starting child node ~p with ~s~n", [NodeName, Args]),
-    {ok, S} = start_peer_node(Host, NodeName, Args),
-    ?INFO("osiris_bench: started child node ~w ~w~n", [S, Host]),
-    Res = rpc:call(S, application, ensure_all_started, [osiris]),
-    ok = rpc:call(S, logger, set_primary_config, [level, all]),
+    {ok, N} = start_peer_node(Host, NodeName, Args),
+    ?INFO("osiris_bench: started child node ~w ~w~n", [N, Host]),
+    Res = rpc:call(N, application, ensure_all_started, [osiris]),
+    ok = rpc:call(N, logger, set_primary_config, [level, all]),
     ?INFO("osiris_bench: application start result ~p", [Res]),
-    S.
+    N.
 
 
 -if(?OTP_RELEASE >= 25).
@@ -149,7 +143,8 @@ start_peer_node(Host, NodeName, Args) when is_atom(NodeName) ->
         host => Host,
         args => Args
     },
-    ?PEER_MODULE:start_link(Opts).
+    {ok, _Pid, Node} = ?PEER_MODULE:start_link(Opts),
+    {ok, Node}.
 -else.
 start_peer_node(Host, NodeName, Args) when is_atom(NodeName) ->
     ArgString = string:join(Args, " "),
@@ -158,7 +153,7 @@ start_peer_node(Host, NodeName, Args) when is_atom(NodeName) ->
 
 get_current_host() ->
     {ok, H} = inet:gethostname(),
-    list_to_atom(H).
+    H.
 
 search_paths() ->
     Ld = code:lib_dir(),

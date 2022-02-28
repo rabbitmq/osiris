@@ -57,6 +57,10 @@ plt(
 
 dialyze(
     size = "small",
+    dialyzer_opts = [
+        "-Werror_handling",
+        "-Wunmatched_returns",
+    ],
     plt = ":base_plt",
     tags = ["dialyze"],
 )
