@@ -44,6 +44,10 @@
          directory/1,
          delete_directory/1]).
 
+-ifdef(TEST).
+-export([part_test/0]).
+-endif.
+
 -define(IDX_VERSION, 1).
 -define(LOG_VERSION, 1).
 -define(IDX_HEADER, <<"OSII", ?IDX_VERSION:32/unsigned>>).
