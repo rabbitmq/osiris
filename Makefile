@@ -11,7 +11,7 @@ define PROJECT_ENV
 endef
 
 LOCAL_DEPS = sasl crypto
-dep_gen_batch_server = hex 0.8.6
+dep_gen_batch_server = hex 0.8.7
 dep_seshat = git https://github.com/rabbitmq/seshat.git main
 DEPS = gen_batch_server seshat
 
