@@ -107,21 +107,22 @@ extra_init(cluster_write_replication_tls) ->
     TlsGenDir = os:getenv("DEPS_DIR") ++ "/tls_gen/basic",
     TlsGenCmd = "make -C " ++ TlsGenDir ++ " CLIENT_ALT_NAME=$(hostname -s) SERVER_ALT_NAME=$(hostname -s)",
     TlsGenBasicOutput = os:cmd(TlsGenCmd),
+    Hostname = string:trim(os:cmd("hostname -s"), both, "\n"),
     ct:pal(?LOW_IMPORTANCE, "~s: ~s", [TlsGenCmd, TlsGenBasicOutput]),
     TlsConfDir = TlsGenDir ++ "/result/",
     application:set_env(osiris, replication_transport, ssl),
     application:set_env(osiris, replication_server_ssl_options, [
         {cacertfile, TlsConfDir ++ "ca_certificate.pem"},
-        {certfile, TlsConfDir ++ "server_certificate.pem"},
-        {keyfile, TlsConfDir ++ "server_key.pem"},
+        {certfile, TlsConfDir ++ "server_" ++ Hostname ++ "_certificate.pem"},
+        {keyfile, TlsConfDir ++ "server_" ++ Hostname ++ "_key.pem"},
         {secure_renegotiate, true},
         {verify,verify_peer},
         {fail_if_no_peer_cert, true}
     ]),
     application:set_env(osiris, replication_client_ssl_options, [
         {cacertfile, TlsConfDir ++ "ca_certificate.pem"},
-        {certfile, TlsConfDir ++ "client_certificate.pem"},
-        {keyfile, TlsConfDir ++ "client_key.pem"},
+        {certfile, TlsConfDir ++ "client_" ++ Hostname ++ "_certificate.pem"},
+        {keyfile, TlsConfDir ++ "client_" ++ Hostname ++ "_key.pem"},
         {secure_renegotiate, true},
         {verify,verify_peer},
         {fail_if_no_peer_cert, true}
