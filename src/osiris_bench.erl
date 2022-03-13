@@ -66,24 +66,18 @@ run(#{name := Name} = Spec) ->
 stop(Nodes) when is_list(Nodes) ->
     [stop_peer(N) || N <- Nodes].
 
+-if(?OTP_RELEASE >= 25).
 stop_peer(RefOrName) ->
-    case list_to_integer(erlang:system_info(otp_release)) of
-        N when N >= 25 ->
-            stop_peer_25(RefOrName);
-        _ ->
-            stop_peer_pre25(RefOrName)
-    end.
-
-stop_peer_25(RefOrName) ->
     %% peer:stop/1 not idempotent
     try
         ?PEER_MODULE:stop(RefOrName)
     catch exit:_:_Stacktrace ->
         ok
     end.
-
-stop_peer_pre25(RefOrName) ->
+-else.
+stop_peer(RefOrName) ->
     ?PEER_MODULE:stop(RefOrName).
+-endif.
 
 start_publisher(Node, Conf) ->
     erlang:spawn(Node, ?MODULE, do_publish, [Conf]).
@@ -110,20 +104,21 @@ do_metrics(O0) ->
     O = osiris_counters:overview(),
     O1 = maps:with(
              maps:keys(O0), O),
-    maps:map(fun(K, CC) ->
-                M = element(1, K),
-                N = element(2, K),
-                %% get last counters
-                CL = maps:get(K, O0),
-                Rates =
-                    maps:fold(fun(F, V, Acc) ->
-                                 LV = maps:get(F, CL),
-                                 [{F, (V - LV) / ?METRICS_INT_S} | Acc]
-                              end,
-                              [], CC),
-                io:format("~s: ~s/~s - Rates ~w~n~n", [node(), M, N, Rates])
-             end,
-             O1),
+    _ = maps:map(
+          fun(K, CC) ->
+                  M = element(1, K),
+                  N = element(2, K),
+                  %% get last counters
+                  CL = maps:get(K, O0),
+                  Rates =
+                      maps:fold(fun(F, V, Acc) ->
+                                        LV = maps:get(F, CL),
+                                        [{F, (V - LV) / ?METRICS_INT_S} | Acc]
+                                end,
+                                [], CC),
+                  io:format("~s: ~s/~s - Rates ~w~n~n", [node(), M, N, Rates])
+          end,
+          O1),
     timer:sleep(?METRICS_INT_S * 1000),
     do_metrics(O).
 
@@ -133,37 +128,32 @@ start_secondary(NodeName, RunDir) ->
     Dir = "'\"" ++ Dir0 ++ "\"'",
     Args = ["-pa" | search_paths()] ++ ["-osiris data_dir", Dir],
     ?INFO("osiris_bench: starting child node ~p with ~s~n", [NodeName, Args]),
-    {ok, S} = start_peer_node(Host, NodeName, Args),
-    ?INFO("osiris_bench: started child node ~w ~w~n", [S, Host]),
-    Res = rpc:call(S, application, ensure_all_started, [osiris]),
-    ok = rpc:call(S, logger, set_primary_config, [level, all]),
+    {ok, N} = start_peer_node(Host, NodeName, Args),
+    ?INFO("osiris_bench: started child node ~w ~w~n", [N, Host]),
+    Res = rpc:call(N, application, ensure_all_started, [osiris]),
+    ok = rpc:call(N, logger, set_primary_config, [level, all]),
     ?INFO("osiris_bench: application start result ~p", [Res]),
-    S.
+    N.
 
 
-start_peer_node(Host, NodeName, Args) ->
-    case list_to_integer(erlang:system_info(otp_release)) of
-        N when N >= 25 ->
-            start_peer_node_25(Host, NodeName, Args);
-        _ ->
-            start_peer_node_pre_25(Host, NodeName, Args)
-    end.
-
-start_peer_node_25(Host, NodeName, Args) ->
+-if(?OTP_RELEASE >= 25).
+start_peer_node(Host, NodeName, Args) when is_atom(NodeName) ->
     Opts = #{
-        name => string:trim(NodeName),
+        name => string:trim(atom_to_list(NodeName)),
         host => Host,
         args => Args
     },
-    ?PEER_MODULE:start_link(Opts).
-
-start_peer_node_pre_25(Host, NodeName, Args) ->
+    {ok, _Pid, Node} = ?PEER_MODULE:start_link(Opts),
+    {ok, Node}.
+-else.
+start_peer_node(Host, NodeName, Args) when is_atom(NodeName) ->
     ArgString = string:join(Args, " "),
     ?PEER_MODULE:start_link(Host, NodeName, ArgString).
+-endif.
 
 get_current_host() ->
     {ok, H} = inet:gethostname(),
-    list_to_atom(H).
+    H.
 
 search_paths() ->
     Ld = code:lib_dir(),

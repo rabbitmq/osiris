@@ -43,7 +43,7 @@ delete_child(Node, #{name := CName} = Config) ->
     try
         case supervisor:get_childspec({?MODULE, Node}, CName) of
             {ok, _} ->
-                stop_child(Node, CName),
+                _ = stop_child(Node, CName),
                 rpc:call(Node, osiris_log, delete_directory, [Config]);
             {error, not_found} ->
                 ok

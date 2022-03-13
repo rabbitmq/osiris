@@ -16,6 +16,9 @@
 -include_lib("eunit/include/eunit.hrl").
 -include("src/osiris_peer_shim.hrl").
 
+-dialyzer({no_match, start_child_node/3}).
+-dialyzer({nowarn_function, start_peer_node_25/3}).
+
 %%%===================================================================
 %%% Common Test callbacks
 %%%===================================================================

@@ -11,6 +11,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         erlang_version:
         - "23.3"
@@ -30,6 +31,7 @@ jobs:
   build-bazel:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         erlang_version:
         - "23.3"

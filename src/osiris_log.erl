@@ -44,6 +44,10 @@
          directory/1,
          delete_directory/1]).
 
+-ifdef(TEST).
+-export([part_test/0]).
+-endif.
+
 -define(IDX_VERSION, 1).
 -define(LOG_VERSION, 1).
 -define(IDX_HEADER, <<"OSII", ?IDX_VERSION:32/unsigned>>).
@@ -1113,7 +1117,7 @@ last_user_chunk_id0([#seg_info{index = IdxFile} = Info | Rest]) ->
     try
         %% Do not read-ahead since we read the index file backwards chunk by chunk.
         {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
-        file:position(IdxFd, eof),
+        {ok, _} = file:position(IdxFd, eof),
         Last = last_user_chunk_id_in_index(IdxFd),
         _ = file:close(IdxFd),
         case Last of
