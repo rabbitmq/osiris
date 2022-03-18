@@ -809,7 +809,7 @@ truncate_to(Name, Range, [{E, ChId} | NextEOs], SegInfos) ->
                            {offset_out_of_range,
                             empty | {offset(), offset()}}} |
                           {error,
-                           {invalid_last_epoch_offset, epoch(), offset()}}.
+                           {invalid_last_offset_epoch, epoch(), offset()}}.
 init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir} = Config) ->
     SegInfos = build_log_overview(Dir),
     Range = offset_range_from_segment_infos(SegInfos),
@@ -849,7 +849,7 @@ check_chunk_has_expected_epoch(ChunkId, Epoch, SegInfos) ->
         not_found ->
             %% this is unexpected and thus an error
             {error,
-             {invalid_last_epoch_offset, Epoch, unknown}};
+             {invalid_last_offset_epoch, Epoch, unknown}};
         {found, SegmentInfo = #seg_info{file = _PrevSeg}} ->
             %% prev segment exists, does it have the correct
             %% epoch?
@@ -858,7 +858,7 @@ check_chunk_has_expected_epoch(ChunkId, Epoch, SegInfos) ->
                     ok;
                 {ChunkId, OtherEpoch, _} ->
                     {error,
-                     {invalid_last_epoch_offset, Epoch, OtherEpoch}}
+                     {invalid_last_offset_epoch, Epoch, OtherEpoch}}
             end
     end.
 
