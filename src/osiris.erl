@@ -187,7 +187,7 @@ fetch_writer_seq(Pid, WriterId)
                      {ok, osiris_log:state()} |
                      {error,
                       {offset_out_of_range, empty | {offset(), offset()}}} |
-                     {error, {invalid_last_offset_epoch, offset(), offset()}}.
+                     {error, {invalid_last_epoch_offset, offset(), offset()}}.
 init_reader(Pid, OffsetSpec, CounterSpec) ->
     init_reader(Pid, OffsetSpec, CounterSpec, #{transport => tcp,
                                                 chunk_selector => user_data}).
@@ -196,7 +196,7 @@ init_reader(Pid, OffsetSpec, CounterSpec) ->
                      {ok, osiris_log:state()} |
                      {error,
                       {offset_out_of_range, empty | {offset(), offset()}}} |
-                     {error, {invalid_last_offset_epoch, offset(), offset()}}.
+                     {error, {invalid_last_epoch_offset, offset(), offset()}}.
 init_reader(Pid, OffsetSpec, {_, _} = CounterSpec, Options)
     when is_pid(Pid) andalso node(Pid) =:= node() ->
     ?DEBUG("osiris: initialising reader. Spec: ~w", [OffsetSpec]),
