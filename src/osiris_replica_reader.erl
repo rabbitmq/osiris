@@ -124,8 +124,7 @@ init(#{hosts := Hosts,
        leader_pid := LeaderPid,
        start_offset := {StartOffset, _} = TailInfo,
        reference := ExtRef,
-       connection_token := Token} =
-         Args) ->
+       connection_token := Token}) ->
     process_flag(trap_exit, true),
 
     SndBuf = 146988 * 10,
@@ -144,8 +143,8 @@ init(#{hosts := Hosts,
                 {ok, Log} =
                     osiris_writer:init_data_reader(LeaderPid, TailInfo, Config),
                 CntRef = osiris_log:counters_ref(Log),
-                ?INFO("starting replica reader ~s at offset ~b Args: ~p",
-                      [Name, osiris_log:next_offset(Log), Args]),
+                ?INFO("starting osiris replica reader ~s at offset ~b",
+                      [Name, osiris_log:next_offset(Log)]),
 
                 ok = send(Transport, Sock, Token),
                 %% register data listener with osiris_proc
