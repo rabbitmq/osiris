@@ -129,7 +129,7 @@ init(#{hosts := Hosts,
     process_flag(trap_exit, true),
 
     SndBuf = 146988 * 10,
-    ?DEBUG("trying to connect replica to ~p", [Hosts]),
+    ?DEBUG("trying to connect to replica at ~p", [Hosts]),
 
     case maybe_connect(Transport, Hosts, Port,
                        [binary, {packet, 0}, {nodelay, true}, {sndbuf, SndBuf}])
@@ -169,7 +169,7 @@ init(#{hosts := Hosts,
                     {stop, writer_unavailable}
             end;
         {error, Reason} ->
-            ?WARN("could not connect osiris replica to ~p", [Hosts]),
+            ?WARN("could not connect osiris to replica at ~p", [Hosts]),
             {stop, Reason}
     end.
 
