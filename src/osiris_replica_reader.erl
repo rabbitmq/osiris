@@ -57,7 +57,7 @@ maybe_connect(tcp, [H | T], Port, Options) ->
         {ok, Sock} ->
             {ok, Sock, H};
         {error, _} ->
-            ?WARN("osiris replica connection refused, host:~p - port: ~p", [H, Port]),
+            ?DEBUG("osiris replica connection refused, host:~p - port: ~p", [H, Port]),
             maybe_connect(tcp, T, Port, Options)
     end;
 maybe_connect(ssl, [H | T], Port, Options) ->
@@ -69,10 +69,11 @@ maybe_connect(ssl, [H | T], Port, Options) ->
         {ok, Sock} ->
             {ok, Sock, H};
         {error, {tls_alert, {handshake_failure, _}}} ->
-            ?WARN("osiris replica TLS connection refused, host:~p - port: ~p", [H, Port]),
+            ?DEBUG("osiris replica TLS connection refused (handshake failure), host:~p - port: ~p",
+                  [H, Port]),
             maybe_connect(ssl, T, Port, Options);
         {error, E} ->
-            ?WARN("osiris replica TLS connection refused, host:~p - port: ~p", [H, Port]),
+            ?DEBUG("osiris replica TLS connection refused, host:~p - port: ~p", [H, Port]),
             ?DEBUG("error while trying to establish TLS connection ~p", [E]),
             {error, connection_refused}
     end.
@@ -168,6 +169,7 @@ init(#{hosts := Hosts,
                     {stop, writer_unavailable}
             end;
         {error, Reason} ->
+            ?WARN("could not connect osiris replica to ~p", [Hosts]),
             {stop, Reason}
     end.
 
