@@ -1071,8 +1071,8 @@ many_segment_overview(Config) ->
                                     end),
     ct:pal("OverviewTaken ~p", [OverviewTaken ]),
     ct:pal("~p", [Res]),
-    ?assertEqual({{0,40959},[{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]},
-                 Res),
+    ?assertEqual({{0,40959},
+                  [{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]}, Res),
 
     {InitTaken, _} = timer:tc(
                        fun () ->
@@ -1081,6 +1081,33 @@ many_segment_overview(Config) ->
                        end),
     ct:pal("InitTaken ~p", [InitTaken]),
 
+    {OffsLastTaken, _} =
+        timer:tc(fun () ->
+                         {ok, L} = osiris_log:init_offset_reader(last, Conf#{epoch => 6}),
+                         osiris_log:close(L)
+                 end),
+    ct:pal("OffsLastTaken ~p", [OffsLastTaken]),
+
+    {OffsFirstTaken, _} =
+        timer:tc(fun () ->
+                         {ok, L} = osiris_log:init_offset_reader(first, Conf#{epoch => 6}),
+                         osiris_log:close(L)
+                 end),
+    ct:pal("OffsFirstTaken ~p", [OffsFirstTaken]),
+
+    {OffsNextTaken, _} =
+        timer:tc(fun () ->
+                         {ok, L} = osiris_log:init_offset_reader(next, Conf#{epoch => 6}),
+                         osiris_log:close(L)
+                 end),
+    ct:pal("OffsNextTaken ~p", [OffsNextTaken]),
+
+    % {OffsOffsetTaken, _} =
+    %     timer:tc(fun () ->
+    %                      {ok, L} = osiris_log:init_offset_reader(40000, Conf#{epoch => 6}),
+    %                      osiris_log:close(L)
+    %              end),
+    % ct:pal("OffsOffsetTaken ~p", [OffsOffsetTaken]),
     ok.
 
 %% Utility
