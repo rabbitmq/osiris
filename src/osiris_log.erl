@@ -1472,13 +1472,15 @@ build_log_overview(Dir) when is_list(Dir) ->
                                        build_log_overview(Dir)
                                end
                        end),
-    ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1000000]),
+    ?DEBUG("~s:~s/~b completed in ~b ms",
+           [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time div 1000]),
     Result.
 
 build_log_overview0([], Acc) ->
     lists:reverse(Acc);
 build_log_overview0([IdxFile | IdxFiles], Acc0) ->
-    IdxFd = open_index_read(IdxFile),
+    %% do not nead read_ahead here
+    {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
     case position_at_idx_record_boundary(IdxFd, {eof, -?INDEX_RECORD_SIZE_B}) of
         {error, einval} when IdxFiles == [] andalso Acc0 == [] ->
             %% this would happen if the file only contained a header
@@ -1526,9 +1528,7 @@ position_at_idx_record_boundary(IdxFd, At) ->
 build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
     try
         {ok, Fd} = open(SegFile, [read, binary, raw]),
-        %% skip header,
-        {ok, ?LOG_HEADER_SIZE} = file:position(Fd, ?LOG_HEADER_SIZE),
-        case file:read(Fd, ?HEADER_SIZE_B) of
+        case file:pread(Fd, ?LOG_HEADER_SIZE, ?HEADER_SIZE_B) of
             eof ->
                 _ = file:close(Fd),
                 Acc0;
@@ -1545,7 +1545,6 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
                FirstSize:32/unsigned,
                FirstTSize:32/unsigned,
                _/binary>>} ->
-                {ok, LastChunkPos} = file:position(Fd, LastChunkPos),
                 {ok,
                  <<?MAGIC:4/unsigned,
                    ?VERSION:4/unsigned,
@@ -1558,8 +1557,7 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
                    _LastCrc:32/integer,
                    LastSize:32/unsigned,
                    LastTSize:32/unsigned,
-                   _Reserved:32>>} =
-                    file:read(Fd, ?HEADER_SIZE_B),
+                   _Reserved:32>>} = file:pread(Fd, LastChunkPos, ?HEADER_SIZE_B),
                 Size = LastChunkPos + LastSize + LastTSize + ?HEADER_SIZE_B,
                 {ok, Eof} = file:position(Fd, eof),
                 ?DEBUG_IF("~s: segment ~s has trailing data ~w ~w",
@@ -1726,18 +1724,27 @@ last_epoch_offsets([#seg_info{index = IdxFile,
                   FstFd = open_index_read(IdxFile),
                   {LastE, LastO, Res} =
                       lists:foldl(
-                        fun(#seg_info{index = I}, Acc) ->
+                        fun(#seg_info{index = I,
+                                      last = #chunk_info{epoch = LE}},
+                            {E, _, _} = Acc) when LE > E  ->
                                 Fd = open_index_read(I),
                                 last_epoch_offset(file:read(Fd, ?INDEX_RECORD_SIZE_B),
-                                                  Fd, Acc)
+                                                  Fd, Acc);
+                           (#seg_info{last = #chunk_info{id = LO,
+                                                         epoch = LE}},
+                            {_, _, Acc}) ->
+                                {LE, LO, Acc};
+                           (_, Acc) ->
+                                %% not sure if this can ever happen
+                                Acc
                         end,
                         last_epoch_offset(file:read(FstFd, ?INDEX_RECORD_SIZE_B),
                                           FstFd, {FstE, FstChId, []}),
                         SegInfos),
                   lists:reverse([{LastE, LastO} | Res])
           end),
-    ?DEBUG("~s:~s/~b completed in ~fs", [?MODULE, ?FUNCTION_NAME,
-                                         ?FUNCTION_ARITY, Time/1000000]),
+    ?DEBUG("~s:~s/~b completed in ~bms",
+           [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time div 1000]),
     Result.
 
 %% aggregates the chunk offsets for each epoch

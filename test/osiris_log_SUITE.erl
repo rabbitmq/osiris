@@ -70,7 +70,8 @@ all_tests() ->
      evaluate_retention_max_bytes,
      evaluate_retention_max_age,
      offset_tracking,
-     offset_tracking_snapshot
+     offset_tracking_snapshot,
+     many_segment_overview
     ].
 
 groups() ->
@@ -1051,6 +1052,28 @@ offset_tracking_snapshot(Config) ->
                    sequences := #{<<"wid1">> := {_, 2}}},
                  osiris_tracking:overview(T)),
     osiris_log:close(S3),
+    ok.
+
+many_segment_overview(Config) ->
+    Data = crypto:strong_rand_bytes(1000),
+    EpochChunks =
+    [{1, [Data || _ <- lists:seq(1, 8)]} || _ <- lists:seq(1, 1024)] ++
+    [{2, [Data || _ <- lists:seq(1, 8)]} || _ <- lists:seq(1, 1024)] ++
+    [{3, [Data || _ <- lists:seq(1, 8)]} || _ <- lists:seq(1, 1024)] ++
+    [{4, [Data || _ <- lists:seq(1, 8)]} || _ <- lists:seq(1, 1024)] ++
+    [{5, [Data || _ <- lists:seq(1, 8)]} || _ <- lists:seq(1, 1024)],
+    Conf0 = ?config(osiris_conf, Config),
+    Conf = Conf0#{max_segment_size_bytes => 64000},
+    osiris_log:close(seed_log(Conf, EpochChunks, Config)),
+    %% {40051,{{0,40959},[{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]}}
+    {Take, Res} = timer:tc(fun () ->
+                                   osiris_log:overview(maps:get(dir, Conf))
+                           end),
+    ct:pal("TimeTaken ~p", [Take]),
+    ct:pal("~p", [Res]),
+    ?assertEqual({{0,40959},[{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]},
+                 Res),
+
     ok.
 
 %% Utility
