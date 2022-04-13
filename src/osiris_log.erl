@@ -469,7 +469,7 @@ init(#{dir := Dir,
                counter = Cnt,
                counter_id = counter_id(Config),
                first_offset_fun = FirstOffsetFun},
-    case lists:reverse(build_log_overview(Dir)) of
+    case lists:reverse(build_log_overview_first_last(Dir)) of
         [] ->
             NextOffset = case Config of
                              #{initial_offset := IO}
@@ -494,7 +494,7 @@ init(#{dir := Dir,
          | _] = Infos ->
             [#seg_info{first = #chunk_info{id = FstChId,
                                            timestamp = FstTs}} | _] =
-            lists:reverse(Infos),
+                lists:reverse(Infos),
             %% assert epoch is same or larger
             %% than last known epoch
             case LastEpoch > Epoch of
@@ -1458,14 +1458,26 @@ parse_records(Offs,
     parse_records(Offs + NumRecs, Rem,
                   [{Offs, {batch, NumRecs, CompType, UncompressedLen, Data}} | Acc]).
 
+sorted_index_files(Dir) when is_list(Dir) ->
+    lists:sort(filelib:wildcard(filename:join(Dir, "*.index"))).
+
+build_log_overview_first_last(Dir) when is_list(Dir) ->
+    case sorted_index_files(Dir) of
+        [] ->
+            [];
+        [Fst] ->
+            %% this function is only used by init
+            build_log_overview0([Fst], []);
+        [Fst | Rem] ->
+            %% this function is only used by init
+            build_log_overview0([Fst, lists:last(Rem)], [])
+    end.
+
 build_log_overview(Dir) when is_list(Dir) ->
+    IdxFiles = sorted_index_files(Dir),
     {Time, Result} = timer:tc(
                        fun() ->
                                try
-                                   IdxFiles =
-                                       lists:sort(
-                                         filelib:wildcard(
-                                           filename:join(Dir, "*.index"))),
                                    build_log_overview0(IdxFiles, [])
                                catch
                                    missing_file ->

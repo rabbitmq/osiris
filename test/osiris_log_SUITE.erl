@@ -1066,13 +1066,20 @@ many_segment_overview(Config) ->
     Conf = Conf0#{max_segment_size_bytes => 64000},
     osiris_log:close(seed_log(Conf, EpochChunks, Config)),
     %% {40051,{{0,40959},[{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]}}
-    {Take, Res} = timer:tc(fun () ->
-                                   osiris_log:overview(maps:get(dir, Conf))
-                           end),
-    ct:pal("TimeTaken ~p", [Take]),
+    {OverviewTaken, Res} = timer:tc(fun () ->
+                                            osiris_log:overview(maps:get(dir, Conf))
+                                    end),
+    ct:pal("OverviewTaken ~p", [OverviewTaken ]),
     ct:pal("~p", [Res]),
     ?assertEqual({{0,40959},[{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]},
                  Res),
+
+    {InitTaken, _} = timer:tc(
+                       fun () ->
+                               osiris_log:close(
+                                 osiris_log:init(Conf#{epoch => 6}))
+                       end),
+    ct:pal("InitTaken ~p", [InitTaken]),
 
     ok.
 
