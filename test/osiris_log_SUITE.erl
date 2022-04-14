@@ -1044,7 +1044,7 @@ offset_tracking_snapshot(Config) ->
                           make_trailer(offset, <<"id1">>, 1),
                           S0),
     %% this should create at least two segments
-    {_, S2} = seed_log(S1, EpochChunks, Config, T0),
+    {_, S2} = seed_log(Conf, S1, EpochChunks, Config, T0),
     osiris_log:close(S2),
     S3 = osiris_log:init(Conf),
     T = osiris_log:recover_tracking(S3),
@@ -1069,7 +1069,7 @@ many_segment_overview(Config) ->
     {OverviewTaken, Res} = timer:tc(fun () ->
                                             osiris_log:overview(maps:get(dir, Conf))
                                     end),
-    ct:pal("OverviewTaken ~p", [OverviewTaken ]),
+    ct:pal("OverviewTaken ~p", [OverviewTaken]),
     ct:pal("~p", [Res]),
     ?assertEqual({{0,40959},
                   [{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]}, Res),
@@ -1102,12 +1102,26 @@ many_segment_overview(Config) ->
                  end),
     ct:pal("OffsNextTaken ~p", [OffsNextTaken]),
 
-    % {OffsOffsetTaken, _} =
-    %     timer:tc(fun () ->
-    %                      {ok, L} = osiris_log:init_offset_reader(40000, Conf#{epoch => 6}),
-    %                      osiris_log:close(L)
-    %              end),
-    % ct:pal("OffsOffsetTaken ~p", [OffsOffsetTaken]),
+    {OffsOffsetTakenHi, _} =
+        timer:tc(fun () ->
+                         {ok, L} = osiris_log:init_offset_reader(40000, Conf#{epoch => 6}),
+                         osiris_log:close(L)
+                 end),
+    ct:pal("OffsOffsetTakenHi ~p", [OffsOffsetTakenHi]),
+    {OffsOffsetTakenLow, _} =
+        timer:tc(fun () ->
+                         {ok, L} = osiris_log:init_offset_reader(400, Conf#{epoch => 6}),
+                         osiris_log:close(L)
+                 end),
+    ct:pal("OffsOffsetTakenLow ~p", [OffsOffsetTakenLow]),
+
+
+    {OffsOffsetTakenMid, _} =
+        timer:tc(fun () ->
+                         {ok, L} = osiris_log:init_offset_reader(20000, Conf#{epoch => 6}),
+                         osiris_log:close(L)
+                 end),
+    ct:pal("OffsOffsetTakenMid ~p", [OffsOffsetTakenMid]),
     ok.
 
 %% Utility
@@ -1118,22 +1132,23 @@ seed_log(Conf, EpochChunks, Config) ->
 
 seed_log(Conf, EpochChunks, Config, Trk) when is_map(Conf) ->
     Log0 = osiris_log:init(Conf),
-    seed_log(Log0, EpochChunks, Config, Trk);
+    seed_log(Conf, Log0, EpochChunks, Config, Trk);
 seed_log(Dir, EpochChunks, Config, Trk) when is_list(Dir) ->
     seed_log(#{dir => Dir,
                epoch => 1,
                max_segment_size_bytes => 1000 * 1000,
                name => ?config(test_case, Config)},
-             EpochChunks, Config, Trk);
-seed_log(Log, EpochChunks, _Config, Trk) ->
+             EpochChunks, Config, Trk).
+
+seed_log(Conf, Log, EpochChunks, _Config, Trk) ->
     lists:foldl(fun ({Epoch, Records}, {T, L}) ->
-                        write_chunk(Epoch, now_ms(), Records, T, L);
+                        write_chunk(Conf, Epoch, now_ms(), Records, T, L);
                     ({Epoch, Ts, Records}, {T, L}) ->
-                        write_chunk(Epoch, Ts, Records, T, L)
+                        write_chunk(Conf, Epoch, Ts, Records, T, L)
                 end,
                 {Trk, Log}, EpochChunks).
 
-write_chunk(Epoch, Now, Records, Trk0, Log0) ->
+write_chunk(Conf, Epoch, Now, Records, Trk0, Log0) ->
     HasTracking = not osiris_tracking:is_empty(Trk0),
     case osiris_log:is_open(Log0) of
         false when HasTracking ->
@@ -1141,7 +1156,7 @@ write_chunk(Epoch, Now, Records, Trk0, Log0) ->
             FirstOffset = osiris_log:first_offset(Log0),
             FirstTs = osiris_log:first_timestamp(Log0),
             {SnapBin, Trk} = osiris_tracking:snapshot(FirstOffset, FirstTs, Trk0),
-            write_chunk(Epoch, Now, Records, Trk,
+            write_chunk(Conf, Epoch, Now, Records, Trk,
                         osiris_log:write([SnapBin],
                                          ?CHNK_TRK_SNAPSHOT,
                                          Now,
@@ -1152,13 +1167,9 @@ write_chunk(Epoch, Now, Records, Trk0, Log0) ->
                 Epoch ->
                     {Trk0, osiris_log:write(Records, Now, Log0)};
                 _ ->
-                    %% need to re=init
-                    Dir = osiris_log:get_directory(Log0),
-                    Name = osiris_log:get_name(Log0),
+                    %% need to re-init as new epoch
                     osiris_log:close(Log0),
-                    Log = osiris_log:init(#{dir => Dir,
-                                            epoch => Epoch,
-                                            name => Name}),
+                    Log = osiris_log:init(Conf#{epoch => Epoch}),
                     {Trk0, osiris_log:write(Records, Log)}
             end
     end.
