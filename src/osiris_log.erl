@@ -38,7 +38,6 @@
          counters_ref/1,
          close/1,
          overview/1,
-         build_log_overview/1,
          format_status/1,
          update_retention/2,
          evaluate_retention/2,
