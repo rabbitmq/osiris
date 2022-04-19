@@ -520,7 +520,7 @@ init(#{dir := Dir,
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, Size} = file:position(Fd, Size),
             ok = file:truncate(Fd),
-            {ok, _} = file:position(IdxFd, eof),
+            {ok, _} = position_at_idx_record_boundary(IdxFd, eof),
             {ok, Size} = file:position(Fd, Size),
             %% truncate segment to size in case there is trailing data
             #?MODULE{cfg = Cfg,
@@ -1117,7 +1117,7 @@ last_user_chunk_id0([#seg_info{index = IdxFile} = Info | Rest]) ->
     try
         %% Do not read-ahead since we read the index file backwards chunk by chunk.
         {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
-        {ok, _} = file:position(IdxFd, eof),
+        {ok, _} = position_at_idx_record_boundary(IdxFd, eof),
         Last = last_user_chunk_id_in_index(IdxFd),
         _ = file:close(IdxFd),
         case Last of
@@ -1479,7 +1479,7 @@ build_log_overview0([], Acc) ->
     lists:reverse(Acc);
 build_log_overview0([IdxFile | IdxFiles], Acc0) ->
     IdxFd = open_index_read(IdxFile),
-    case file:position(IdxFd, {eof, -?INDEX_RECORD_SIZE_B}) of
+    case position_at_idx_record_boundary(IdxFd, {eof, -?INDEX_RECORD_SIZE_B}) of
         {error, einval} when IdxFiles == [] andalso Acc0 == [] ->
             %% this would happen if the file only contained a header
             ok = file:close(IdxFd),
@@ -1488,9 +1488,7 @@ build_log_overview0([IdxFile | IdxFiles], Acc0) ->
         {error, einval} ->
             ok = file:close(IdxFd),
             build_log_overview0(IdxFiles, Acc0);
-        {ok, Pos} ->
-            %% ASSERTION: ensure we don't have rubbish data at end of index
-            0 = (Pos - ?IDX_HEADER_SIZE) rem ?INDEX_RECORD_SIZE_B,
+        {ok, _} ->
             case file:read(IdxFd, ?INDEX_RECORD_SIZE_B) of
                 {ok,
                  <<_Offset:64/unsigned,
@@ -1510,6 +1508,19 @@ build_log_overview0([IdxFile | IdxFiles], Acc0) ->
                     ok = file:close(IdxFd),
                     build_log_overview0(IdxFiles, Acc0)
             end
+    end.
+
+%% Some file:position/2 operations are subject to race conditions. In particular, `eof` may position the Fd
+%% in the middle of a record being written concurrently. If that happens, we need to re-position at the nearest
+%% record boundry. See https://github.com/rabbitmq/osiris/issues/73
+position_at_idx_record_boundary(IdxFd, At) ->
+    case file:position(IdxFd, At) of
+        {ok, Pos} ->
+            case (Pos - ?IDX_HEADER_SIZE) rem ?INDEX_RECORD_SIZE_B of
+                0 -> {ok, Pos};
+                N -> file:position(IdxFd, {cur, -N})
+            end;
+        Error -> Error
     end.
 
 build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
