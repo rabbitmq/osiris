@@ -38,6 +38,7 @@
          counters_ref/1,
          close/1,
          overview/1,
+         build_log_overview/1,
          format_status/1,
          update_retention/2,
          evaluate_retention/2,
@@ -520,7 +521,7 @@ init(#{dir := Dir,
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, Size} = file:position(Fd, Size),
             ok = file:truncate(Fd),
-            {ok, _} = position_at_idx_record_boundry(IdxFd, eof),
+            {ok, _} = position_at_idx_record_boundary(IdxFd, eof),
             {ok, Size} = file:position(Fd, Size),
             %% truncate segment to size in case there is trailing data
             #?MODULE{cfg = Cfg,
@@ -1117,7 +1118,7 @@ last_user_chunk_id0([#seg_info{index = IdxFile} = Info | Rest]) ->
     try
         %% Do not read-ahead since we read the index file backwards chunk by chunk.
         {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
-        {ok, _} = position_at_idx_record_boundry(IdxFd, eof),
+        {ok, _} = position_at_idx_record_boundary(IdxFd, eof),
         Last = last_user_chunk_id_in_index(IdxFd),
         _ = file:close(IdxFd),
         case Last of
@@ -1479,7 +1480,7 @@ build_log_overview0([], Acc) ->
     lists:reverse(Acc);
 build_log_overview0([IdxFile | IdxFiles], Acc0) ->
     IdxFd = open_index_read(IdxFile),
-    case position_at_idx_record_boundry(IdxFd, {eof, -?INDEX_RECORD_SIZE_B}) of
+    case position_at_idx_record_boundary(IdxFd, {eof, -?INDEX_RECORD_SIZE_B}) of
         {error, einval} when IdxFiles == [] andalso Acc0 == [] ->
             %% this would happen if the file only contained a header
             ok = file:close(IdxFd),
@@ -1513,7 +1514,7 @@ build_log_overview0([IdxFile | IdxFiles], Acc0) ->
 %% Some file:position/2 operations are subject to race conditions. In particular, `eof` may position the Fd
 %% in the middle of a record being written concurrently. If that happens, we need to re-position at the nearest
 %% record boundry. See https://github.com/rabbitmq/osiris/issues/73
-position_at_idx_record_boundry(IdxFd, At) ->
+position_at_idx_record_boundary(IdxFd, At) ->
     case file:position(IdxFd, At) of
         {ok, Pos} ->
             case (Pos - ?IDX_HEADER_SIZE) rem ?INDEX_RECORD_SIZE_B of
