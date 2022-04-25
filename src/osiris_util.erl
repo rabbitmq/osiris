@@ -15,7 +15,9 @@
          lists_find/2,
          hostname_from_node/0,
          get_replication_configuration_from_tls_dist/0,
-         get_replication_configuration_from_tls_dist/1]).
+         get_replication_configuration_from_tls_dist/1,
+         partition_parallel/3
+        ]).
 
 %% For testing
 -export([inet_tls_enabled/1,
@@ -232,3 +234,26 @@ inet_tls_enabled([{proto_dist, ["inet_tls"]} | _]) ->
     true;
 inet_tls_enabled([_Opt | Tail]) ->
     inet_tls_enabled(Tail).
+
+
+partition_parallel(F, Es, Timeout) ->
+    Parent = self(),
+    Running = [{spawn_monitor(fun() -> Parent ! {self(), F(E)} end), E}
+               || E <- Es],
+    collect(Running, {[], []}, Timeout).
+
+collect([], Acc, _Timeout) ->
+    Acc;
+collect([{{Pid, MRef}, E} | Next], {Left, Right}, Timeout) ->
+    receive
+        {Pid, true} ->
+            erlang:demonitor(MRef, [flush]),
+            collect(Next, {[E | Left], Right}, Timeout);
+        {Pid, false} ->
+            erlang:demonitor(MRef, [flush]),
+            collect(Next, {Left, [E | Right]}, Timeout);
+        {'DOWN', MRef, process, Pid, _Reason} ->
+            collect(Next, {Left, [E | Right]}, Timeout)
+    after Timeout ->
+              exit(partition_parallel_timeout)
+    end.

@@ -30,6 +30,7 @@ all_tests() ->
     [single_node_write,
      cluster_write_replication_plain,
      cluster_write_replication_tls,
+     start_many_clusters,
      quorum_write,
      cluster_batch_write,
      read_validate_single_node,
@@ -167,6 +168,44 @@ single_node_write(Config) ->
     ?assertEqual(42, osiris:fetch_writer_seq(Leader, Wid)),
     ok.
 
+start_many_clusters(Config) ->
+    %% start some stuff
+    ok = logger:set_primary_config(level, all),
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    Names = [Name ++ "_" ++ integer_to_list(I) || I <- lists:seq(1, 10)],
+    %% set a small port range to try to trigger port conflicts
+    AllEnv = [{port_range, {6000, 6010}} |
+              proplists:delete(port_range,
+                               application:get_all_env(osiris))],
+    ct:pal("AllEnv ~p", [AllEnv]),
+    PeerStates = [start_child_node(N, PrivDir, AllEnv) || N <- [s1, s2, s3]],
+    Nodes = [NodeName || {_Ref, NodeName} <- PeerStates],
+    F = fun (N) ->
+                [LeaderNode | Replicas] = Nodes,
+                Conf0 = #{name => N,
+                          epoch => 1,
+                          leader_node => LeaderNode,
+                          replica_nodes => Replicas
+                         },
+                {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+                WriterId = list_to_binary(N),
+                ok = osiris:write(Leader, WriterId, 42, <<"mah-data">>),
+                receive
+                    {osiris_written, _, WriterId, [42]} ->
+                        true
+                after 2000 ->
+                          ct:pal("~s reached written timeout", [N]),
+                          flush(),
+                          false
+                end
+        end,
+    {_Oks, Failures} = osiris_util:partition_parallel(F, Names, 60000),
+    timer:sleep(1000),
+    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    ?assertEqual([], Failures),
+    ok.
+
 cluster_write_replication_plain(Config) ->
     cluster_write(Config).
 
@@ -177,7 +216,8 @@ cluster_write(Config) ->
     ok = logger:set_primary_config(level, all),
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    PeerStates = [start_child_node(N, PrivDir, application:get_all_env(osiris)) || N <- [s1, s2, s3]],
+    PeerStates = [start_child_node(N, PrivDir, application:get_all_env(osiris))
+                  || N <- [s1, s2, s3]],
     [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
     WriterId = undefined,
     Conf0 =
@@ -1568,28 +1608,33 @@ start_child_node(NodeName, PrivDir, ExtraAppConfig0) ->
     Args = ["-pa" | search_paths()] ++
            ["-kernel", "prevent_overlapping_partitions", "false"],
     %% ct:pal("starting child node ~p with ~p~n", [NodeName, Args]),
-    {_Ref, FinalNodeName} = Result = case start_peer_node(Host, NodeName, Args) of
-        {ok, Pid, FinalNodeName0} when is_atom(FinalNodeName0) ->
-            {Pid, FinalNodeName0};
-        {ok, FinalNodeName0} when is_atom(FinalNodeName0) ->
-            %% before Erlang 25, the "ref" is the name of the node
-            {FinalNodeName0, FinalNodeName0}
-    end,
+    {_Ref, FinalNodeName} = Result =
+        case start_peer_node(Host, NodeName, Args) of
+            {ok, Pid, FinalNodeName0} when is_atom(FinalNodeName0) ->
+                {Pid, FinalNodeName0};
+            {ok, FinalNodeName0} when is_atom(FinalNodeName0) ->
+                %% before Erlang 25, the "ref" is the name of the node
+                {FinalNodeName0, FinalNodeName0}
+        end,
     %% ct:pal("started child node ~w~n", [FinalNodeName]),
     ct:pal("node ~s will use data dir at ~s", [FinalNodeName, Dir]),
     ok = erpc:call(FinalNodeName, ?MODULE, node_setup, [Dir]),
     %% ct:pal("performed node setup on child node ~w", [FinalNodeName]),
     ok = erpc:call(FinalNodeName, osiris, configure_logger, [logger]),
+
     %% ct:pal("configured logger on child node ~w", [FinalNodeName]),
-    AppsToStart = case proplists:lookup(replication_transport, ExtraAppConfig) of
-        {_, ssl} ->
-            [osiris, ssl];
-        _ ->
-            [osiris]
-    end,
+    AppsToStart =
+        case proplists:lookup(replication_transport, ExtraAppConfig) of
+            {_, ssl} ->
+                [osiris, ssl];
+            _ ->
+                [osiris]
+        end,
 
     Keys = proplists:get_keys(ExtraAppConfig),
-    AllKeys = lists:usort([replication_transport, replication_server_ssl_options, replication_client_ssl_options] ++ Keys),
+    AllKeys = lists:usort([replication_transport,
+                           replication_server_ssl_options,
+                           replication_client_ssl_options] ++ Keys),
     [begin
         case proplists:lookup(K, ExtraAppConfig) of
             none ->
@@ -1599,11 +1644,10 @@ start_child_node(NodeName, PrivDir, ExtraAppConfig0) ->
         end
     end || K <- AllKeys],
 
-    [begin
-        erpc:call(FinalNodeName, application, ensure_all_started, [App])
-    end || App <- AppsToStart],
     ok = erpc:call(FinalNodeName, logger, set_primary_config, [level, all]),
-
+    [begin
+         erpc:call(FinalNodeName, application, ensure_all_started, [App])
+     end || App <- AppsToStart],
     Result.
 
 flush() ->
