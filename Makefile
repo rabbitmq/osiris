@@ -22,7 +22,7 @@ TEST_DEPS=eunit_formatters tls_gen
 dep_looking_glass = git https://github.com/rabbitmq/looking-glass.git master
 # PLT_APPS += eunit syntax_tools erts kernel stdlib common_test inets ssh ssl meck looking_glass gen_batch_server inet_tcp_proxy
 
-DIALYZER_OPTS += --src -r test
+DIALYZER_OPTS += --src -r test -Wunmatched_returns -Werror_handling
 PLT_APPS += seshat ssl
 EUNIT_OPTS = no_tty, {report, {eunit_progress, [colored, profile]}}
 include $(if $(ERLANG_MK_FILENAME),$(ERLANG_MK_FILENAME),erlang.mk)

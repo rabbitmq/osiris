@@ -11,6 +11,17 @@
 
 -include("osiris.hrl").
 
+-define(INFO_(Name, Str, Args),
+             ?INFO("~s [~s:~s/~b] " Str,
+                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
+
+-define(WARN_(Name, Str, Args),
+             ?WARN("~s [~s:~s/~b] " Str,
+                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
+
+-define(DEBUG_(Name, Str, Args),
+             ?DEBUG("~s [~s:~s/~b] " Str,
+                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
 %% osiris replica, spaws remote reader, TCP listener
 %% replicates and confirms latest offset back to primary
 
@@ -139,18 +150,13 @@ init(#{name := Name,
             {error, Reason};
         {ok, {LeaderRange, LeaderEpochOffs}}  ->
             {ok, {Min, Max}} = application:get_env(port_range),
-            RecBuf = application:get_env(osiris, replica_recbuf, ?DEF_REC_BUF),
             Transport = application:get_env(osiris, replication_transport, tcp),
-            ?DEBUG("Using ~s transport for replication", [Transport]),
-            {Port, LSock} = open_port(Transport, RecBuf, Min, Max),
             Self = self(),
-            spawn_link(fun() -> accept(Transport, LSock, Self) end),
             CntName = {?MODULE, ExtRef},
 
             ORef = atomics:new(2, [{signed, true}]),
             atomics:put(ORef, 1, -1),
             atomics:put(ORef, 2, -1),
-            ?DEBUG("~s: writer epoch offset ~w", [?MODULE, LeaderEpochOffs]),
 
             Dir = osiris_log:directory(Config),
             Log = osiris_log:init_acceptor(LeaderRange, LeaderEpochOffs,
@@ -164,7 +170,6 @@ init(#{name := Name,
             CntRef = osiris_log:counters_ref(Log),
             {NextOffset, LastChunk} = TailInfo = osiris_log:tail_info(Log),
 
-            ?DEBUG("~s: tail info: ~w", [Name, TailInfo]),
             case LastChunk of
                 empty ->
                     ok;
@@ -173,9 +178,8 @@ init(#{name := Name,
                     %% re-discover the committed offset
                     osiris_writer:ack(LeaderPid, {LastChId, LastTs})
             end,
-            ?INFO("osiris_replica:init/1: next offset ~b",
-                  [NextOffset]),
-            %% spawn reader process on leader node
+            ?INFO_(Name, "next offset ~b, tail info ~w",
+                   [NextOffset, TailInfo]),
 
             %% HostName: append the HostName to the Ip(s) list: in some cases
             %% like NAT or redirect the local ip addresses are not enough.
@@ -201,20 +205,26 @@ init(#{name := Name,
             HostNameFromHost = osiris_util:hostname_from_node(),
 
             IpsHosts = combine_ips_hosts(Transport, Ips, HostName,
-              HostNameFromHost),
+                                         HostNameFromHost),
 
             Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
-            ?DEBUG("osiris_replica:init/1: available hosts: ~p", [IpsHosts]),
-            ReplicaReaderConf =
-            #{hosts => IpsHosts,
-              port => Port,
-              transport => Transport,
-              name => Name,
-              replica_pid => self(),
-              leader_pid => LeaderPid,
-              start_offset => TailInfo,
-              reference => ExtRef,
-              connection_token => Token},
+            ?DEBUG_(Name, "replica resolved host endpoints: ~w",
+                   [IpsHosts]),
+            RecBuf = application:get_env(osiris, replica_recbuf, ?DEF_REC_BUF),
+            ?DEBUG_(Name, "replica using '~s' transport for replication",
+                   [Transport]),
+            {Port, LSock} = open_listener(Transport, RecBuf, {Min, Max}, 0),
+            spawn_link(fun() -> accept(Name, Transport, LSock, Self) end),
+
+            ReplicaReaderConf = #{hosts => IpsHosts,
+                                  port => Port,
+                                  transport => Transport,
+                                  name => Name,
+                                  replica_pid => self(),
+                                  leader_pid => LeaderPid,
+                                  start_offset => TailInfo,
+                                  reference => ExtRef,
+                                  connection_token => Token},
             RRPid =
             case supervisor:start_child({osiris_replica_reader_sup, Node},
                                         #{id => make_ref(),
@@ -258,73 +268,58 @@ init(#{name := Name,
     end.
 
 combine_ips_hosts(tcp, IPs, HostName, HostNameFromHost) when
-  HostName =/= HostNameFromHost ->
-  lists:append(IPs, [HostName, HostNameFromHost]);
+      HostName =/= HostNameFromHost ->
+    lists:append(IPs, [HostName, HostNameFromHost]);
 combine_ips_hosts(tcp, IPs, HostName, _HostNameFromHost) ->
-  lists:append(IPs, [HostName]);
+    lists:append(IPs, [HostName]);
 combine_ips_hosts(ssl, IPs, HostName, HostNameFromHost) when
-  HostName =/= HostNameFromHost ->
-  lists:append([HostName, HostNameFromHost], IPs);
+      HostName =/= HostNameFromHost ->
+    lists:append([HostName, HostNameFromHost], IPs);
 combine_ips_hosts(ssl, IPs, HostName, _HostNameFromHost) ->
-  lists:append([HostName], IPs).
+    lists:append([HostName], IPs).
 
-open_port(_Transport,_RcvBuf, M, M) ->
-    throw({error, all_busy});
-open_port(tcp, RcvBuf, Min, Max) ->
-    case gen_tcp:listen(Min,
-                        [binary,
-                         {packet, raw},
-                         {active, false},
-                         {buffer, RcvBuf * 2},
-                         {recbuf, RcvBuf}])
-    of
+open_listener(_Transport, _RcvBuf, Range, 100) ->
+    throw({stop, {no_available_ports_in_range, Range}});
+open_listener(Transport, RcvBuf, {Min, Max} = Range, Attempts) ->
+    Offs = rand:uniform(Max - Min),
+    Port = Min + Offs,
+    case listen(Transport, Port, RcvBuf) of
         {ok, LSock} ->
-            {Min, LSock};
+            {Port, LSock};
         {error, eaddrinuse} ->
-            open_port(tcp, RcvBuf, Min + 1, Max);
+            open_listener(Transport, RcvBuf, Range, Attempts + 1);
         E ->
-            throw(E)
-    end;
-open_port(ssl, RcvBuf, Min, Max) ->
-    R = ssl:listen(Min, [binary,
-                          {packet, raw},
-                          {active, false},
-                          {buffer, RcvBuf * 2},
-                          {recbuf, RcvBuf}]),
-    case R of
-        {ok, LSock} ->
-            {Min, LSock};
-        {error, eaddrinuse} ->
-            open_port(ssl, RcvBuf, Min + 1, Max);
-        E ->
-            throw(E)
+            throw({stop, E})
     end.
 
-accept(tcp, LSock, Process) ->
+accept(_Name, tcp, LSock, Process) ->
     {ok, Sock} = gen_tcp:accept(LSock),
-    ?DEBUG("~s: socket accepted opts ~w",
-           [?MODULE, inet:getopts(Sock, [buffer, recbuf])]),
-    Process ! {socket, Sock},
-    ok = gen_tcp:controlling_process(Sock, Process),
     _ = gen_tcp:close(LSock),
+    ok = gen_tcp:controlling_process(Sock, Process),
+    Process ! {socket, Sock},
     ok;
-accept(ssl, LSock, Process) ->
-    ?DEBUG("~s: Starting listening on socket for replication over TLS", [?MODULE]),
+accept(Name, ssl, LSock, Process) ->
+    ?DEBUG_(Name, "Starting socket listener for replication over TLS", []),
     {ok, Sock0} = ssl:transport_accept(LSock),
-    case ssl:handshake(Sock0, application:get_env(osiris, replication_server_ssl_options, [])) of
+    case ssl:handshake(Sock0,
+                       application:get_env(osiris,
+                                           replication_server_ssl_options,
+                                           []))
+    of
         {ok, Sock} ->
-            ?DEBUG("~s: TLS socket accepted opts ~w",
-               [?MODULE, ssl:getopts(Sock, [buffer, recbuf])]),
+            _ = ssl:close(LSock),
+            ok = ssl:controlling_process(Sock, Process),
             Process ! {socket, Sock},
-            ssl:controlling_process(Sock, Process),
-            _ = ssl:close(LSock);
+            ok;
         {error, {tls_alert, {handshake_failure, _}}} ->
-            ?DEBUG("~s: Handshake failure, restarting listener...", [?MODULE]),
-            spawn_link(fun() -> accept(ssl, LSock, Process) end);
+            ?DEBUG_(Name, "Handshake failure, restarting listener...",
+                    []),
+            _ = spawn_link(fun() -> accept(Name, ssl, LSock, Process) end),
+            ok;
         {error, E} ->
-            ?DEBUG("~s: Error during handshake ~p", [?MODULE, E]);
+            ?DEBUG_(Name, "Error during handshake ~w", [E]);
         H ->
-            ?DEBUG("~s: Unexpected result from TLS handshake ~p", [?MODULE, H])
+            ?DEBUG_(Name, "Unexpected result from TLS handshake ~w", [H])
     end,
     ok.
 
@@ -398,8 +393,8 @@ handle_cast({register_offset_listener, Pid, EvtFormatter, Offset},
                            [{Pid, Offset, EvtFormatter} | Listeners]},
     State = notify_offset_listeners(State1),
     {noreply, State};
-handle_cast(Msg, State) ->
-    ?DEBUG("osiris_replica unhanded cast ~w", [Msg]),
+handle_cast(Msg, #?MODULE{cfg = #cfg{name = Name}} = State) ->
+    ?DEBUG_(Name, "osiris_replica unhandled cast ~w", [Msg]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -422,6 +417,7 @@ handle_info(force_gc,
 handle_info({socket, Socket}, #?MODULE{cfg = #cfg{name = Name,
                                                   token = Token,
                                                   transport = Transport} = Cfg} = State) ->
+
     Timeout = application:get_env(osiris, one_time_token_timeout,
                                   ?DEFAULT_ONE_TIME_TOKEN_TIMEOUT),
     case recv(Transport, Socket, ?TOKEN_SIZE, Timeout) of
@@ -430,12 +426,10 @@ handle_info({socket, Socket}, #?MODULE{cfg = #cfg{name = Name,
             ok = setopts(Transport, Socket, [{active, 5}]),
             {noreply, State#?MODULE{cfg = Cfg#cfg{socket = Socket}}};
         {ok, Other} ->
-            ?WARN("~s: ~s invalid token received ~w",
-                  [?MODULE, Name, Other]),
+            ?WARN_(Name, "invalid token received ~w", [Other]),
             {stop, invalid_token, State};
         {error, Reason} ->
-            ?WARN("~s: ~s error awaiting token ~w",
-                  [?MODULE, Name, Reason])
+            ?WARN_(Name, "error awaiting token ~w", [Reason])
     end;
 handle_info({tcp, Socket, Bin}, State) ->
     handle_incoming_data(Socket, Bin, State);
@@ -453,30 +447,30 @@ handle_info({ssl_passive, Socket},
     {noreply, State};
 handle_info({tcp_closed, Socket},
             #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
-    ?DEBUG("osiris_replica: ~s Socket closed. Exiting...", [Name]),
+    ?DEBUG_(Name, "Socket closed. Exiting...", []),
     {stop, normal, State};
 handle_info({ssl_closed, Socket},
             #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
-    ?DEBUG("osiris_replica: ~s TLS socket closed. Exiting...", [Name]),
+    ?DEBUG_(Name, "TLS socket closed. Exiting...", []),
     {stop, normal, State};
 handle_info({tcp_error, Socket, Error},
             #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
-    ?DEBUG("osiris_replica: ~s Socket error ~p. Exiting...",
-           [Name, Error]),
+    ?DEBUG_(Name, "osiris_replica: ~s Socket error ~p. Exiting...",
+           [Error]),
     {stop, {tcp_error, Error}, State};
 handle_info({ssl_error, Socket, Error},
             #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
-    ?DEBUG("osiris_replica: ~s TLS socket error ~p. Exiting...",
-           [Name, Error]),
+    ?DEBUG_(Name, "TLS socket error ~w. Exiting...",
+           [Error]),
     {stop, {ssl_error, Error}, State};
-handle_info({'DOWN', _Ref, process, Pid, Info}, State) ->
-    ?DEBUG("osiris_replica:handle_info/2: DOWN received Pid "
-           "~w, Info: ~w",
+handle_info({'DOWN', _Ref, process, Pid, Info},
+            #?MODULE{cfg = #cfg{name = Name}} = State) ->
+    ?DEBUG_(Name, "DOWN received for Pid ~w, Info: ~w",
            [Pid, Info]),
     {noreply, State};
-handle_info({'EXIT', Ref, Info}, State) ->
-    ?DEBUG("osiris_replica:handle_info/2: EXIT received "
-           "~w, Info: ~w",
+handle_info({'EXIT', Ref, Info},
+            #?MODULE{cfg = #cfg{name = Name}} = State) ->
+    ?DEBUG_(Name, "EXIT received for ~w, Info: ~w",
            [Ref, Info]),
     {noreply, State}.
 
@@ -523,9 +517,11 @@ handle_incoming_data(Socket, Bin,
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
-terminate(Reason, #?MODULE{cfg = #cfg{name = Name}, log = Log}) ->
-    ?DEBUG("~s: ~s terminating with ~w ", [?MODULE, Name, Reason]),
+terminate(Reason, #?MODULE{cfg = #cfg{name = Name,
+                                      socket = Sock}, log = Log}) ->
+    ?DEBUG_(Name, "terminating with ~w ", [Reason]),
     ok = osiris_log:close(Log),
+    ok = gen_tcp:close(Sock),
     ok.
 
 %%--------------------------------------------------------------------
@@ -664,3 +660,18 @@ setopts(tcp, Socket, Options) ->
     inet:setopts(Socket, Options);
 setopts(ssl, Socket, Options) ->
     ssl:setopts(Socket, Options).
+
+listener_opts(RcvBuf) ->
+    [binary,
+     {reuseaddr, true},
+     {backlog, 0},
+     {packet, raw},
+     {active, false},
+     {buffer, RcvBuf * 2},
+     {recbuf, RcvBuf}
+    ].
+
+listen(tcp, Port, RcvBuf) ->
+    gen_tcp:listen(Port, listener_opts(RcvBuf));
+listen(ssl, Port, RcvBuf) ->
+    ssl:listen(Port, listener_opts(RcvBuf)).
