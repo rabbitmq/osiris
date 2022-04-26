@@ -301,16 +301,21 @@ accept(_Name, tcp, LSock, Process) ->
 accept(Name, ssl, LSock, Process) ->
     ?DEBUG_(Name, "Starting socket listener for replication over TLS", []),
     {ok, Sock0} = ssl:transport_accept(LSock),
-    case ssl:handshake(Sock0, application:get_env(osiris, replication_server_ssl_options, [])) of
+    case ssl:handshake(Sock0,
+                       application:get_env(osiris,
+                                           replication_server_ssl_options,
+                                           []))
+    of
         {ok, Sock} ->
             _ = ssl:close(LSock),
-            ssl:controlling_process(Sock, Process),
+            ok = ssl:controlling_process(Sock, Process),
             Process ! {socket, Sock},
             ok;
         {error, {tls_alert, {handshake_failure, _}}} ->
             ?DEBUG_(Name, "Handshake failure, restarting listener...",
                     []),
-            spawn_link(fun() -> accept(Name, ssl, LSock, Process) end);
+            _ = spawn_link(fun() -> accept(Name, ssl, LSock, Process) end),
+            ok;
         {error, E} ->
             ?DEBUG_(Name, "Error during handshake ~w", [E]);
         H ->

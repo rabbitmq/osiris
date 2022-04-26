@@ -10,6 +10,8 @@
 -compile(nowarn_export_all).
 -compile(export_all).
 
+-dialyzer(unmatched_returns).
+
 -export([]).
 
 -include_lib("common_test/include/ct.hrl").
@@ -94,8 +96,8 @@ end_per_group(_Group, _Config) ->
 init_per_testcase(TestCase, Config) ->
     PrivDir = ?config(priv_dir, Config),
     Dir = filename:join(PrivDir, TestCase),
-    application:stop(osiris),
-    application:load(osiris),
+    _ = application:stop(osiris),
+    _ = application:load(osiris),
     application:set_env(osiris, data_dir, Dir),
     ok = extra_init(TestCase),
     {ok, Apps} = application:ensure_all_started(osiris),
@@ -137,8 +139,8 @@ extra_init(_) ->
     ok.
 
 end_per_testcase(_TestCase, Config) ->
-    [application:stop(App)
-     || App <- lists:reverse(?config(started_apps, Config))],
+    _ = [application:stop(App)
+         || App <- lists:reverse(?config(started_apps, Config))],
     ok.
 
 %%%===================================================================
@@ -577,11 +579,10 @@ read_validate(Config) ->
     ct:pal("~b writes took ~wms ~w msg/s",
            [Num, trunc(Time div 1000), trunc(MsgSec)]),
     ct:pal("~w counters ~p", [node(), osiris_counters:overview()]),
-    [begin
-         ct:pal("~w counters ~p",
-                [N, erpc:call(N, osiris_counters, overview, [])])
-     end
-     || N <- Replicas],
+    _ = [begin
+             ct:pal("~w counters ~p",
+                    [N, erpc:call(N, osiris_counters, overview, [])])
+         end || N <- Replicas],
 
     {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}, #{counter_spec => {'test', []}}),
     {_, _} = timer:tc(fun() -> validate_read(Num, Log0) end),
@@ -771,7 +772,7 @@ cluster_failure(Config) ->
     _PreRRs =
         supervisor:which_children({osiris_replica_reader_sup, node(Leader)}),
     %% stop the leader
-    gen_batch_server:stop(Leader, bananas, 5000),
+    _ = gen_batch_server:stop(Leader, bananas, 5000),
 
     R1Ref = monitor(process, R1),
     R2Ref = monitor(process, R2),
@@ -823,17 +824,14 @@ restart_replica(Config) ->
         osiris:start_cluster(InitConf),
     %% write some records in e1
     Msgs = lists:seq(1, 1),
-    [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>])
-     || N <- Msgs],
+    _ = [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>]) || N <- Msgs],
     wait_for_written(Msgs),
     timer:sleep(100),
     ok = erpc:call(node(R1Pid), gen_server, stop, [R1Pid]),
-    [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>])
-     || N <- Msgs],
+    _ = [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>]) || N <- Msgs],
     wait_for_written(Msgs),
     {ok, _Replica1b} = osiris_replica:start(node(R1Pid), Conf),
-    [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>])
-     || N <- Msgs],
+    _ = [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>]) || N <- Msgs],
     wait_for_written(Msgs),
     ok.
 
@@ -851,8 +849,8 @@ diverged_replica(Config) ->
           replica_nodes => [LeaderE2, LeaderE3]},
     {ok, #{leader_pid := LeaderE1Pid}} = osiris:start_cluster(ConfE1),
     %% write some records in e1
-    [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>])
-     || N <- lists:seq(1, 100)],
+    _ = [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>])
+         || N <- lists:seq(1, 100)],
     wait_for_written(lists:seq(1, 100)),
 
     %% shut down cluster and start only LeaderE2 in epoch 2
@@ -863,8 +861,8 @@ diverged_replica(Config) ->
                 replica_nodes => [LeaderE1, LeaderE2]},
     {ok, LeaderE2Pid} = osiris_writer:start(ConfE2),
     %% write some entries that won't be committedo
-    [osiris:write(LeaderE2Pid, undefined, N, [<<N:64/integer>>])
-     || N <- lists:seq(101, 200)],
+    _ = [osiris:write(LeaderE2Pid, undefined, N, [<<N:64/integer>>])
+         || N <- lists:seq(101, 200)],
     %% we can't wait for osiris_written here
     timer:sleep(500),
     %% shut down LeaderE2
@@ -877,8 +875,8 @@ diverged_replica(Config) ->
     %% start the cluster in E3 with E3 as leader
     {ok, #{leader_pid := LeaderE3Pid}} = osiris:start_cluster(ConfE3),
     %% write some more in this epoch
-    [osiris:write(LeaderE3Pid, undefined, N, [<<N:64/integer>>])
-     || N <- lists:seq(201, 300)],
+    _ = [osiris:write(LeaderE3Pid, undefined, N, [<<N:64/integer>>])
+         || N <- lists:seq(201, 300)],
     wait_for_written(lists:seq(201, 300)),
     timer:sleep(1000),
 
@@ -1336,16 +1334,16 @@ single_node_deduplication_order(Config) ->
     WID = <<"wid1">>,
     SEQ = lists:seq(1,148),
     %% step 1: standard insert
-   [osiris:write(Leader, WID, N, [<<N:64/integer>>])
-    || N <- SEQ],
+    _ = [osiris:write(Leader, WID, N, [<<N:64/integer>>])
+         || N <- SEQ],
 
-     wait_for_written(SEQ),
+   wait_for_written(SEQ),
     %% here we send the same messages
     %% and osiris send back the messages ids.
     %% The test is meant to check if the messages order
     %% is the same from the step 1 (osiris_writer:handle_duplicates/3)
-    [osiris:write(Leader, WID, N, [<<N:64/integer>>])
-    || N <- SEQ],
+     _ = [osiris:write(Leader, WID, N, [<<N:64/integer>>])
+          || N <- SEQ],
     %% the messages received must be in order
     wait_for_written_order(SEQ),
     ok.
@@ -1470,13 +1468,13 @@ cluster_deduplication_order(Config) ->
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     SEQ = lists:seq(1,207),
 
-    [osiris:write(Leader, WriterId, N, [<<N:64/integer>>])
-    || N <- SEQ],
+    _ = [osiris:write(Leader, WriterId, N, [<<N:64/integer>>])
+         || N <- SEQ],
 
     wait_for_written(SEQ),
 
-    [osiris:write(Leader, WriterId, N, [<<N:64/integer>>])
-    || N <- SEQ],
+    _ = [osiris:write(Leader, WriterId, N, [<<N:64/integer>>])
+         || N <- SEQ],
 
     wait_for_written_order(SEQ),
     [stop_peer(Ref) || {Ref, _} <- PeerStates],
@@ -1645,9 +1643,8 @@ start_child_node(NodeName, PrivDir, ExtraAppConfig0) ->
     end || K <- AllKeys],
 
     ok = erpc:call(FinalNodeName, logger, set_primary_config, [level, all]),
-    [begin
-         erpc:call(FinalNodeName, application, ensure_all_started, [App])
-     end || App <- AppsToStart],
+    _ = [ erpc:call(FinalNodeName, application, ensure_all_started, [App])
+          || App <- AppsToStart],
     Result.
 
 flush() ->
@@ -1755,9 +1752,11 @@ validate_log(Log0, Expected) ->
 print_counters() ->
     [begin
          ct:pal("~w counters ~p",
-                [N, erpc:call(N, osiris_counters, overview, [])])
+                [N, erpc:call(N, osiris_counters, overview, [])]),
+         ok
      end
-     || N <- nodes()].
+     || N <- nodes()],
+    ok.
 
 read_til_end(Log0, Last) ->
     case osiris_log:read_chunk_parsed(Log0) of
@@ -1772,20 +1771,20 @@ read_til_end(Log0, Last) ->
 node_setup(DataDir) ->
     LogFile = filename:join([DataDir, "osiris.log"]),
     SaslFile = filename:join([DataDir, "osiris_sasl.log"]),
-    logger:set_primary_config(level, debug),
+    _ = logger:set_primary_config(level, debug),
     Config = #{config => #{type => {file, LogFile}}, level => debug},
-    logger:add_handler(ra_handler, logger_std_h, Config),
+    _ = logger:add_handler(ra_handler, logger_std_h, Config),
 
-    application:load(kernel),
+    _ = application:load(kernel),
     application:set_env(kernel, prevent_overlapping_partitions, false),
 
-    application:load(sasl),
+    _ = application:load(sasl),
     application:set_env(sasl, sasl_error_logger, {file, SaslFile}),
-    application:stop(sasl),
-    application:start(sasl),
+    _ = application:stop(sasl),
+    _ = application:start(sasl),
     _ = error_logger:tty(false),
 
-    application:load(osiris),
+    _ = application:load(osiris),
     application:set_env(osiris, data_dir, DataDir),
 
     ok.
