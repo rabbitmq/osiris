@@ -1066,13 +1066,14 @@ many_segment_overview(Config) ->
     Conf = Conf0#{max_segment_size_bytes => 64000},
     osiris_log:close(seed_log(Conf, EpochChunks, Config)),
     %% {40051,{{0,40959},[{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]}}
-    {OverviewTaken, Res} = timer:tc(fun () ->
-                                            osiris_log:overview(maps:get(dir, Conf))
-                                    end),
+    {OverviewTaken, LogOverview} = timer:tc(fun () ->
+                                                    osiris_log:overview(maps:get(dir, Conf))
+                                            end),
     ct:pal("OverviewTaken ~p", [OverviewTaken]),
-    ct:pal("~p", [Res]),
+    ct:pal("~p", [LogOverview]),
+    %% {{0,40959},[{-1,-1},{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]}
     ?assertEqual({{0,40959},
-                  [{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]}, Res),
+                  [{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]}, LogOverview),
 
     {InitTaken, _} = timer:tc(
                        fun () ->
@@ -1122,6 +1123,18 @@ many_segment_overview(Config) ->
                          osiris_log:close(L)
                  end),
     ct:pal("OffsOffsetTakenMid ~p", [OffsOffsetTakenMid]),
+
+    %% TODO: timestamp
+
+    %% acceptor
+    {Range, EOffs} = LogOverview,
+    {InitAcceptorTaken, _} =
+        timer:tc(fun () ->
+                         osiris_log:init_acceptor(Range, EOffs, Conf#{epoch => 6})
+                 end),
+    ct:pal("InitAcceptor took ~bus", [InitAcceptorTaken]),
+
+    %% TODO: evaluate_retention
     ok.
 
 %% Utility
