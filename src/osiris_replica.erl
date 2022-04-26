@@ -389,7 +389,7 @@ handle_cast({register_offset_listener, Pid, EvtFormatter, Offset},
     State = notify_offset_listeners(State1),
     {noreply, State};
 handle_cast(Msg, #?MODULE{cfg = #cfg{name = Name}} = State) ->
-    ?DEBUG_(Name, "osiris_replica unhanded cast ~w", [Msg]),
+    ?DEBUG_(Name, "osiris_replica unhandled cast ~w", [Msg]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------
