@@ -1012,50 +1012,40 @@ init_offset_reader0(OffsetSpec, #{dir := Dir} = Conf)
     ?DEBUG("osiris_log:init_offset_reader0/2 spec ~w range ~w ",
             [OffsetSpec, Range]),
     try
-        StartOffset =
-            case {OffsetSpec, Range} of
-                {_, empty} ->
-                    0;
-                {Offset, {_, LastOffs}}
-                  when Offset == LastOffs + 1 ->
-                    %% next but we can't use `next` due to race conditions
-                    Offset;
-                {Offset, {_, LastOffs}}
-                  when Offset > LastOffs + 1 ->
-                    %% out of range, clamp as `next`
-                    throw({retry_with, next, Conf});
-                {Offset, {FirstOffs, _LastOffs}} ->
-                    max(FirstOffs, Offset)
-            end,
-        %% maybe reverse IdxFiles if the offset requested is in the top half
-        %% of the range
-        RevIdxFiles = lists:reverse(IdxFiles),
+        StartOffset = case {OffsetSpec, Range} of
+                          {_, empty} ->
+                              0;
+                          {Offset, {_, LastOffs}}
+                            when Offset == LastOffs + 1 ->
+                              %% next but we can't use `next`
+                              %% due to race conditions
+                              Offset;
+                          {Offset, {_, LastOffs}}
+                            when Offset > LastOffs + 1 ->
+                              %% out of range, clamp as `next`
+                              throw({retry_with, next, Conf});
+                          {Offset, {FirstOffs, _LastOffs}} ->
+                              max(FirstOffs, Offset)
+                      end,
+
+        %% find the first segment that may contain the start offset
         IdxFiles2 = case lists:search(
                            fun(IdxFile) ->
                                    FstOffset = list_to_integer(
                                                  filename:basename(IdxFile, ".index")),
                                    StartOffset >= FstOffset
-                           end, RevIdxFiles) of
+                           end, lists:reverse(IdxFiles)) of
                         {value, File} ->
                             [File];
                         false ->
-                            case Range of
-                                empty ->
-                                    IdxFiles;
-                                {From, To} ->
-                                    Pivot = To - ((To - From) div 2),
-                                    case StartOffset > Pivot of
-                                        true ->
-                                            RevIdxFiles;
-                                        false ->
-                                            IdxFiles
-                                    end
-                            end
+                            %% as we clamp StartOffset to the range of the stream
+                            %% we should never get here
+                            ?INFO("~s: unexpected start offset ~b for range ~w, "
+                                  "retry with next strategy",
+                                  [?MODULE, StartOffset, Range]),
+                            throw({retry_with, next, Conf})
                     end,
 
-
-        %% find the appopriate segment and scan the index to find the
-        %% postition of the next chunk to read
         case find_segment_for_offset2(StartOffset, IdxFiles2) of
             not_found ->
                 {error, {offset_out_of_range, Range}};
@@ -1991,45 +1981,40 @@ find_segment_for_offset(Offset,
 find_segment_for_offset(_Offset, _) ->
     not_found.
 
-%% find the segment the offset is in _or_ if the offset is the very next
-%% chunk offset it will return the last segment
-find_segment_for_offset2(Offset, [IdxFile]) ->
-    case index_file_to_seg_info(IdxFile) of
-        #seg_info{first = undefined,
-                  last = undefined} = Info ->
-            {end_of_log, Info};
-        #seg_info{last =
-                  #chunk_info{id = LastChId,
-                              num = LastNumRecs}} = Info
-          when Offset == LastChId + LastNumRecs ->
-            %% the last segment and offset is the next offset
-            {end_of_log, Info};
-        #seg_info{first = #chunk_info{id = FirstChId},
-                  last = #chunk_info{id = LastChId,
-                                     num = LastNumRecs}} = Info ->
-            NextChId = LastChId + LastNumRecs,
-            case Offset >= FirstChId andalso Offset < NextChId of
-                true ->
-                    %% we found it
-                    {found, Info};
-                false ->
-                    not_found
-            end
-    end;
-find_segment_for_offset2(Offset, [IdxFile | Rem]) ->
-    #seg_info{first = #chunk_info{id = FirstChId},
-              last = #chunk_info{id = LastChId,
-                                 num = LastNumRecs}} = Info = index_file_to_seg_info(IdxFile),
-    NextChId = LastChId + LastNumRecs,
-    case Offset >= FirstChId andalso Offset < NextChId of
-        true ->
-            %% we found it
-            {found, Info};
+find_segment_for_offset2(Offset, IdxFiles) ->
+    %% we assume index files are in the default low-> high order here
+    case lists:search(
+           fun(IdxFile) ->
+                   FstOffset = list_to_integer(
+                                 filename:basename(IdxFile, ".index")),
+                   Offset >= FstOffset
+           end, lists:reverse(IdxFiles)) of
+        {value, File} ->
+            case index_file_to_seg_info(File) of
+                #seg_info{first = undefined,
+                          last = undefined} = Info ->
+                    {end_of_log, Info};
+                #seg_info{last =
+                          #chunk_info{id = LastChId,
+                                      num = LastNumRecs}} = Info
+                  when Offset == LastChId + LastNumRecs ->
+                    %% the last segment and offset is the next offset
+                    {end_of_log, Info};
+                #seg_info{first = #chunk_info{id = FirstChId},
+                          last = #chunk_info{id = LastChId,
+                                             num = LastNumRecs}} = Info ->
+                    NextChId = LastChId + LastNumRecs,
+                    case Offset >= FirstChId andalso Offset < NextChId of
+                        true ->
+                            %% we found it
+                            {found, Info};
+                        false ->
+                            not_found
+                    end
+            end;
         false ->
-            find_segment_for_offset2(Offset, Rem)
-    end;
-find_segment_for_offset2(_Offset, _) ->
-    not_found.
+            not_found
+    end.
 
 can_read_next_offset(#read{type = offset,
                            next_offset = NextOffset,
