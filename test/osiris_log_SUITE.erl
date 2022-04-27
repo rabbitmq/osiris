@@ -1125,16 +1125,27 @@ many_segment_overview(Config) ->
     ct:pal("OffsOffsetTakenMid ~p", [OffsOffsetTakenMid]),
 
     %% TODO: timestamp
+    %%
 
     %% acceptor
     {Range, EOffs} = LogOverview,
-    {InitAcceptorTaken, _} =
+    {InitAcceptorTaken, AcceptorLog} =
         timer:tc(fun () ->
                          osiris_log:init_acceptor(Range, EOffs, Conf#{epoch => 6})
                  end),
     ct:pal("InitAcceptor took ~bus", [InitAcceptorTaken]),
 
+    {InitDataReaderTaken, _} =
+        timer:tc(fun () ->
+                         {ok, L} = osiris_log:init_data_reader(
+                                     osiris_log:tail_info(AcceptorLog),
+                                     Conf#{epoch => 6}),
+                         osiris_log:close(L)
+                 end),
+    ct:pal("InitDataReaderTaken ~p", [InitDataReaderTaken]),
+
     %% TODO: evaluate_retention
+    %% TODO: init_data_reader
     ok.
 
 %% Utility

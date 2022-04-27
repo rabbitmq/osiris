@@ -743,7 +743,7 @@ truncate_to(_Name, _Range, [], IdxFiles) ->
     [begin ok = delete_segment_from_index(I) end || I <- IdxFiles],
     [];
 truncate_to(Name, Range, [{E, ChId} | NextEOs], IdxFiles) ->
-    case find_segment_for_offset2(ChId, IdxFiles) of
+    case find_segment_for_offset(ChId, IdxFiles) of
         not_found ->
             case index_file_to_seg_info(lists:last(IdxFiles)) of
                 #seg_info{last = #chunk_info{epoch = E,
@@ -830,8 +830,8 @@ truncate_to(Name, Range, [{E, ChId} | NextEOs], IdxFiles) ->
                           {error,
                            {invalid_last_offset_epoch, epoch(), offset()}}.
 init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir} = Config) ->
-    SegInfos = build_log_overview(Dir),
-    Range = offset_range_from_segment_infos(SegInfos),
+    IdxFiles = sorted_index_files(Dir),
+    Range = offset_range_from_idx_files(IdxFiles),
     ?DEBUG("osiris_segment:init_data_reader/2 at ~b prev "
            "~w local range: ~w",
            [StartChunkId, PrevEOT, Range]),
@@ -848,23 +848,23 @@ init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir} = Config) ->
             %% first we need to validate PrevEO
             {ok, init_data_reader_from(
                    StartChunkId,
-                   find_segment_for_offset(StartChunkId, SegInfos),
+                   find_segment_for_offset(StartChunkId, IdxFiles),
                    Config)};
         _ ->
             {PrevEpoch, PrevChunkId, _PrevTs} = PrevEOT,
-            case check_chunk_has_expected_epoch(PrevChunkId, PrevEpoch, SegInfos) of
+            case check_chunk_has_expected_epoch(PrevChunkId, PrevEpoch, IdxFiles) of
                 ok ->
                     {ok, init_data_reader_from(
                            StartChunkId,
-                           find_segment_for_offset(StartChunkId, SegInfos),
+                           find_segment_for_offset(StartChunkId, IdxFiles),
                            Config)};
                 {error, _} = Err ->
                     Err
             end
     end.
 
-check_chunk_has_expected_epoch(ChunkId, Epoch, SegInfos) ->
-    case find_segment_for_offset(ChunkId, SegInfos) of
+check_chunk_has_expected_epoch(ChunkId, Epoch, IdxFiles) ->
+    case find_segment_for_offset(ChunkId, IdxFiles) of
         not_found ->
             %% this is unexpected and thus an error
             {error,
@@ -1064,7 +1064,7 @@ init_offset_reader0(OffsetSpec, #{dir := Dir} = Conf)
                             throw({retry_with, next, Conf})
                     end,
 
-        case find_segment_for_offset2(StartOffset, IdxFiles2) of
+        case find_segment_for_offset(StartOffset, IdxFiles2) of
             not_found ->
                 {error, {offset_out_of_range, Range}};
             {end_of_log, #seg_info{file = SegmentFile,
@@ -2044,38 +2044,7 @@ offset_range_from_chunk_range({#chunk_info{id = FirstChId},
                                            num = LastNumRecs}}) ->
     {FirstChId, LastChId + LastNumRecs - 1}.
 
-%% find the segment the offset is in _or_ if the offset is the very next
-%% chunk offset it will return the last segment
-find_segment_for_offset(0,
-                        [#seg_info{first = undefined, last = undefined} =
-                             Info]) ->
-    {end_of_log, Info};
-find_segment_for_offset(Offset,
-                        [#seg_info{last =
-                                       #chunk_info{id = LastChId,
-                                                   num = LastNumRecs}} =
-                             Info])
-    when Offset == LastChId + LastNumRecs ->
-    %% the last segment and offset is the next offset
-    {end_of_log, Info};
-find_segment_for_offset(Offset,
-                        [#seg_info{first = #chunk_info{id = FirstChId},
-                                   last =
-                                   #chunk_info{id = LastChId,
-                                               num = LastNumRecs}} =
-                         Info | Rem]) ->
-    NextChId = LastChId + LastNumRecs,
-    case Offset >= FirstChId andalso Offset < NextChId of
-        true ->
-            %% we found it
-            {found, Info};
-        false ->
-            find_segment_for_offset(Offset, Rem)
-    end;
-find_segment_for_offset(_Offset, _) ->
-    not_found.
-
-find_segment_for_offset2(Offset, IdxFiles) ->
+find_segment_for_offset(Offset, IdxFiles) ->
     %% we assume index files are in the default low-> high order here
     case lists:search(
            fun(IdxFile) ->
