@@ -8,6 +8,7 @@
 -module(osiris_log).
 
 -include("osiris.hrl").
+-include_lib("kernel/include/file.hrl").
 
 -export([init/1,
          init/2,
@@ -722,13 +723,6 @@ chunk_id_index_scan0(Fd, ChunkId) ->
 
 delete_segment_from_index(Index) ->
     File = segment_from_index_file(Index),
-    ?DEBUG("osiris_log: deleting segment ~s in ~s",
-           [filename:basename(File), filename:dirname(File)]),
-    ok = file:delete(File),
-    ok = file:delete(Index),
-    ok.
-
-delete_segment(#seg_info{file = File, index = Index}) ->
     ?DEBUG("osiris_log: deleting segment ~s in ~s",
            [filename:basename(File), filename:dirname(File)]),
     ok = file:delete(File),
@@ -1650,15 +1644,6 @@ overview(Dir) ->
             EpochOffsets = last_epoch_offsets2(IdxFiles),
             {Range, EpochOffsets}
     end.
-% overview(Dir) ->
-%     case build_log_overview(Dir) of
-%         [] ->
-%             {empty, []};
-%         SegInfos ->
-%             Range = offset_range_from_segment_infos(SegInfos),
-%             EpochOffsets = last_epoch_offsets(SegInfos),
-%             {Range, EpochOffsets}
-%     end.
 
 -spec format_status(state()) -> map().
 format_status(#?MODULE{cfg = #cfg{directory = Dir,
@@ -1705,63 +1690,72 @@ update_retention(Retention,
 evaluate_retention(Dir, Specs) ->
     {Time, Result} = timer:tc(
                        fun() ->
-                               SegInfos0 = build_log_overview(Dir),
-                               SegInfos = evaluate_retention0(SegInfos0, Specs),
-                               OffsetRange = offset_range_from_segment_infos(SegInfos),
-                               FirstTs = first_timestamp_from_segment_infos(SegInfos),
-                               {OffsetRange, FirstTs, length(SegInfos)}
+                               IdxFiles0 = sorted_index_files(Dir),
+                               IdxFiles = evaluate_retention0(IdxFiles0, Specs),
+                               OffsetRange = offset_range_from_idx_files(IdxFiles),
+                               FirstTs = first_timestamp_from_index_files(IdxFiles),
+                               {OffsetRange, FirstTs, length(IdxFiles)}
                        end),
     ?DEBUG("~s:~s/~b (~w) completed in ~fs",
            [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Specs, Time/1_000_000]),
     Result.
 
-evaluate_retention0(Infos, []) ->
-    %% we should never hit empty infos as one should always be left
-    Infos;
-evaluate_retention0(Infos, [{max_bytes, MaxSize} | Specs]) ->
-    RemSegs = eval_max_bytes(Infos, MaxSize),
-    evaluate_retention0(RemSegs, Specs);
-evaluate_retention0(Infos, [{max_age, Age} | Specs]) ->
-    RemSegs = eval_age(Infos, Age),
-    evaluate_retention0(RemSegs, Specs).
+evaluate_retention0(IdxFiles, []) ->
+    IdxFiles;
+evaluate_retention0(IdxFiles, [{max_bytes, MaxSize} | Specs]) ->
+    RemIdxFiles = eval_max_bytes(IdxFiles, MaxSize),
+    evaluate_retention0(RemIdxFiles, Specs);
+evaluate_retention0(IdxFiles, [{max_age, Age} | Specs]) ->
+    RemIdxFiles = eval_age(IdxFiles, Age),
+    evaluate_retention0(RemIdxFiles, Specs).
 
-eval_age([#seg_info{last = #chunk_info{timestamp = Ts},
-                    size = Size} = Old | Rem] = Infos, Age) ->
-    Now = erlang:system_time(millisecond),
-    case Ts < Now - Age
-         andalso length(Rem) > 0
-         andalso Size > ?LOG_HEADER_SIZE
-    of
-        true ->
-            %% the oldest timestamp is older than retention
-            %% and there are other segments available
-            %% we can delete
-            ok = delete_segment(Old),
-            eval_age(Rem, Age);
-        false ->
-            Infos
-    end;
-eval_age(Infos, _Age) ->
-    Infos.
+eval_age([_] = IdxFiles, _Age) ->
+    IdxFiles;
+eval_age([IdxFile | IdxFiles] = AllIdxFiles, Age) ->
+    case last_timestamp_in_index_file(IdxFile) of
+        {ok, Ts} ->
+            Now = erlang:system_time(millisecond),
+            case Ts < Now - Age of
+                true ->
+                    %% the oldest timestamp is older than retention
+                    %% and there are other segments available
+                    %% we can delete
+                    ok = delete_segment_from_index(IdxFile),
+                    eval_age(IdxFiles, Age);
+                false ->
+                    AllIdxFiles
+            end;
+        _Err ->
+            AllIdxFiles
+    end.
 
-eval_max_bytes(SegInfos, MaxSize) ->
-    TotalSize =
-        lists:foldl(fun(#seg_info{size = Size}, Acc) -> Acc + Size end, 0,
-                    SegInfos),
-    case SegInfos of
-        _ when length(SegInfos) =< 1 ->
-            SegInfos;
-        [_, #seg_info{size = 0}] ->
-            SegInfos;
+eval_max_bytes(IdxFiles, MaxSize) ->
+    case IdxFiles of
+        [] ->
+            [];
+        [_] ->
+            IdxFiles;
         _ ->
+            %% TODO: handle case where the second segment doesn't have any entries
+            %% on second though is there ever
+            TotalSize =
+            lists:foldl(fun(IdxFile, Acc) ->
+                                SegFile = segment_from_index_file(IdxFile),
+                                case prim_file:read_file_info(SegFile) of
+                                    {ok, #file_info{size = Size}} ->
+                                        Acc + Size;
+                                    _ ->
+                                        Acc
+                                end
+                        end, 0, IdxFiles),
             case TotalSize > MaxSize of
                 true ->
                     %% we can delete at least one segment
-                    [Old | Rem] = SegInfos,
-                    ok = delete_segment(Old),
+                    [Old | Rem] = IdxFiles,
+                    ok = delete_segment_from_index(Old),
                     eval_max_bytes(Rem, MaxSize);
                 false ->
-                    SegInfos
+                    IdxFiles
             end
     end.
 
@@ -1813,41 +1807,6 @@ last_epoch_offsets2([FstIdxFile | IdxFiles]) ->
     ?DEBUG("~s:~s/~b completed in ~bms",
            [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time div 1000]),
     Result.
-%% returns a list of the last offset by epoch
-% last_epoch_offsets([#seg_info{first = undefined,
-%                               last = undefined}]) ->
-%     [];
-% last_epoch_offsets([#seg_info{index = IdxFile,
-%                               first = #chunk_info{epoch = FstE, id = FstChId}}
-%                     | SegInfos]) ->
-%     {Time, Result} =
-%         timer:tc(
-%           fun() ->
-%                   FstFd = open_index_read(IdxFile),
-%                   {LastE, LastO, Res} =
-%                       lists:foldl(
-%                         fun(#seg_info{index = I,
-%                                       last = #chunk_info{epoch = LE}},
-%                             {E, _, _} = Acc) when LE > E  ->
-%                                 Fd = open_index_read(I),
-%                                 last_epoch_offset(file:read(Fd, ?INDEX_RECORD_SIZE_B),
-%                                                   Fd, Acc);
-%                            (#seg_info{last = #chunk_info{id = LO,
-%                                                          epoch = LE}},
-%                             {_, _, Acc}) ->
-%                                 {LE, LO, Acc};
-%                            (_, Acc) ->
-%                                 %% not sure if this can ever happen
-%                                 Acc
-%                         end,
-%                         last_epoch_offset(file:read(FstFd, ?INDEX_RECORD_SIZE_B),
-%                                           FstFd, {FstE, FstChId, []}),
-%                         SegInfos),
-%                   lists:reverse([{LastE, LastO} | Res])
-%           end),
-%     ?DEBUG("~s:~s/~b completed in ~bms",
-%            [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time div 1000]),
-%     Result.
 
 %% aggregates the chunk offsets for each epoch
 last_epoch_offset(eof, Fd, Acc) ->
@@ -2011,12 +1970,43 @@ sendfile(ssl, Fd, Sock, Pos, ToSend) ->
             Err
     end.
 
-first_timestamp_from_segment_infos(
-  [#seg_info{first = #chunk_info{timestamp = Ts}} | _ ]) ->
-    Ts;
-first_timestamp_from_segment_infos(_) ->
-    0.
+last_timestamp_in_index_file(IdxFile) ->
+    case file:open(IdxFile, [raw, binary, read]) of
+        {ok, IdxFd} ->
+            case tail_index(IdxFd) of
+                {ok, <<_O:64/unsigned,
+                       LastTimestamp:64/signed,
+                       _E:64/unsigned,
+                       _ChunkPos:32/unsigned,
+                       _ChType:8/unsigned>>} ->
+                    _ = file:close(IdxFd),
+                    {ok, LastTimestamp};
+                Err ->
+                    _ = file:close(IdxFd),
+                    Err
+            end;
+        Err ->
+            Err
+    end.
 
+first_timestamp_from_index_files([IdxFile | _]) ->
+    case file:open(IdxFile, [raw, binary, read]) of
+        {ok, IdxFd} ->
+            case top_index(IdxFd) of
+                {ok, <<_FstO:64/unsigned,
+                       FstTimestamp:64/signed,
+                       _FstE:64/unsigned,
+                       _FstChunkPos:32/unsigned,
+                       _FstChType:8/unsigned>>} ->
+                    _ = file:close(IdxFd),
+                    FstTimestamp;
+                _ ->
+                    _ = file:close(IdxFd),
+                    0
+            end;
+        _Err ->
+            0
+    end.
 
 offset_range_from_idx_files(IdxFiles) ->
     {_, FstSI, LstSI} = build_log_overview_first_last0(IdxFiles),
@@ -2027,8 +2017,6 @@ offset_range_from_segment_infos(SegInfos) ->
     ChunkRange = chunk_range_from_segment_infos(SegInfos),
     offset_range_from_chunk_range(ChunkRange).
 
-chunk_range_from_segment_infos([]) ->
-    empty;
 chunk_range_from_segment_infos([#seg_info{first = undefined,
                                           last = undefined}]) ->
     empty;

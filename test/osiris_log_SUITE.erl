@@ -1125,7 +1125,14 @@ many_segment_overview(Config) ->
     ct:pal("OffsOffsetTakenMid ~p", [OffsOffsetTakenMid]),
 
     %% TODO: timestamp
-    %%
+    Ts = erlang:system_time(millisecond) - 10000,
+    {TimestampTaken, _} =
+        timer:tc(fun () ->
+                         {ok, L} = osiris_log:init_offset_reader({timestamp, Ts},
+                                                                 Conf#{epoch => 6}),
+                         osiris_log:close(L)
+                 end),
+    ct:pal("TimestampTaken ~p", [TimestampTaken]),
 
     %% acceptor
     {Range, EOffs} = LogOverview,
@@ -1144,8 +1151,13 @@ many_segment_overview(Config) ->
                  end),
     ct:pal("InitDataReaderTaken ~p", [InitDataReaderTaken]),
 
-    %% TODO: evaluate_retention
-    %% TODO: init_data_reader
+    %% evaluate_retention
+    Specs = [{max_age, 60000}, {max_bytes, 5_000_000_000}],
+    {RetentionTaken, _} =
+        timer:tc(fun () ->
+                         osiris_log:evaluate_retention(maps:get(dir, Conf), Specs)
+                 end),
+    ct:pal("RetentionTaken ~p", [RetentionTaken]),
     ok.
 
 %% Utility
