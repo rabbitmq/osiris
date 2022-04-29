@@ -442,10 +442,12 @@ init(#{dir := Dir,
     %% scan directory for segments if in write mode
     MaxSizeBytes =
         maps:get(max_segment_size_bytes, Config, ?DEFAULT_MAX_SEGMENT_SIZE_B),
-    MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks, ?DEFAULT_MAX_SEGMENT_SIZE_C),
+    MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks,
+                                        ?DEFAULT_MAX_SEGMENT_SIZE_C),
     Retention = maps:get(retention, Config, []),
     ?INFO("Will use ~s for osiris log data directory", [Dir]),
-    ?DEBUG("osiris_log:init/1 max_segment_size_bytes: ~b, max_segment_size_chunks ~b, retention ~w",
+    ?DEBUG("osiris_log:init/1 max_segment_size_bytes: ~b,
+           max_segment_size_chunks ~b, retention ~w",
           [MaxSizeBytes, MaxSizeChunks, Retention]),
     ok = filelib:ensure_dir(Dir),
     case file:make_dir(Dir) of
@@ -952,33 +954,28 @@ init_offset_reader0({abs, Offs}, #{dir := Dir} = Conf) ->
             init_offset_reader0(Offs, Conf)
     end;
 init_offset_reader0({timestamp, Ts}, #{dir := Dir} = Conf) ->
-    case build_log_overview(Dir) of
+    case sorted_index_files(Dir) of
         [] ->
             init_offset_reader0(next, Conf);
-        [#seg_info{file = SegmentFile,
-                   first = #chunk_info{timestamp = Fst,
-                                       pos = FilePos,
-                                       id = ChunkId}} | _]
-            when is_integer(Fst) andalso Fst > Ts ->
-            %% timestamp is lower than the first timestamp available
-            open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
-        SegInfos ->
-            case lists:search(fun (#seg_info{first = #chunk_info{timestamp = F},
-                                             last = #chunk_info{timestamp = L}})
-                                      when is_integer(F)
-                                           andalso is_integer(L) ->
-                                      Ts >= F andalso Ts =< L;
-                                  (_) ->
-                                      false
-                              end,
-                              SegInfos)
+        IdxFiles ->
+            case timestamp_idx_file_search(Ts, lists:reverse(IdxFiles))
             of
-                {value, #seg_info{file = SegmentFile} = Info} ->
+                {scan, IdxFile} ->
                     %% segment was found, now we need to scan index to
                     %% find nearest offset
-                    {ChunkId, FilePos} = chunk_location_for_timestamp(Info, Ts),
+                    {ChunkId, FilePos} = chunk_location_for_timestamp(IdxFile, Ts),
+                    SegmentFile = segment_from_index_file(IdxFile),
                     open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
-                false ->
+                {first_in, IdxFile} ->
+                    {ok, Fd} = file:open(IdxFile, [raw, binary, read]),
+                    {ok, <<ChunkId:64/unsigned,
+                           _Ts:64/signed,
+                           _:64/unsigned,
+                           FilePos:32/unsigned,
+                           _:8/unsigned>>} = top_index(Fd),
+                    SegmentFile = segment_from_index_file(IdxFile),
+                    open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
+                next ->
                     %% segment was not found, attach next
                     %% this should be rare so no need to call the more optimal
                     %% open_offset_reader_at/4 function
@@ -1499,21 +1496,6 @@ build_log_overview_first_last0([Fst | Rem]) ->
     [FstSegInfo, LastSegInfo] = build_log_overview0([Fst, lists:last(Rem)], []),
     {length(Rem) + 1, FstSegInfo, LastSegInfo}.
 
-build_log_overview(Dir) when is_list(Dir) ->
-    IdxFiles = sorted_index_files(Dir),
-    {Time, Result} = timer:tc(
-                       fun() ->
-                               try
-                                   build_log_overview0(IdxFiles, [])
-                               catch
-                                   missing_file ->
-                                       build_log_overview(Dir)
-                               end
-                       end),
-    ?DEBUG("~s:~s/~b completed in ~b ms",
-           [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time div 1000]),
-    Result.
-
 build_log_overview0([], Acc) ->
     lists:reverse(Acc);
 build_log_overview0([IdxFile | IdxFiles], Acc0) ->
@@ -1736,18 +1718,16 @@ eval_max_bytes(IdxFiles, MaxSize) ->
         [_] ->
             IdxFiles;
         _ ->
-            %% TODO: handle case where the second segment doesn't have any entries
-            %% on second though is there ever
             TotalSize =
-            lists:foldl(fun(IdxFile, Acc) ->
-                                SegFile = segment_from_index_file(IdxFile),
-                                case prim_file:read_file_info(SegFile) of
-                                    {ok, #file_info{size = Size}} ->
-                                        Acc + Size;
-                                    _ ->
-                                        Acc
-                                end
-                        end, 0, IdxFiles),
+                lists:foldl(fun(IdxFile, Acc) ->
+                                    SegFile = segment_from_index_file(IdxFile),
+                                    case prim_file:read_file_info(SegFile) of
+                                        {ok, #file_info{size = Size}} ->
+                                            Acc + Size;
+                                        _ ->
+                                            Acc
+                                    end
+                            end, 0, IdxFiles),
             case TotalSize > MaxSize of
                 true ->
                     %% we can delete at least one segment
@@ -2199,11 +2179,16 @@ throw_missing(Any) ->
 open(SegFile, Options) ->
     throw_missing(file:open(SegFile, Options)).
 
-chunk_location_for_timestamp(#seg_info{index = Idx}, Ts) ->
+chunk_location_for_timestamp(Idx, Ts) ->
     Fd = open_index_read(Idx),
     %% scan index file for nearest timestamp
     {ChunkId, _Timestamp, _Epoch, FilePos} = timestamp_idx_scan(Fd, Ts),
     {ChunkId, FilePos}.
+% chunk_location_for_timestamp(#seg_info{index = Idx}, Ts) ->
+%     Fd = open_index_read(Idx),
+%     %% scan index file for nearest timestamp
+%     {ChunkId, _Timestamp, _Epoch, FilePos} = timestamp_idx_scan(Fd, Ts),
+%     {ChunkId, FilePos}.
 
 timestamp_idx_scan(Fd, Ts) ->
     case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
@@ -2445,6 +2430,89 @@ next_location(#chunk_info{id = Id,
 
 index_file_first_offset(IdxFile) ->
     list_to_integer(filename:basename(IdxFile, ".index")).
+
+start_end_timestamp(IdxFile) ->
+    case file:open(IdxFile, [raw, read, binary]) of
+        {ok, Fd} ->
+            case top_index(Fd) of
+                {ok, <<_:64/unsigned,
+                       TopTs:64/signed,
+                       _:64/unsigned,
+                       _:32/unsigned,
+                       _:8/unsigned>>} ->
+                    %% if we can top we can tail
+                    {ok, <<_:64/unsigned,
+                           TailTs:64/signed,
+                           _:64/unsigned,
+                           _:32/unsigned,
+                           _:8/unsigned>>} = tail_index(Fd),
+                    ok = file:close(Fd),
+                    {TopTs, TailTs};
+                {error, einval} ->
+                    %% empty index
+                    undefined;
+                eof ->
+                    eof
+            end;
+        _Err ->
+            file_not_found
+    end.
+
+
+
+%% accepts a list of index files in reverse order
+%% [{21, 30}, {12, 20}, {5, 10}]
+%% 11 = {12, 20}
+timestamp_idx_file_search(Ts, [FstIdxFile | Older]) ->
+    case start_end_timestamp(FstIdxFile) of
+        {_FstTs, EndTs}
+          when Ts > EndTs ->
+            %% timestamp greater than the newest timestamp in the stream
+            %% attach at 'next'
+            next;
+        {FstTs, _EndTs}
+          when Ts < FstTs ->
+            %% the requested timestamp is older than the first timestamp in
+            %% this segment, keep scanning
+            timestamp_idx_file_search0(Ts, Older, FstIdxFile);
+        {_, _} ->
+            %% else we must have found it!
+            {scan, FstIdxFile};
+        file_not_found ->
+            %% the requested timestamp is older than the first timestamp in
+            %% this segment, keep scanning
+            timestamp_idx_file_search0(Ts, Older, FstIdxFile);
+        eof ->
+            %% empty log
+            next
+    end.
+
+timestamp_idx_file_search0(Ts, [], IdxFile) ->
+    case start_end_timestamp(IdxFile) of
+        {FstTs, _LastTs}
+          when Ts < FstTs ->
+            {first_in, IdxFile};
+        _ ->
+            {found, IdxFile}
+    end;
+timestamp_idx_file_search0(Ts, [IdxFile | Older], Prev) ->
+    case start_end_timestamp(IdxFile) of
+        {_FstTs, EndTs}
+          when Ts > EndTs ->
+            %% we should attach the the first chunk in the previous segment
+            %% as the requested timestamp must fall in between the
+            %% current and previous segments
+            {first_in, Prev};
+        {FstTs, _EndTs}
+          when Ts < FstTs ->
+            %% the requested timestamp is older than the first timestamp in
+            %% this segment, keep scanning
+            timestamp_idx_file_search0(Ts, Older, IdxFile);
+        _ ->
+            %% else we must have found it!
+            {scan, IdxFile}
+    end.
+
 
 -ifdef(TEST).
 

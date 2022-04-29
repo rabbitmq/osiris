@@ -47,7 +47,9 @@ all_tests() ->
      init_offset_reader_last_chunk_is_not_user_chunk,
      init_offset_reader_no_user_chunk_in_last_segment,
      init_offset_reader_no_user_chunk_in_segments,
+     init_offset_reader_timestamp_empty,
      init_offset_reader_timestamp,
+     init_offset_reader_timestamp_multi_segment,
      init_offset_reader_truncated,
      init_data_reader_next,
      init_data_reader_empty_log,
@@ -538,6 +540,25 @@ init_offset_reader_no_user_chunk_in_segments(Config) ->
     osiris_log:close(L2),
     ok.
 
+init_offset_reader_timestamp_empty(Config) ->
+    ok = logger:set_primary_config(level, all),
+    Now = now_ms(),
+    EpochChunks = [],
+    LDir = ?config(leader_dir, Config),
+    Conf0 = ?config(osiris_conf, Config),
+    %% TODO: separate multi segment test
+    % application:set_env(osiris, max_segment_size_chunks, 1),
+    Conf = Conf0#{max_segment_size_chunks => 1},
+    LLog0 = seed_log(LDir, EpochChunks, Config),
+    set_offset_ref(Conf, 3),
+    osiris_log:close(LLog0),
+    RConf = Conf#{dir => LDir},
+
+    {ok, L1} = osiris_log:init_offset_reader({timestamp, Now - 8000}, RConf),
+    ?assertEqual(0, osiris_log:next_offset(L1)),
+    osiris_log:close(L1),
+    ok.
+
 init_offset_reader_timestamp(Config) ->
     ok = logger:set_primary_config(level, all),
     Now = now_ms(),
@@ -546,7 +567,8 @@ init_offset_reader_timestamp(Config) ->
          {1, Now - 8000, [<<"two">>]},  % 1
          {1, Now - 5000, [<<"three">>, <<"four">>]}], % 2
     LDir = ?config(leader_dir, Config),
-    Conf = ?config(osiris_conf, Config),
+    Conf0 = ?config(osiris_conf, Config),
+    Conf = Conf0#{max_segment_size_chunks => 1},
     LLog0 = seed_log(LDir, EpochChunks, Config),
     set_offset_ref(Conf, 3),
     osiris_log:close(LLog0),
@@ -568,8 +590,56 @@ init_offset_reader_timestamp(Config) ->
         osiris_log:init_offset_reader({timestamp, Now - 10000}, RConf),
     ?assertEqual(0, osiris_log:next_offset(L3)),
     osiris_log:close(L3),
+
+    %% in between
+    {ok, L4} =
+        osiris_log:init_offset_reader({timestamp, Now - 6000}, RConf),
+    ?assertEqual(2, osiris_log:next_offset(L4)),
+    osiris_log:close(L4),
     ok.
 
+init_offset_reader_timestamp_multi_segment(Config) ->
+    ok = logger:set_primary_config(level, all),
+    Now = now_ms(),
+    EpochChunks =
+        [{1, Now - 10000, [<<"one">>]}, % 0
+         {1, Now - 8000, [<<"two">>]},  % 1
+         {1, Now - 5000, [<<"three">>, <<"four">>]}], % 2
+    LDir = ?config(leader_dir, Config),
+    Conf0 = ?config(osiris_conf, Config),
+    %% segment per chunk
+    application:set_env(osiris, max_segment_size_chunks, 1),
+    Conf = Conf0#{max_segment_size_chunks => 1},
+    LLog0 = seed_log(LDir, EpochChunks, Config),
+
+    set_offset_ref(Conf, 3),
+    osiris_log:close(LLog0),
+    application:unset_env(osiris, max_segment_size_chunks),
+    RConf = Conf#{dir => LDir},
+
+    {ok, L1} =
+        osiris_log:init_offset_reader({timestamp, Now - 8000}, RConf),
+    %% next offset is expected to be offset 1
+    ?assertEqual(1, osiris_log:next_offset(L1)),
+    osiris_log:close(L1),
+
+    %% future case
+    {ok, L2} = osiris_log:init_offset_reader({timestamp, Now}, RConf),
+    ?assertEqual(4, osiris_log:next_offset(L2)),
+    osiris_log:close(L2),
+
+    %% past case
+    {ok, L3} =
+        osiris_log:init_offset_reader({timestamp, Now - 10000}, RConf),
+    ?assertEqual(0, osiris_log:next_offset(L3)),
+    osiris_log:close(L3),
+
+    %% in between
+    {ok, L4} =
+        osiris_log:init_offset_reader({timestamp, Now - 6000}, RConf),
+    ?assertEqual(2, osiris_log:next_offset(L4)),
+    osiris_log:close(L4),
+    ok.
 init_offset_reader_truncated(Config) ->
     Data = crypto:strong_rand_bytes(1500),
     EpochChunks =
@@ -1074,44 +1144,44 @@ many_segment_overview(Config) ->
     %% {{0,40959},[{-1,-1},{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]}
     ?assertEqual({{0,40959},
                   [{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]}, LogOverview),
+    Conf6 = Conf#{epoch => 6},
 
     {InitTaken, _} = timer:tc(
                        fun () ->
-                               osiris_log:close(
-                                 osiris_log:init(Conf#{epoch => 6}))
+                               osiris_log:close(osiris_log:init(Conf6))
                        end),
     ct:pal("InitTaken ~p", [InitTaken]),
 
     {OffsLastTaken, _} =
         timer:tc(fun () ->
-                         {ok, L} = osiris_log:init_offset_reader(last, Conf#{epoch => 6}),
+                         {ok, L} = osiris_log:init_offset_reader(last, Conf6),
                          osiris_log:close(L)
                  end),
     ct:pal("OffsLastTaken ~p", [OffsLastTaken]),
 
     {OffsFirstTaken, _} =
         timer:tc(fun () ->
-                         {ok, L} = osiris_log:init_offset_reader(first, Conf#{epoch => 6}),
+                         {ok, L} = osiris_log:init_offset_reader(first, Conf6),
                          osiris_log:close(L)
                  end),
     ct:pal("OffsFirstTaken ~p", [OffsFirstTaken]),
 
     {OffsNextTaken, _} =
         timer:tc(fun () ->
-                         {ok, L} = osiris_log:init_offset_reader(next, Conf#{epoch => 6}),
+                         {ok, L} = osiris_log:init_offset_reader(next, Conf6),
                          osiris_log:close(L)
                  end),
     ct:pal("OffsNextTaken ~p", [OffsNextTaken]),
 
     {OffsOffsetTakenHi, _} =
         timer:tc(fun () ->
-                         {ok, L} = osiris_log:init_offset_reader(40000, Conf#{epoch => 6}),
+                         {ok, L} = osiris_log:init_offset_reader(40000, Conf6),
                          osiris_log:close(L)
                  end),
     ct:pal("OffsOffsetTakenHi ~p", [OffsOffsetTakenHi]),
     {OffsOffsetTakenLow, _} =
         timer:tc(fun () ->
-                         {ok, L} = osiris_log:init_offset_reader(400, Conf#{epoch => 6}),
+                         {ok, L} = osiris_log:init_offset_reader(400, Conf6),
                          osiris_log:close(L)
                  end),
     ct:pal("OffsOffsetTakenLow ~p", [OffsOffsetTakenLow]),
@@ -1119,17 +1189,17 @@ many_segment_overview(Config) ->
 
     {OffsOffsetTakenMid, _} =
         timer:tc(fun () ->
-                         {ok, L} = osiris_log:init_offset_reader(20000, Conf#{epoch => 6}),
+                         {ok, L} = osiris_log:init_offset_reader(20000, Conf6),
                          osiris_log:close(L)
                  end),
     ct:pal("OffsOffsetTakenMid ~p", [OffsOffsetTakenMid]),
 
     %% TODO: timestamp
-    Ts = erlang:system_time(millisecond) - 10000,
+    Ts = erlang:system_time(millisecond) - 100,
     {TimestampTaken, _} =
         timer:tc(fun () ->
                          {ok, L} = osiris_log:init_offset_reader({timestamp, Ts},
-                                                                 Conf#{epoch => 6}),
+                                                                 Conf6),
                          osiris_log:close(L)
                  end),
     ct:pal("TimestampTaken ~p", [TimestampTaken]),
@@ -1138,15 +1208,14 @@ many_segment_overview(Config) ->
     {Range, EOffs} = LogOverview,
     {InitAcceptorTaken, AcceptorLog} =
         timer:tc(fun () ->
-                         osiris_log:init_acceptor(Range, EOffs, Conf#{epoch => 6})
+                         osiris_log:init_acceptor(Range, EOffs, Conf6)
                  end),
     ct:pal("InitAcceptor took ~bus", [InitAcceptorTaken]),
 
     {InitDataReaderTaken, _} =
         timer:tc(fun () ->
                          {ok, L} = osiris_log:init_data_reader(
-                                     osiris_log:tail_info(AcceptorLog),
-                                     Conf#{epoch => 6}),
+                                     osiris_log:tail_info(AcceptorLog), Conf6),
                          osiris_log:close(L)
                  end),
     ct:pal("InitDataReaderTaken ~p", [InitDataReaderTaken]),

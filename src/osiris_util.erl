@@ -235,6 +235,9 @@ inet_tls_enabled([{proto_dist, ["inet_tls"]} | _]) ->
 inet_tls_enabled([_Opt | Tail]) ->
     inet_tls_enabled(Tail).
 
+% -spec binary_search(Vjj
+% binary_search(Fun, List) ->
+%     Fun(hd(List)).
 
 partition_parallel(F, Es, Timeout) ->
     Parent = self(),
