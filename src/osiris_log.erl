@@ -475,7 +475,7 @@ init(#{dir := Dir,
                counter = Cnt,
                counter_id = counter_id(Config),
                first_offset_fun = FirstOffsetFun},
-    case build_log_overview_first_last(Config) of
+    case first_and_last_seginfos(Config) of
         none ->
             NextOffset = case Config of
                              #{initial_offset := IO}
@@ -738,22 +738,19 @@ truncate_to(_Name, _Range, [], IdxFiles) ->
     %% ?????  this means the entire log is out
     [begin ok = delete_segment_from_index(I) end || I <- IdxFiles],
     [];
-truncate_to(Name, Range, [{E, ChId} | NextEOs], IdxFiles) ->
+truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
     case find_segment_for_offset(ChId, IdxFiles) of
         not_found ->
-            case index_file_to_seg_info(lists:last(IdxFiles)) of
-                #seg_info{last = #chunk_info{epoch = E,
-                                             id = LastChId,
-                                             num = Num}}
+            case build_seg_info(lists:last(IdxFiles)) of
+                {ok, #seg_info{last = #chunk_info{epoch = E,
+                                                  id = LastChId,
+                                                  num = Num}}}
                 when ChId > LastChId + Num ->
                     %% the last available local chunk id is smaller than the
                     %% sources last chunk id but is in the same epoch
                     %% check if there is any overlap
-                    LastOffsLocal = case offset_range_from_idx_files(IdxFiles) of
-                                        empty -> 0;
-                                        {_, L} -> L
-                                    end,
-                    FstOffsetRemote = case Range of
+                    LastOffsLocal = LastChId + Num,
+                    FstOffsetRemote = case RemoteRange of
                                           empty -> 0;
                                           {F, _} -> F
                                       end,
@@ -769,8 +766,10 @@ truncate_to(Name, Range, [{E, ChId} | NextEOs], IdxFiles) ->
                             %% no truncation needed
                             IdxFiles
                     end;
-                _ ->
-                    truncate_to(Name, Range, NextEOs, IdxFiles)
+                {ok, _} ->
+                    truncate_to(Name, RemoteRange, NextEOs, IdxFiles)
+                    %% TODO: what to do if error is returned from
+                    %% build_seg_info/1?
             end;
         {end_of_log, _Info} ->
             IdxFiles;
@@ -814,7 +813,7 @@ truncate_to(Name, Range, [{E, ChId} | NextEOs], IdxFiles) ->
                               end
                       end, IdxFiles);
                 _ ->
-                    truncate_to(Name, Range, NextEOs, IdxFiles)
+                    truncate_to(Name, RemoteRange, NextEOs, IdxFiles)
             end
     end.
 
@@ -865,10 +864,10 @@ check_chunk_has_expected_epoch(ChunkId, Epoch, IdxFiles) ->
             %% this is unexpected and thus an error
             {error,
              {invalid_last_offset_epoch, Epoch, unknown}};
-        {found, SegmentInfo = #seg_info{file = _PrevSeg}} ->
+        {found, #seg_info{} = SegmentInfo} ->
             %% prev segment exists, does it have the correct
             %% epoch?
-            case scan_idx(ChunkId, SegmentInfo) of
+            case offset_idx_scan(ChunkId, SegmentInfo) of
                 {ChunkId, Epoch, _PrevPos} ->
                     ok;
                 {ChunkId, OtherEpoch, _} ->
@@ -908,7 +907,7 @@ init_data_reader_from(ChunkId,
 init_data_reader_from(ChunkId,
                       {found, #seg_info{file = File} = SegInfo},
                       Config) ->
-    {ChunkId, _Epoch, FilePos} = scan_idx(ChunkId, SegInfo),
+    {ChunkId, _Epoch, FilePos} = offset_idx_scan(ChunkId, SegInfo),
     init_data_reader_at(ChunkId, FilePos, File, Config).
 
 %% @doc Initialise a new offset reader
@@ -953,13 +952,12 @@ init_offset_reader0({abs, Offs}, #{dir := Dir} = Conf) ->
             %% it is in range, convert to standard offset
             init_offset_reader0(Offs, Conf)
     end;
-init_offset_reader0({timestamp, Ts}, #{dir := Dir} = Conf) ->
-    case sorted_index_files(Dir) of
+init_offset_reader0({timestamp, Ts}, #{} = Conf) ->
+    case sorted_index_files_rev(Conf) of
         [] ->
             init_offset_reader0(next, Conf);
-        IdxFiles ->
-            case timestamp_idx_file_search(Ts, lists:reverse(IdxFiles))
-            of
+        IdxFilesRev ->
+            case timestamp_idx_file_search(Ts, IdxFilesRev) of
                 {scan, IdxFile} ->
                     %% segment was found, now we need to scan index to
                     %% find nearest offset
@@ -972,7 +970,7 @@ init_offset_reader0({timestamp, Ts}, #{dir := Dir} = Conf) ->
                            _Ts:64/signed,
                            _:64/unsigned,
                            FilePos:32/unsigned,
-                           _:8/unsigned>>} = top_index(Fd),
+                           _:8/unsigned>>} = first_idx_record(Fd),
                     SegmentFile = segment_from_index_file(IdxFile),
                     open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
                 next ->
@@ -983,29 +981,31 @@ init_offset_reader0({timestamp, Ts}, #{dir := Dir} = Conf) ->
             end
     end;
 init_offset_reader0(first, #{} = Conf) ->
-    case build_log_overview_first_last(Conf) of
-        {_, #seg_info{file = File,
-                      first = undefined}, _} ->
+    [FstIdxFile | _ ] = sorted_index_files(Conf),
+    case build_seg_info(FstIdxFile) of
+        {ok, #seg_info{file = File,
+                       first = undefined}} ->
             %% empty log, attach at 0
             open_offset_reader_at(File, 0, ?LOG_HEADER_SIZE, Conf);
-        {_, #seg_info{file = File,
-                      first = #chunk_info{id = FirstChunkId,
-                                          pos = FilePos}}, _} ->
+        {ok, #seg_info{file = File,
+                       first = #chunk_info{id = FirstChunkId,
+                                           pos = FilePos}}} ->
             open_offset_reader_at(File, FirstChunkId, FilePos, Conf);
-        _ ->
-            exit(no_segments_found)
+        {error, _} = Err ->
+            exit(Err)
     end;
 init_offset_reader0(next, #{} = Conf) ->
-    case build_log_overview_first_last(Conf) of
-        {_, _, #seg_info{file = File,
-                         last = LastChunk}} ->
+    [LastIdxFile | _ ] = sorted_index_files_rev(Conf),
+    case build_seg_info(LastIdxFile) of
+        {ok, #seg_info{file = File,
+                       last = LastChunk}} ->
             {NextChunkId, FilePos} = next_location(LastChunk),
             open_offset_reader_at(File, NextChunkId, FilePos, Conf);
-        _ ->
-            exit(no_segments_found)
+        Err ->
+            exit(Err)
     end;
-init_offset_reader0(last, #{dir := Dir} = Conf) ->
-    IdxFiles = lists:reverse(sorted_index_files(Dir)),
+init_offset_reader0(last, #{} = Conf) ->
+    IdxFiles = sorted_index_files_rev(Conf),
     case last_user_chunk_location(IdxFiles) of
         not_found ->
             ?DEBUG("~s:~s use chunk not found, fall back to next",
@@ -1016,13 +1016,14 @@ init_offset_reader0(last, #{dir := Dir} = Conf) ->
             File = segment_from_index_file(IdxFile),
             open_offset_reader_at(File, ChunkId, FilePos, Conf)
     end;
-init_offset_reader0(OffsetSpec, #{dir := Dir} = Conf)
+init_offset_reader0(OffsetSpec, #{} = Conf)
   when is_integer(OffsetSpec) ->
-    IdxFiles = sorted_index_files(Dir),
+    IdxFiles = sorted_index_files(Conf),
     Range = offset_range_from_idx_files(IdxFiles),
     ?DEBUG("osiris_log:init_offset_reader0/2 spec ~w range ~w ",
             [OffsetSpec, Range]),
     try
+        %% clamp start offset
         StartOffset = case {OffsetSpec, Range} of
                           {_, empty} ->
                               0;
@@ -1039,32 +1040,16 @@ init_offset_reader0(OffsetSpec, #{dir := Dir} = Conf)
                               max(FirstOffs, Offset)
                       end,
 
-        %% find the first segment that may contain the start offset
-        IdxFiles2 = case lists:search(
-                           fun(IdxFile) ->
-                                   StartOffset >= index_file_first_offset(IdxFile)
-                           end, lists:reverse(IdxFiles)) of
-                        {value, File} ->
-                            [File];
-                        false ->
-                            %% as we clamp StartOffset to the range of the stream
-                            %% we should never get here
-                            ?INFO("~s: unexpected start offset ~b for range ~w, "
-                                  "retry with next strategy",
-                                  [?MODULE, StartOffset, Range]),
-                            throw({retry_with, next, Conf})
-                    end,
-
-        case find_segment_for_offset(StartOffset, IdxFiles2) of
+        case find_segment_for_offset(StartOffset, IdxFiles) of
             not_found ->
                 {error, {offset_out_of_range, Range}};
             {end_of_log, #seg_info{file = SegmentFile,
                                    last = LastChunk}} ->
                 {ChunkId, FilePos} = next_location(LastChunk),
                 open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
-            {found, SegmentInfo = #seg_info{file = SegmentFile}} ->
+            {found, #seg_info{file = SegmentFile} = SegmentInfo} ->
                 {ChunkId, _Epoch, FilePos} =
-                    case scan_idx(StartOffset, SegmentInfo) of
+                    case offset_idx_scan(StartOffset, SegmentInfo) of
                         eof ->
                             exit(offset_out_of_range);
                         enoent ->
@@ -1084,7 +1069,8 @@ init_offset_reader0(OffsetSpec, #{dir := Dir} = Conf)
         missing_file ->
             %% Retention policies are likely being applied, let's try again
             %% TODO: should we limit the number of retries?
-            init_offset_reader0(OffsetSpec, Conf);
+            %% Remove cached index_files from config
+            init_offset_reader0(OffsetSpec, maps:remove(index_files, Conf));
         {retry_with, NewOffsSpec, NewConf} ->
             init_offset_reader0(NewOffsSpec, NewConf)
     end.
@@ -1464,44 +1450,55 @@ parse_records(Offs,
     parse_records(Offs + NumRecs, Rem,
                   [{Offs, {batch, NumRecs, CompType, UncompressedLen, Data}} | Acc]).
 
+sorted_index_files(#{index_files := IdxFiles}) ->
+    %% cached
+    IdxFiles;
+sorted_index_files(#{dir := Dir}) ->
+    sorted_index_files(Dir);
 sorted_index_files(Dir) when is_list(Dir) ->
+    Files = index_files_unsorted(Dir),
+    lists:sort(Files).
+
+sorted_index_files_rev(#{index_files := IdxFiles}) ->
+    %% cached
+    lists:reverse(IdxFiles);
+sorted_index_files_rev(#{dir := Dir}) ->
+    sorted_index_files_rev(Dir);
+sorted_index_files_rev(Dir) ->
+    Files = index_files_unsorted(Dir),
+    lists:sort(fun erlang:'>'/2, Files).
+
+index_files_unsorted(Dir) ->
     case prim_file:list_dir(Dir) of
         {error, enoent} ->
             [];
         {ok, Files} ->
-            lists:sort([filename:join(Dir, F)
-                        || F <- Files, filename:extension(F) == ".index"])
+            [filename:join(Dir, F)
+             || F <- Files, filename:extension(F) == ".index"]
     end.
 
-% sorted_index_files(Dir) when is_list(Dir) ->
-%     filelib:wildcard(filename:join(Dir, "*.index"), prim_file).
+first_and_last_seginfos(#{index_files := IdxFiles}) ->
+    first_and_last_seginfos0(IdxFiles);
+first_and_last_seginfos(#{dir := Dir}) ->
+    first_and_last_seginfos0(sorted_index_files(Dir)).
 
-index_file_to_seg_info(IdxFile) ->
-    [SegInfo] = build_log_overview0([IdxFile], []),
-    SegInfo.
-
-build_log_overview_first_last(#{index_files := IdxFiles}) ->
-    build_log_overview_first_last0(IdxFiles);
-build_log_overview_first_last(#{dir := Dir}) ->
-    build_log_overview_first_last0(sorted_index_files(Dir)).
-
-build_log_overview_first_last0([]) ->
+first_and_last_seginfos0([]) ->
     none;
-build_log_overview_first_last0([Fst]) ->
+first_and_last_seginfos0([FstIdxFile]) ->
     %% this function is only used by init
-    [SegInfo] = build_log_overview0([Fst], []),
+    {ok, SegInfo} = build_seg_info(FstIdxFile),
     {1, SegInfo, SegInfo};
-build_log_overview_first_last0([Fst | Rem]) ->
+first_and_last_seginfos0([FstIdxFile | Rem]) ->
     %% this function is only used by init
-    [FstSegInfo, LastSegInfo] = build_log_overview0([Fst, lists:last(Rem)], []),
+    {ok, FstSegInfo} = build_seg_info(FstIdxFile),
+    LastIdxFile = lists:last(Rem),
+    {ok, LastSegInfo} = build_seg_info(LastIdxFile ),
     {length(Rem) + 1, FstSegInfo, LastSegInfo}.
 
-build_log_overview0([], Acc) ->
-    lists:reverse(Acc);
-build_log_overview0([IdxFile | IdxFiles], Acc0) ->
+build_seg_info(IdxFile) ->
     %% do not nead read_ahead here
     {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
-    case tail_index(IdxFd) of
+    case last_idx_record(IdxFd) of
         {ok, <<_Offset:64/unsigned,
                _Timestamp:64/signed,
                _Epoch:64/unsigned,
@@ -1509,23 +1506,18 @@ build_log_overview0([IdxFile | IdxFiles], Acc0) ->
                _ChType:8/unsigned>>} ->
             ok = file:close(IdxFd),
             SegFile = segment_from_index_file(IdxFile),
-            Acc = build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0),
-            build_log_overview0(IdxFiles, Acc);
-        {error, einval} when IdxFiles == [] andalso Acc0 == [] ->
+            build_segment_info(SegFile, LastChunkPos, IdxFile);
+        {error, einval} ->
             %% this would happen if the file only contained a header
             ok = file:close(IdxFd),
             SegFile = segment_from_index_file(IdxFile),
-            [#seg_info{file = SegFile, index = IdxFile}];
-        {error, einval} ->
+            {ok, #seg_info{file = SegFile, index = IdxFile}};
+        {error, _} = Err ->
             ok = file:close(IdxFd),
-            build_log_overview0(IdxFiles, Acc0);
-        {error, enoent} ->
-            %% The retention policy could have just been applied
-            ok = file:close(IdxFd),
-            build_log_overview0(IdxFiles, Acc0)
+            Err
     end.
 
-tail_index(IdxFd) ->
+last_idx_record(IdxFd) ->
     case position_at_idx_record_boundary(IdxFd, {eof, -?INDEX_RECORD_SIZE_B}) of
         {ok, _} ->
             file:read(IdxFd, ?INDEX_RECORD_SIZE_B);
@@ -1533,7 +1525,7 @@ tail_index(IdxFd) ->
             Err
     end.
 
-top_index(IdxFd) ->
+first_idx_record(IdxFd) ->
     file:pread(IdxFd, ?IDX_HEADER_SIZE, ?INDEX_RECORD_SIZE_B).
 
 %% Some file:position/2 operations are subject to race conditions. In particular, `eof` may position the Fd
@@ -1549,13 +1541,13 @@ position_at_idx_record_boundary(IdxFd, At) ->
         Error -> Error
     end.
 
-build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
+build_segment_info(SegFile, LastChunkPos, IdxFile) ->
     try
         {ok, Fd} = open(SegFile, [read, binary, raw]),
         case file:pread(Fd, ?LOG_HEADER_SIZE, ?HEADER_SIZE_B) of
             eof ->
                 _ = file:close(Fd),
-                Acc0;
+                eof;
             {ok,
              <<?MAGIC:4/unsigned,
                ?VERSION:4/unsigned,
@@ -1588,7 +1580,7 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
                           [?MODULE, filename:basename(SegFile),
                            Size, Eof], Size =/= Eof),
                 _ = file:close(Fd),
-                [#seg_info{file = SegFile,
+                {ok, #seg_info{file = SegFile,
                            index = IdxFile,
                            size = Size,
                            first =
@@ -1606,14 +1598,13 @@ build_segment_info(SegFile, LastChunkPos, IdxFile, Acc0) ->
                                            num = LastNumRecords,
                                            type = LastChType,
                                            size = LastSize + LastTSize,
-                                           pos = LastChunkPos}}
-                 | Acc0]
+                                           pos = LastChunkPos}}}
         end
     catch
         missing_file ->
             %% Indexes and segments could be deleted by retention policies while
             %% the log overview is being built. Ignore those segments and keep going
-            Acc0
+            missing_file
     end.
 
 -spec overview(term()) -> {range(), [{epoch(), offset()}]}.
@@ -1623,7 +1614,7 @@ overview(Dir) ->
             {empty, []};
         IdxFiles ->
             Range = offset_range_from_idx_files(IdxFiles),
-            EpochOffsets = last_epoch_offsets2(IdxFiles),
+            EpochOffsets = last_epoch_offsets(IdxFiles),
             {Range, EpochOffsets}
     end.
 
@@ -1739,48 +1730,45 @@ eval_max_bytes(IdxFiles, MaxSize) ->
             end
     end.
 
-last_epoch_offsets2([IdxFile]) ->
+last_epoch_offsets([IdxFile]) ->
     Fd = open_index_read(IdxFile),
-    case last_epoch_offset(
-           file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd, undefined) of
+    case last_epoch_offset(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd, undefined) of
         undefined ->
             [];
         {LastE, LastO, Res} ->
             lists:reverse([{LastE, LastO} | Res])
     end;
-last_epoch_offsets2([FstIdxFile | IdxFiles]) ->
+last_epoch_offsets([FstIdxFile | _]  = IdxFiles) ->
     F = fun() ->
                 FstFd = open_index_read(FstIdxFile),
                 {ok, <<FstO:64/unsigned,
                        _FstTimestamp:64/signed,
                        FstE:64/unsigned,
                        _FstChunkPos:32/unsigned,
-                       _FstChType:8/unsigned>>} = top_index(FstFd),
+                       _FstChType:8/unsigned>>} = first_idx_record(FstFd),
                 {ok, ?IDX_HEADER_SIZE} = file:position(FstFd, ?IDX_HEADER_SIZE),
                 {LastE, LastO, Res} =
-                lists:foldl(
-                  fun(IdxFile, {E, _, EOs} = Acc) ->
-                          Fd = open_index_read(IdxFile),
-                          {ok, <<Offset:64/unsigned,
-                                 _Timestamp:64/signed,
-                                 Epoch:64/unsigned,
-                                 _LastChunkPos:32/unsigned,
-                                 _ChType:8/unsigned>>} = tail_index(Fd),
-                          case Epoch > E of
-                              true ->
-                                  %% we need to scan as the last index record
-                                  %% has a greater epoch
-                                  {ok, ?IDX_HEADER_SIZE} = file:position(Fd, ?IDX_HEADER_SIZE),
-                                  last_epoch_offset(
-                                    file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
-                                    Acc);
-                              false ->
-                                  ok = file:close(Fd),
-                                  {Epoch, Offset, EOs}
-                          end
-                  end,
-                  last_epoch_offset(file:read(FstFd, ?INDEX_RECORD_SIZE_B),
-                                    FstFd, {FstE, FstO, []}), IdxFiles),
+                    lists:foldl(
+                      fun(IdxFile, {E, _, EOs} = Acc) ->
+                              Fd = open_index_read(IdxFile),
+                              {ok, <<Offset:64/unsigned,
+                                     _Timestamp:64/signed,
+                                     Epoch:64/unsigned,
+                                     _LastChunkPos:32/unsigned,
+                                     _ChType:8/unsigned>>} = last_idx_record(Fd),
+                              case Epoch > E of
+                                  true ->
+                                      %% we need to scan as the last index record
+                                      %% has a greater epoch
+                                      {ok, ?IDX_HEADER_SIZE} = file:position(Fd, ?IDX_HEADER_SIZE),
+                                      last_epoch_offset(
+                                        file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
+                                        Acc);
+                                  false ->
+                                      ok = file:close(Fd),
+                                      {Epoch, Offset, EOs}
+                              end
+                      end, {FstE, FstO, []}, IdxFiles),
                 lists:reverse([{LastE, LastO} | Res])
         end,
     {Time, Result} = timer:tc(F),
@@ -1953,7 +1941,7 @@ sendfile(ssl, Fd, Sock, Pos, ToSend) ->
 last_timestamp_in_index_file(IdxFile) ->
     case file:open(IdxFile, [raw, binary, read]) of
         {ok, IdxFd} ->
-            case tail_index(IdxFd) of
+            case last_idx_record(IdxFd) of
                 {ok, <<_O:64/unsigned,
                        LastTimestamp:64/signed,
                        _E:64/unsigned,
@@ -1972,7 +1960,7 @@ last_timestamp_in_index_file(IdxFile) ->
 first_timestamp_from_index_files([IdxFile | _]) ->
     case file:open(IdxFile, [raw, binary, read]) of
         {ok, IdxFd} ->
-            case top_index(IdxFd) of
+            case first_idx_record(IdxFd) of
                 {ok, <<_FstO:64/unsigned,
                        FstTimestamp:64/signed,
                        _FstE:64/unsigned,
@@ -1988,9 +1976,13 @@ first_timestamp_from_index_files([IdxFile | _]) ->
             0
     end.
 
-offset_range_from_idx_files(IdxFiles) ->
-    {_, FstSI, LstSI} = build_log_overview_first_last0(IdxFiles),
-    ChunkRange = chunk_range_from_segment_infos(lists:usort([FstSI, LstSI])),
+offset_range_from_idx_files([IdxFile]) ->
+    {ok, #seg_info{first = First,
+                   last = Last}} = build_seg_info(IdxFile),
+    offset_range_from_chunk_range({First, Last});
+offset_range_from_idx_files(IdxFiles) when is_list(IdxFiles) ->
+    {_, FstSI, LstSI} = first_and_last_seginfos0(IdxFiles),
+    ChunkRange = chunk_range_from_segment_infos([FstSI, LstSI]),
     offset_range_from_chunk_range(ChunkRange).
 
 offset_range_from_segment_infos(SegInfos) ->
@@ -2007,6 +1999,8 @@ chunk_range_from_segment_infos(SegInfos) when is_list(SegInfos) ->
 
 offset_range_from_chunk_range(empty) ->
     empty;
+offset_range_from_chunk_range({undefined, undefined}) ->
+    empty;
 offset_range_from_chunk_range({#chunk_info{id = FirstChId},
                                #chunk_info{id = LastChId,
                                            num = LastNumRecs}}) ->
@@ -2016,24 +2010,22 @@ find_segment_for_offset(Offset, IdxFiles) ->
     %% we assume index files are in the default low-> high order here
     case lists:search(
            fun(IdxFile) ->
-                   FstOffset = list_to_integer(
-                                 filename:basename(IdxFile, ".index")),
-                   Offset >= FstOffset
+                   Offset >= index_file_first_offset(IdxFile)
            end, lists:reverse(IdxFiles)) of
         {value, File} ->
-            case index_file_to_seg_info(File) of
-                #seg_info{first = undefined,
-                          last = undefined} = Info ->
+            case build_seg_info(File) of
+                {ok, #seg_info{first = undefined,
+                               last = undefined} = Info} ->
                     {end_of_log, Info};
-                #seg_info{last =
-                          #chunk_info{id = LastChId,
-                                      num = LastNumRecs}} = Info
+                {ok, #seg_info{last =
+                               #chunk_info{id = LastChId,
+                                           num = LastNumRecs}} = Info}
                   when Offset == LastChId + LastNumRecs ->
                     %% the last segment and offset is the next offset
                     {end_of_log, Info};
-                #seg_info{first = #chunk_info{id = FirstChId},
-                          last = #chunk_info{id = LastChId,
-                                             num = LastNumRecs}} = Info ->
+                {ok, #seg_info{first = #chunk_info{id = FirstChId},
+                               last = #chunk_info{id = LastChId,
+                                                  num = LastNumRecs}} = Info} ->
                     NextChId = LastChId + LastNumRecs,
                     case Offset >= FirstChId andalso Offset < NextChId of
                         true ->
@@ -2041,7 +2033,9 @@ find_segment_for_offset(Offset, IdxFiles) ->
                             {found, Info};
                         false ->
                             not_found
-                    end
+                    end;
+                {error, _} = Err ->
+                    Err
             end;
         false ->
             not_found
@@ -2097,77 +2091,52 @@ open_index_read(File) ->
     _ = file:read(Fd, ?IDX_HEADER_SIZE),
     Fd.
 
-scan_idx(Offset, #seg_info{index = IndexFile,
-                           last = LastChunkInSegment} = SegmentInfo) ->
-    {Time, Result} = timer:tc(
-                       fun() ->
-                               case offset_range_from_segment_infos([SegmentInfo]) of
-                                   empty ->
-                                       eof;
-                                   {SegmentStartOffs, SegmentEndOffs} ->
-                                       case Offset < SegmentStartOffs orelse
-                                            Offset > SegmentEndOffs of
-                                           true ->
-                                               offset_out_of_range;
-                                           false ->
-                                               IndexFd = open_index_read(IndexFile),
-                                               Result = scan_idx(IndexFd, Offset,
-                                                                 LastChunkInSegment),
-                                               _ = file:close(IndexFd),
-                                               Result
-                                       end
-                               end
-                       end),
+offset_idx_scan(Offset, #seg_info{index = IndexFile} = SegmentInfo) ->
+    {Time, Result} =
+        timer:tc(
+          fun() ->
+                  case offset_range_from_segment_infos([SegmentInfo]) of
+                      empty ->
+                          eof;
+                      {SegmentStartOffs, SegmentEndOffs} ->
+                          case Offset < SegmentStartOffs orelse
+                               Offset > SegmentEndOffs of
+                              true ->
+                                  offset_out_of_range;
+                              false ->
+                                  IndexFd = open_index_read(IndexFile),
+                                  offset_idx_scan0(IndexFd, Offset, not_found)
+                          end
+                  end
+          end),
     ?DEBUG("~s:~s/~b completed in ~fs",
            [?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY, Time/1000000]),
     Result.
 
-scan_idx(Fd, Offset, #chunk_info{id = LastChunkInSegmentId,
-                                 num = LastChunkInSegmentNum}) ->
+offset_idx_scan0(Fd, Offset, PreviousChunk) ->
     case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
         {ok, <<ChunkId:64/unsigned,
                _Timestamp:64/signed,
                Epoch:64/unsigned,
                FilePos:32/unsigned,
                _ChType:8/unsigned>>} ->
-            LastOffsetInSegment = LastChunkInSegmentId + LastChunkInSegmentNum - 1,
-            case Offset < ChunkId orelse Offset > LastOffsetInSegment of
-                true ->
-                    %% shouldn't really happen as we check the range above
-                    offset_out_of_range;
-                false ->
-                    %% offset is in this segment
-                    scan_idx0(Fd, Offset, {ChunkId, Epoch, FilePos})
-            end;
-        eof ->
-            %% this should never happen - offset is in the range and we are reading the first record
-            eof;
-        {error, Posix} ->
-            Posix
-    end.
-
-scan_idx0(Fd, Offset, PreviousChunk) ->
-    case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
-        {ok,
-         <<ChunkId:64/unsigned,
-           _Timestamp:64/signed,
-           Epoch:64/unsigned,
-           FilePos:32/unsigned,
-           _ChType:8/unsigned>>} ->
             case Offset < ChunkId of
                 true ->
                     %% offset we are looking for is higher or equal
                     %% to the start of the previous chunk
                     %% but lower than the start of the current chunk ->
                     %% return the previous chunk
+                    _ = file:close(Fd),
                     PreviousChunk;
                 false ->
-                    scan_idx0(Fd, Offset, {ChunkId, Epoch, FilePos})
+                    offset_idx_scan0(Fd, Offset, {ChunkId, Epoch, FilePos})
             end;
         eof ->
+            _ = file:close(Fd),
             %% Offset must be in the last chunk as there is no more data
             PreviousChunk;
         {error, Posix} ->
+            _ = file:close(Fd),
             Posix
     end.
 
@@ -2184,11 +2153,6 @@ chunk_location_for_timestamp(Idx, Ts) ->
     %% scan index file for nearest timestamp
     {ChunkId, _Timestamp, _Epoch, FilePos} = timestamp_idx_scan(Fd, Ts),
     {ChunkId, FilePos}.
-% chunk_location_for_timestamp(#seg_info{index = Idx}, Ts) ->
-%     Fd = open_index_read(Idx),
-%     %% scan index file for nearest timestamp
-%     {ChunkId, _Timestamp, _Epoch, FilePos} = timestamp_idx_scan(Fd, Ts),
-%     {ChunkId, FilePos}.
 
 timestamp_idx_scan(Fd, Ts) ->
     case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
@@ -2431,23 +2395,23 @@ next_location(#chunk_info{id = Id,
 index_file_first_offset(IdxFile) ->
     list_to_integer(filename:basename(IdxFile, ".index")).
 
-start_end_timestamp(IdxFile) ->
+first_last_timestamps(IdxFile) ->
     case file:open(IdxFile, [raw, read, binary]) of
         {ok, Fd} ->
-            case top_index(Fd) of
+            case first_idx_record(Fd) of
                 {ok, <<_:64/unsigned,
-                       TopTs:64/signed,
+                       FirstTs:64/signed,
                        _:64/unsigned,
                        _:32/unsigned,
                        _:8/unsigned>>} ->
-                    %% if we can top we can tail
+                    %% if we can get the first we can get the last
                     {ok, <<_:64/unsigned,
-                           TailTs:64/signed,
+                           LastTs:64/signed,
                            _:64/unsigned,
                            _:32/unsigned,
-                           _:8/unsigned>>} = tail_index(Fd),
+                           _:8/unsigned>>} = last_idx_record(Fd),
                     ok = file:close(Fd),
-                    {TopTs, TailTs};
+                    {FirstTs, LastTs};
                 {error, einval} ->
                     %% empty index
                     undefined;
@@ -2464,7 +2428,7 @@ start_end_timestamp(IdxFile) ->
 %% [{21, 30}, {12, 20}, {5, 10}]
 %% 11 = {12, 20}
 timestamp_idx_file_search(Ts, [FstIdxFile | Older]) ->
-    case start_end_timestamp(FstIdxFile) of
+    case first_last_timestamps(FstIdxFile) of
         {_FstTs, EndTs}
           when Ts > EndTs ->
             %% timestamp greater than the newest timestamp in the stream
@@ -2488,7 +2452,7 @@ timestamp_idx_file_search(Ts, [FstIdxFile | Older]) ->
     end.
 
 timestamp_idx_file_search0(Ts, [], IdxFile) ->
-    case start_end_timestamp(IdxFile) of
+    case first_last_timestamps(IdxFile) of
         {FstTs, _LastTs}
           when Ts < FstTs ->
             {first_in, IdxFile};
@@ -2496,7 +2460,7 @@ timestamp_idx_file_search0(Ts, [], IdxFile) ->
             {found, IdxFile}
     end;
 timestamp_idx_file_search0(Ts, [IdxFile | Older], Prev) ->
-    case start_end_timestamp(IdxFile) of
+    case first_last_timestamps(IdxFile) of
         {_FstTs, EndTs}
           when Ts > EndTs ->
             %% we should attach the the first chunk in the previous segment
