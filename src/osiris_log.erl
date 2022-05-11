@@ -706,7 +706,6 @@ chunk_id_index_scan(IdxFile, ChunkId) when is_list(IdxFile) ->
     chunk_id_index_scan0(Fd, ChunkId).
 
 chunk_id_index_scan0(Fd, ChunkId) ->
-    {ok, IdxPos} = file:position(Fd, cur),
     case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
         {ok,
          <<ChunkId:64/unsigned,
@@ -714,8 +713,9 @@ chunk_id_index_scan0(Fd, ChunkId) ->
            Epoch:64/unsigned,
            FilePos:32/unsigned,
            _ChType:8/unsigned>>} ->
+	    {ok, IdxPos} = file:position(Fd, cur),
             ok = file:close(Fd),
-            {ChunkId, Epoch, FilePos, IdxPos};
+            {ChunkId, Epoch, FilePos, IdxPos - ?INDEX_RECORD_SIZE_B};
         {ok, _} ->
             chunk_id_index_scan0(Fd, ChunkId);
         eof ->
@@ -787,10 +787,10 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
                     %% lets truncate to this point
                     %% FilePos could be eof here which means the next offset
                     {ok, Fd} = file:open(File, [read, write, binary, raw]),
+		    _ = file:advise(Fd, 0, 0, random),
                     {ok, IdxFd} = file:open(Idx, [read, write, binary, raw]),
 
-                    {_ChType, ChId, E, _Num, Size, TSize} =
-                        header_info(Fd, Pos),
+                    {_ChType, ChId, E, _Num, Size, TSize} = header_info(Fd, Pos),
                     %% position at end of chunk
                     {ok, _Pos} = file:position(Fd, {cur, Size + TSize}),
                     ok = file:truncate(Fd),
@@ -1330,6 +1330,8 @@ send_file(Sock,
             %% or the chunk is a user type (for offset readers)
             case needs_handling(RType, Selector, ChType) of
                 true ->
+				%% TODO: use inets:setopts(Sock, {nopush, Boolean}) to avoid
+				%% sending a tiny package in the Callback
                     _ = Callback(Header, ToSend),
                     case sendfile(Transport, Fd, Sock, Pos, ToSend) of
                         ok ->
@@ -1544,6 +1546,8 @@ position_at_idx_record_boundary(IdxFd, At) ->
 build_segment_info(SegFile, LastChunkPos, IdxFile) ->
     try
         {ok, Fd} = open(SegFile, [read, binary, raw]),
+	%% we don't want to read blocks into page cache we are unlikely to need
+	_ = file:advise(Fd, 0, 0, random),
         case file:pread(Fd, ?LOG_HEADER_SIZE, ?HEADER_SIZE_B) of
             eof ->
                 _ = file:close(Fd),
@@ -1732,6 +1736,7 @@ eval_max_bytes(IdxFiles, MaxSize) ->
 
 last_epoch_offsets([IdxFile]) ->
     Fd = open_index_read(IdxFile),
+    _ = file:advise(Fd, 0, 0, sequential),
     case last_epoch_offset(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd, undefined) of
         undefined ->
             [];
@@ -1740,17 +1745,22 @@ last_epoch_offsets([IdxFile]) ->
     end;
 last_epoch_offsets([FstIdxFile | _]  = IdxFiles) ->
     F = fun() ->
-                FstFd = open_index_read(FstIdxFile),
+                {ok, FstFd} = open(FstIdxFile, [read, raw, binary]),
+		%% on linux this disables read-ahead so should only
+		%% bring a single block into memory
+		%% having the first block of index files in page cache
+		%% should generally be a good thing
+                _ = file:advise(FstFd, 0, 0, random),
                 {ok, <<FstO:64/unsigned,
                        _FstTimestamp:64/signed,
                        FstE:64/unsigned,
                        _FstChunkPos:32/unsigned,
                        _FstChType:8/unsigned>>} = first_idx_record(FstFd),
-                {ok, ?IDX_HEADER_SIZE} = file:position(FstFd, ?IDX_HEADER_SIZE),
+                ok = file:close(FstFd),
                 {LastE, LastO, Res} =
                     lists:foldl(
                       fun(IdxFile, {E, _, EOs} = Acc) ->
-                              Fd = open_index_read(IdxFile),
+							  Fd = open_index_read(IdxFile),
                               {ok, <<Offset:64/unsigned,
                                      _Timestamp:64/signed,
                                      Epoch:64/unsigned,
@@ -1760,12 +1770,13 @@ last_epoch_offsets([FstIdxFile | _]  = IdxFiles) ->
                                   true ->
                                       %% we need to scan as the last index record
                                       %% has a greater epoch
-                                      {ok, ?IDX_HEADER_SIZE} = file:position(Fd, ?IDX_HEADER_SIZE),
+									  _ = file:advise(Fd, 0, 0, sequential),
+									  {ok, ?IDX_HEADER_SIZE} = file:position(Fd, ?IDX_HEADER_SIZE),
                                       last_epoch_offset(
                                         file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
                                         Acc);
                                   false ->
-                                      ok = file:close(Fd),
+									  ok = file:close(Fd),
                                       {Epoch, Offset, EOs}
                               end
                       end, {FstE, FstO, []}, IdxFiles),
@@ -2087,8 +2098,7 @@ open_index_read(File) ->
     %% We can't use the assertion that index header is correct because of a
     %% race condition between opening the file and writing the header
     %% It seems to happen when retention policies are applied
-    %% {ok, ?IDX_HEADER} = file:read(Fd, ?IDX_HEADER_SIZE)
-    _ = file:read(Fd, ?IDX_HEADER_SIZE),
+    {ok, ?IDX_HEADER_SIZE} = file:position(Fd, ?IDX_HEADER_SIZE),
     Fd.
 
 offset_idx_scan(Offset, #seg_info{index = IndexFile} = SegmentInfo) ->
@@ -2105,6 +2115,7 @@ offset_idx_scan(Offset, #seg_info{index = IndexFile} = SegmentInfo) ->
                                   offset_out_of_range;
                               false ->
                                   IndexFd = open_index_read(IndexFile),
+								  _ = file:advise(IndexFd, 0, 0, sequential),
                                   offset_idx_scan0(IndexFd, Offset, not_found)
                           end
                   end
@@ -2398,6 +2409,7 @@ index_file_first_offset(IdxFile) ->
 first_last_timestamps(IdxFile) ->
     case file:open(IdxFile, [raw, read, binary]) of
         {ok, Fd} ->
+	    _ = file:advise(Fd, 0, 0, random),
             case first_idx_record(Fd) of
                 {ok, <<_:64/unsigned,
                        FirstTs:64/signed,
