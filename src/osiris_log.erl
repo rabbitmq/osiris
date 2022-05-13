@@ -773,7 +773,7 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
             end;
         {end_of_log, _Info} ->
             IdxFiles;
-        {found, #seg_info{file = File, index = Idx}} ->
+        {found, #seg_info{file = File, index = IdxFile}} ->
             ?DEBUG("osiris_log: ~s on node ~s truncating to chunk "
                    "id ~b in epoch ~b",
                    [Name, node(), ChId, E]),
@@ -781,22 +781,21 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
             %% next offset needs to be a chunk offset
             %% if it is not found we know the offset requested isn't a chunk
             %% id and thus isn't valid
-            case chunk_id_index_scan(Idx, ChId) of
+            case chunk_id_index_scan(IdxFile, ChId) of
                 {ChId, E, Pos, IdxPos} when is_integer(Pos) ->
                     %% the  Chunk id was found and has the right epoch
                     %% lets truncate to this point
                     %% FilePos could be eof here which means the next offset
                     {ok, Fd} = file:open(File, [read, write, binary, raw]),
-		    _ = file:advise(Fd, 0, 0, random),
-                    {ok, IdxFd} = file:open(Idx, [read, write, binary, raw]),
+                    _ = file:advise(Fd, 0, 0, random),
+                    {ok, IdxFd} = file:open(IdxFile, [read, write, binary, raw]),
 
                     {_ChType, ChId, E, _Num, Size, TSize} = header_info(Fd, Pos),
                     %% position at end of chunk
                     {ok, _Pos} = file:position(Fd, {cur, Size + TSize}),
                     ok = file:truncate(Fd),
 
-                    {ok, _} =
-                        file:position(IdxFd, IdxPos + ?INDEX_RECORD_SIZE_B),
+                    {ok, _} = file:position(IdxFd, IdxPos + ?INDEX_RECORD_SIZE_B),
                     ok = file:truncate(IdxFd),
                     ok = file:close(Fd),
                     ok = file:close(IdxFd),
@@ -1306,10 +1305,8 @@ send_file(Sock,
            num_records := NumRecords,
            data_size := DataSize,
            trailer_size := TrailerSize,
-           position := Pos} =
-             Header,
-         #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read} =
-             State1} ->
+           position := Pos} = Header,
+         #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State1} ->
             %% read header
             %% used to write frame headers to socket
             %% and return the number of bytes to sendfile
@@ -1330,8 +1327,8 @@ send_file(Sock,
             %% or the chunk is a user type (for offset readers)
             case needs_handling(RType, Selector, ChType) of
                 true ->
-				%% TODO: use inets:setopts(Sock, {nopush, Boolean}) to avoid
-				%% sending a tiny package in the Callback
+                    %% TODO: use inets:setopts(Sock, {nopush, Boolean}) to avoid
+                    %% sending a tiny package in the Callback
                     _ = Callback(Header, ToSend),
                     case sendfile(Transport, Fd, Sock, Pos, ToSend) of
                         ok ->
@@ -1490,12 +1487,24 @@ first_and_last_seginfos0([FstIdxFile]) ->
     %% this function is only used by init
     {ok, SegInfo} = build_seg_info(FstIdxFile),
     {1, SegInfo, SegInfo};
-first_and_last_seginfos0([FstIdxFile | Rem]) ->
+first_and_last_seginfos0([FstIdxFile | Rem] = IdxFiles) ->
     %% this function is only used by init
     {ok, FstSegInfo} = build_seg_info(FstIdxFile),
     LastIdxFile = lists:last(Rem),
-    {ok, LastSegInfo} = build_seg_info(LastIdxFile ),
-    {length(Rem) + 1, FstSegInfo, LastSegInfo}.
+    case build_seg_info(LastIdxFile) of
+        {ok, #seg_info{first = undefined,
+                       last = undefined}} ->
+            %% the last index file doesn't have any index records yet
+            %% retry without it
+            [_ | RetryIndexFiles] = lists:reverse(IdxFiles),
+            first_and_last_seginfos0(lists:reverse(RetryIndexFiles));
+        {ok, LastSegInfo} ->
+            {length(Rem) + 1, FstSegInfo, LastSegInfo};
+        {error, Err} ->
+            ?ERROR("~s: failed to build seg_info from file ~s, error: ~w",
+                   [?MODULE, LastIdxFile, Err]),
+            error(Err)
+    end.
 
 build_seg_info(IdxFile) ->
     %% do not nead read_ahead here
