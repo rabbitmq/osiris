@@ -1769,7 +1769,7 @@ last_epoch_offsets([FstIdxFile | _]  = IdxFiles) ->
                 {LastE, LastO, Res} =
                     lists:foldl(
                       fun(IdxFile, {E, _, EOs} = Acc) ->
-							  Fd = open_index_read(IdxFile),
+                              Fd = open_index_read(IdxFile),
                               {ok, <<Offset:64/unsigned,
                                      _Timestamp:64/signed,
                                      Epoch:64/unsigned,
@@ -1779,13 +1779,13 @@ last_epoch_offsets([FstIdxFile | _]  = IdxFiles) ->
                                   true ->
                                       %% we need to scan as the last index record
                                       %% has a greater epoch
-									  _ = file:advise(Fd, 0, 0, sequential),
-									  {ok, ?IDX_HEADER_SIZE} = file:position(Fd, ?IDX_HEADER_SIZE),
+                                      _ = file:advise(Fd, 0, 0, sequential),
+                                      {ok, ?IDX_HEADER_SIZE} = file:position(Fd, ?IDX_HEADER_SIZE),
                                       last_epoch_offset(
                                         file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
                                         Acc);
                                   false ->
-									  ok = file:close(Fd),
+                                      ok = file:close(Fd),
                                       {Epoch, Offset, EOs}
                               end
                       end, {FstE, FstO, []}, IdxFiles),
