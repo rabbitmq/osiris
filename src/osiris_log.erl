@@ -1329,9 +1329,11 @@ send_file(Sock,
                 true ->
                     %% TODO: use inets:setopts(Sock, {nopush, Boolean}) to avoid
                     %% sending a tiny package in the Callback
+                    ok = inet:setopts(Sock, [{nopush, true}]),
                     _ = Callback(Header, ToSend),
                     case sendfile(Transport, Fd, Sock, Pos, ToSend) of
                         ok ->
+                            ok = inet:setopts(Sock, [{nopush, false}]),
                             {ok, _} = file:position(Fd, NextFilePos),
                             {ok, State};
                         Err ->
