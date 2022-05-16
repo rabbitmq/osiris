@@ -225,7 +225,6 @@ handle_call(_Request, _From, State) ->
 %%--------------------------------------------------------------------
 handle_cast({more_data, _LastOffset},
             #state{leader_pid = LeaderPid} = State0) ->
-    % ?DEBUG("MORE DATA ~b", [_LastOffset]),
     #state{log = Log} = State = do_sendfile(State0),
     NextOffs = osiris_log:next_offset(Log),
     ok = osiris_writer:register_data_listener(LeaderPid, NextOffs),

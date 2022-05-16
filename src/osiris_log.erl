@@ -1286,7 +1286,7 @@ read_chunk_parsed(#?MODULE{mode = #read{type = RType,
                    {error, term()} |
                    {end_of_stream, state()}.
 send_file(Sock, State) ->
-    send_file(Sock, State, fun(_, S) -> S end).
+    send_file(Sock, State, fun(_, _) -> ok end).
 
 -spec send_file(gen_tcp:socket(), state(),
                 fun((header_map(), non_neg_integer()) -> term())) ->
@@ -1327,13 +1327,13 @@ send_file(Sock,
             %% or the chunk is a user type (for offset readers)
             case needs_handling(RType, Selector, ChType) of
                 true ->
-                    %% TODO: use inets:setopts(Sock, {nopush, Boolean}) to avoid
-                    %% sending a tiny package in the Callback
-                    ok = inet:setopts(Sock, [{nopush, true}]),
+                    %% this avoids any data sent in the Callback to be dispatched
+                    %% in it's own TCP frame
+                    ok = setopts(Transport, Sock, [{nopush, true}]),
                     _ = Callback(Header, ToSend),
                     case sendfile(Transport, Fd, Sock, Pos, ToSend) of
                         ok ->
-                            ok = inet:setopts(Sock, [{nopush, false}]),
+                            ok = setopts(Transport, Sock, [{nopush, false}]),
                             {ok, _} = file:position(Fd, NextFilePos),
                             {ok, State};
                         Err ->
@@ -1939,6 +1939,12 @@ max_segment_size_reached(SegFd, CurrentSizeChunks,
     {ok, CurrentSizeBytes} = file:position(SegFd, cur),
     CurrentSizeBytes >= MaxSizeBytes orelse
     CurrentSizeChunks >= MaxSizeChunks - 1.
+
+
+setopts(tcp, Sock, Opts) ->
+    ok = inet:setopts(Sock, Opts);
+setopts(ssl, Sock, Opts) ->
+    ok = ssl:setopts(Sock, Opts).
 
 sendfile(_Transport, _Fd, _Sock, _Pos, 0) ->
     ok;
