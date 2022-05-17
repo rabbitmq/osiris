@@ -137,7 +137,7 @@ jobs:
           RABBIT_SHA=${{ steps.load-rabbitmq-info.outputs.RABBITMQ_SHA }}
 
           OSIRIS_SHA=${{ github.event.pull_request.head.sha || github.sha }}
-          OSIRIS_ABBREV=ra-${OSIRIS_SHA:0:7}
+          OSIRIS_ABBREV=osiris-${OSIRIS_SHA:0:7}
 
           TAG_1=rabbitmq-${RABBIT_REF}-${OSIRIS_ABBREV}-${{ steps.load-info.outputs.otp }}
           TAG_2=rabbitmq-${RABBIT_REF}-${OSIRIS_ABBREV}-${{ matrix.image_tag_suffix }}
