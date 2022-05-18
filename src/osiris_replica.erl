@@ -225,26 +225,7 @@ init(#{name := Name,
                                   start_offset => TailInfo,
                                   reference => ExtRef,
                                   connection_token => Token},
-            RRPid =
-            case supervisor:start_child({osiris_replica_reader_sup, Node},
-                                        #{id => make_ref(),
-                                          start =>
-                                          {osiris_replica_reader, start_link,
-                                           [ReplicaReaderConf]},
-                                          %% replica readers should never be
-                                          %% restarted by their sups
-                                          %% instead they need to be re-started
-                                          %% by their replica
-                                          restart => temporary,
-                                          shutdown => 5000,
-                                          type => worker,
-                                          modules => [osiris_replica_reader]})
-            of
-                {ok, Pid} ->
-                    Pid;
-                {ok, Pid, _} ->
-                    Pid
-            end,
+            RRPid = osiris_replica_reader:start(Node, ReplicaReaderConf),
             true = link(RRPid),
             Interval = maps:get(replica_gc_interval, Config, 5000),
             erlang:send_after(Interval, self(), force_gc),

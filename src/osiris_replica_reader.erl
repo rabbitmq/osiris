@@ -17,6 +17,7 @@
 
 %% API functions
 -export([start_link/1,
+         start/2,
          stop/1]).
 %% gen_server callbacks
 -export([init/1,
@@ -101,6 +102,27 @@ start_link(Conf) ->
 
 stop(Pid) ->
     gen_server:cast(Pid, stop).
+
+start(Node, ReplicaReaderConf) when is_map(ReplicaReaderConf) ->
+    case supervisor:start_child({osiris_replica_reader_sup, Node},
+                                #{id => make_ref(),
+                                  start =>
+                                  {osiris_replica_reader, start_link,
+                                   [ReplicaReaderConf]},
+                                  %% replica readers should never be
+                                  %% restarted by their sups
+                                  %% instead they need to be re-started
+                                  %% by their replica
+                                  restart => temporary,
+                                  shutdown => 5000,
+                                  type => worker,
+                                  modules => [osiris_replica_reader]})
+    of
+        {ok, Pid} ->
+            Pid;
+        {ok, Pid, _} ->
+            Pid
+    end.
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -203,7 +225,6 @@ handle_call(_Request, _From, State) ->
 %%--------------------------------------------------------------------
 handle_cast({more_data, _LastOffset},
             #state{leader_pid = LeaderPid} = State0) ->
-    % ?DEBUG("MORE DATA ~b", [_LastOffset]),
     #state{log = Log} = State = do_sendfile(State0),
     NextOffs = osiris_log:next_offset(Log),
     ok = osiris_writer:register_data_listener(LeaderPid, NextOffs),

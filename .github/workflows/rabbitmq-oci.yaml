@@ -28,7 +28,7 @@ jobs:
       - name: Inject the git sha as the osiris version
         working-directory: osiris
         run: |
-          sed -i"_orig" "/vsn,/ s/2\\.[0-9]\\.[0-9]/${{ github.event.pull_request.head.sha || github.sha }}/" src/osiris.app.src
+          sed -i"_orig" -E '/VERSION/ s/1\.[0-9]+\.[0-9]+/${{ github.event.pull_request.head.sha || github.sha }}/' BUILD.bazel
 
       - name: Checkout RabbitMQ
         uses: actions/checkout@v3
@@ -137,7 +137,7 @@ jobs:
           RABBIT_SHA=${{ steps.load-rabbitmq-info.outputs.RABBITMQ_SHA }}
 
           OSIRIS_SHA=${{ github.event.pull_request.head.sha || github.sha }}
-          OSIRIS_ABBREV=ra-${OSIRIS_SHA:0:7}
+          OSIRIS_ABBREV=osiris-${OSIRIS_SHA:0:7}
 
           TAG_1=rabbitmq-${RABBIT_REF}-${OSIRIS_ABBREV}-${{ steps.load-info.outputs.otp }}
           TAG_2=rabbitmq-${RABBIT_REF}-${OSIRIS_ABBREV}-${{ matrix.image_tag_suffix }}

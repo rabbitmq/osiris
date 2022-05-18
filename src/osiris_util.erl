@@ -235,7 +235,6 @@ inet_tls_enabled([{proto_dist, ["inet_tls"]} | _]) ->
 inet_tls_enabled([_Opt | Tail]) ->
     inet_tls_enabled(Tail).
 
-
 partition_parallel(F, Es, Timeout) ->
     Parent = self(),
     Running = [{spawn_monitor(fun() -> Parent ! {self(), F(E)} end), E}
