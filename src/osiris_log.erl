@@ -1674,7 +1674,10 @@ update_retention(Retention,
 
 -spec evaluate_retention(file:filename(), [retention_spec()]) ->
     {range(), non_neg_integer()}.
-evaluate_retention(Dir, Specs) ->
+evaluate_retention(Dir, Specs) when is_list(Dir) ->
+    evaluate_retention(list_to_binary(Dir), Specs);
+evaluate_retention(Dir, Specs) when is_binary(Dir) ->
+
     {Time, Result} = timer:tc(
                        fun() ->
                                IdxFiles0 = sorted_index_files_rev(Dir),
@@ -1718,7 +1721,8 @@ eval_age([IdxFile | IdxFiles] = AllIdxFiles, Age) ->
 
 eval_max_bytes([], _) -> [];
 eval_max_bytes([IdxFile|Rest], MaxSize) ->
-    eval_max_bytes(Rest, MaxSize - file_size(segment_from_index_file(IdxFile)), [IdxFile]).
+    eval_max_bytes(Rest, MaxSize - file_size(
+                                     segment_from_index_file(IdxFile)), [IdxFile]).
 
 eval_max_bytes([], _, Acc) ->
     Acc;
@@ -1827,7 +1831,9 @@ last_epoch_offset({ok,
 
 
 segment_from_index_file(IdxFile) when is_list(IdxFile) ->
-    unicode:characters_to_list(string:replace(IdxFile, ".index", ".segment", trailing)).
+    unicode:characters_to_list(string:replace(IdxFile, ".index", ".segment", trailing));
+segment_from_index_file(IdxFile) when is_binary(IdxFile) ->
+    unicode:characters_to_binary(string:replace(IdxFile, ".index", ".segment", trailing)).
 
 make_chunk(Blobs, TData, ChType, Timestamp, Epoch, Next) ->
     {NumEntries, NumRecords, EData} =
