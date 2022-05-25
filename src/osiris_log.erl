@@ -1455,7 +1455,7 @@ sorted_index_files(#{index_files := IdxFiles}) ->
     IdxFiles;
 sorted_index_files(#{dir := Dir}) ->
     sorted_index_files(Dir);
-sorted_index_files(Dir) when is_list(Dir) ->
+sorted_index_files(Dir) when is_list(Dir) orelse is_binary(Dir) ->
     Files = index_files_unsorted(Dir),
     lists:sort(Files).
 
@@ -1680,7 +1680,7 @@ evaluate_retention(Dir, Specs) when is_binary(Dir) ->
 
     {Time, Result} = timer:tc(
                        fun() ->
-                               IdxFiles0 = sorted_index_files_rev(Dir),
+                               IdxFiles0 = sorted_index_files(Dir),
                                IdxFiles = evaluate_retention0(IdxFiles0, Specs),
                                OffsetRange = offset_range_from_idx_files(IdxFiles),
                                FirstTs = first_timestamp_from_index_files(IdxFiles),
@@ -1720,9 +1720,10 @@ eval_age([IdxFile | IdxFiles] = AllIdxFiles, Age) ->
     end.
 
 eval_max_bytes([], _) -> [];
-eval_max_bytes([IdxFile|Rest], MaxSize) ->
-    eval_max_bytes(Rest, MaxSize - file_size(
-                                     segment_from_index_file(IdxFile)), [IdxFile]).
+eval_max_bytes(IdxFiles, MaxSize) ->
+    [Latest|Older] = lists:reverse(IdxFiles),
+    eval_max_bytes(Older, MaxSize - file_size(
+                                     segment_from_index_file(Latest)), [Latest]).
 
 eval_max_bytes([], _, Acc) ->
     Acc;
