@@ -1672,7 +1672,7 @@ update_retention(Retention,
     State = State0#?MODULE{cfg = Cfg#cfg{retention = Retention}},
     trigger_retention_eval(State).
 
--spec evaluate_retention(file:filename(), [retention_spec()]) ->
+-spec evaluate_retention(file:filename_all(), [retention_spec()]) ->
     {range(), non_neg_integer()}.
 evaluate_retention(Dir, Specs) when is_list(Dir) ->
     evaluate_retention(list_to_binary(Dir), Specs);
