@@ -341,7 +341,11 @@ handle_call(get_reader_context, _From,
 handle_call({update_retention, Retention}, _From,
             #?MODULE{log = Log0} = State) ->
     Log = osiris_log:update_retention(Retention, Log0),
-    {reply, ok, State#?MODULE{log = Log}}.
+    {reply, ok, State#?MODULE{log = Log}};
+handle_call(Unknown, _From,
+            #?MODULE{cfg = #cfg{name = Name}} = State) ->
+    ?INFO_(Name, "unknown command ~W", [Unknown, 10]),
+    {reply, {error, unknown_command}, State}.
 
 %%--------------------------------------------------------------------
 %% @private

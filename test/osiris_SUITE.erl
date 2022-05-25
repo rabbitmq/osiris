@@ -48,6 +48,7 @@ all_tests() ->
      cluster_failure,
      start_cluster_invalid_replicas,
      restart_replica,
+     replica_unknown_command,
      diverged_replica,
      retention,
      retention_add_replica_after,
@@ -833,6 +834,27 @@ restart_replica(Config) ->
     {ok, _Replica1b} = osiris_replica:start(node(R1Pid), Conf),
     _ = [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>]) || N <- Msgs],
     wait_for_written(Msgs),
+    ok.
+
+
+replica_unknown_command(Config) ->
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    Prefixes = [s1, s2, s3],
+    PeerStates = [start_child_node(N, PrivDir) || N <- Prefixes],
+    [LeaderE1, Replica1, Replica2] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    InitConf =
+        #{name => Name,
+          reference => Name,
+          epoch => 1,
+          leader_node => LeaderE1,
+          replica_nodes => [Replica1, Replica2]},
+    {ok,
+     #{leader_pid := _, replica_pids := [ReplicaPid, _]}} =
+        osiris:start_cluster(InitConf),
+
+    {error, unknown_command} = gen_server:call(ReplicaPid, what_is_this),
+    ok = osiris:stop_cluster(InitConf),
     ok.
 
 diverged_replica(Config) ->
