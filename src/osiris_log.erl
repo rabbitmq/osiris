@@ -1675,6 +1675,8 @@ update_retention(Retention,
 -spec evaluate_retention(file:filename_all(), [retention_spec()]) ->
     {range(), non_neg_integer()}.
 evaluate_retention(Dir, Specs) when is_list(Dir) ->
+    % convert to binary for faster operations later
+    % mostly in segment_from_index_file/1
     evaluate_retention(list_to_binary(Dir), Specs);
 evaluate_retention(Dir, Specs) when is_binary(Dir) ->
 
@@ -1727,13 +1729,14 @@ eval_max_bytes(IdxFiles, MaxSize) ->
 
 eval_max_bytes([], _, Acc) ->
     Acc;
-eval_max_bytes([IdxFile|Rest], Limit, Acc) ->
+eval_max_bytes([IdxFile | Rest], Limit, Acc) ->
     SegFile = segment_from_index_file(IdxFile),
     Size = file_size(SegFile),
     case Size =< Limit of
-        true -> eval_max_bytes(Rest, Limit - Size, [IdxFile|Acc]);
+        true ->
+            eval_max_bytes(Rest, Limit - Size, [IdxFile | Acc]);
         false ->
-            [ok = delete_segment_from_index(Seg) || Seg <- [IdxFile|Rest]],
+            [ok = delete_segment_from_index(Seg) || Seg <- [IdxFile | Rest]],
             Acc
     end.
 

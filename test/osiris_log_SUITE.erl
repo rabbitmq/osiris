@@ -1037,7 +1037,12 @@ evaluate_retention_max_bytes(Config) ->
         filelib:wildcard(
             filename:join(LDir, "*.segment")),
     ?assertEqual(1, length(SegFiles)),
-    ?assertEqual([], lists:filter(fun(S) -> lists:suffix("00000000000000000000.segment",S) end, SegFiles), "the retention process didn't delete the oldest segment"),
+    ?assertEqual([],
+                 lists:filter(fun(S) ->
+                                 lists:suffix("00000000000000000000.segment", S)
+                              end,
+                              SegFiles),
+                 "the retention process didn't delete the oldest segment"),
     ok.
 
 evaluate_retention_max_age(Config) ->
@@ -1067,7 +1072,12 @@ evaluate_retention_max_age(Config) ->
         filelib:wildcard(
             filename:join(LDir, "*.segment")),
     ?assertEqual(1, length(SegFiles)),
-    ?assertEqual([], lists:filter(fun(S) -> lists:suffix("00000000000000000000.segment",S) end, SegFiles), "the retention process didn't delete the oldest segment"),
+    ?assertEqual([],
+                 lists:filter(fun(S) ->
+                                 lists:suffix("00000000000000000000.segment", S)
+                              end,
+                              SegFiles),
+                 "the retention process didn't delete the oldest segment"),
     ok.
 
 offset_tracking(Config) ->
