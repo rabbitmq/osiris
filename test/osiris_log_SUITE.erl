@@ -1037,6 +1037,12 @@ evaluate_retention_max_bytes(Config) ->
         filelib:wildcard(
             filename:join(LDir, "*.segment")),
     ?assertEqual(1, length(SegFiles)),
+    ?assertEqual([],
+                 lists:filter(fun(S) ->
+                                 lists:suffix("00000000000000000000.segment", S)
+                              end,
+                              SegFiles),
+                 "the retention process didn't delete the oldest segment"),
     ok.
 
 evaluate_retention_max_age(Config) ->
@@ -1057,15 +1063,21 @@ evaluate_retention_max_age(Config) ->
             filename:join(LDir, "*.segment")),
     ?assertEqual(2, length(SegFilesPre)),
     %% this should delete at least one segment as all chunks should be older
-    %% than the retention of 1000ms
-    Spec = {max_age, 1000},
-    Range = osiris_log:evaluate_retention(LDir, [Spec]),
+    %% than the retention of 1000ms; max_bytes shouldn't affect the result
+    Spec = [{max_bytes, 100000000}, {max_age, 1000}],
+    Range = osiris_log:evaluate_retention(LDir, Spec),
     %% idempotency
-    Range = osiris_log:evaluate_retention(LDir, [Spec]),
+    Range = osiris_log:evaluate_retention(LDir, Spec),
     SegFiles =
         filelib:wildcard(
             filename:join(LDir, "*.segment")),
     ?assertEqual(1, length(SegFiles)),
+    ?assertEqual([],
+                 lists:filter(fun(S) ->
+                                 lists:suffix("00000000000000000000.segment", S)
+                              end,
+                              SegFiles),
+                 "the retention process didn't delete the oldest segment"),
     ok.
 
 offset_tracking(Config) ->

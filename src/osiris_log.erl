@@ -725,8 +725,7 @@ chunk_id_index_scan0(Fd, ChunkId) ->
 
 delete_segment_from_index(Index) ->
     File = segment_from_index_file(Index),
-    ?DEBUG("osiris_log: deleting segment ~s in ~s",
-           [filename:basename(File), filename:dirname(File)]),
+    ?DEBUG("osiris_log: deleting segment ~s", [File]),
     ok = file:delete(File),
     ok = file:delete(Index),
     ok.
@@ -1456,7 +1455,7 @@ sorted_index_files(#{index_files := IdxFiles}) ->
     IdxFiles;
 sorted_index_files(#{dir := Dir}) ->
     sorted_index_files(Dir);
-sorted_index_files(Dir) when is_list(Dir) ->
+sorted_index_files(Dir) when is_list(Dir) orelse is_binary(Dir) ->
     Files = index_files_unsorted(Dir),
     lists:sort(Files).
 
@@ -1673,9 +1672,14 @@ update_retention(Retention,
     State = State0#?MODULE{cfg = Cfg#cfg{retention = Retention}},
     trigger_retention_eval(State).
 
--spec evaluate_retention(file:filename(), [retention_spec()]) ->
+-spec evaluate_retention(file:filename_all(), [retention_spec()]) ->
     {range(), non_neg_integer()}.
-evaluate_retention(Dir, Specs) ->
+evaluate_retention(Dir, Specs) when is_list(Dir) ->
+    % convert to binary for faster operations later
+    % mostly in segment_from_index_file/1
+    evaluate_retention(list_to_binary(Dir), Specs);
+evaluate_retention(Dir, Specs) when is_binary(Dir) ->
+
     {Time, Result} = timer:tc(
                        fun() ->
                                IdxFiles0 = sorted_index_files(Dir),
@@ -1717,32 +1721,29 @@ eval_age([IdxFile | IdxFiles] = AllIdxFiles, Age) ->
             AllIdxFiles
     end.
 
+eval_max_bytes([], _) -> [];
 eval_max_bytes(IdxFiles, MaxSize) ->
-    case IdxFiles of
-        [] ->
-            [];
-        [_] ->
-            IdxFiles;
-        _ ->
-            TotalSize =
-                lists:foldl(fun(IdxFile, Acc) ->
-                                    SegFile = segment_from_index_file(IdxFile),
-                                    case prim_file:read_file_info(SegFile) of
-                                        {ok, #file_info{size = Size}} ->
-                                            Acc + Size;
-                                        _ ->
-                                            Acc
-                                    end
-                            end, 0, IdxFiles),
-            case TotalSize > MaxSize of
-                true ->
-                    %% we can delete at least one segment
-                    [Old | Rem] = IdxFiles,
-                    ok = delete_segment_from_index(Old),
-                    eval_max_bytes(Rem, MaxSize);
-                false ->
-                    IdxFiles
-            end
+    [Latest|Older] = lists:reverse(IdxFiles),
+    eval_max_bytes(Older, MaxSize - file_size(
+                                     segment_from_index_file(Latest)), [Latest]).
+
+eval_max_bytes([], _, Acc) ->
+    Acc;
+eval_max_bytes([IdxFile | Rest], Limit, Acc) ->
+    SegFile = segment_from_index_file(IdxFile),
+    Size = file_size(SegFile),
+    case Size =< Limit of
+        true ->
+            eval_max_bytes(Rest, Limit - Size, [IdxFile | Acc]);
+        false ->
+            [ok = delete_segment_from_index(Seg) || Seg <- [IdxFile | Rest]],
+            Acc
+    end.
+
+file_size(Path) ->
+    case prim_file:read_file_info(Path) of
+        {ok, #file_info{size = Size}} -> Size;
+        _ -> 0
     end.
 
 last_epoch_offsets([IdxFile]) ->
@@ -1834,9 +1835,9 @@ last_epoch_offset({ok,
 
 
 segment_from_index_file(IdxFile) when is_list(IdxFile) ->
-    Basename = filename:basename(IdxFile, ".index"),
-    BaseDir = filename:dirname(IdxFile),
-    filename:join([BaseDir, Basename ++ ".segment"]).
+    unicode:characters_to_list(string:replace(IdxFile, ".index", ".segment", trailing));
+segment_from_index_file(IdxFile) when is_binary(IdxFile) ->
+    unicode:characters_to_binary(string:replace(IdxFile, ".index", ".segment", trailing)).
 
 make_chunk(Blobs, TData, ChType, Timestamp, Epoch, Next) ->
     {NumEntries, NumRecords, EData} =
