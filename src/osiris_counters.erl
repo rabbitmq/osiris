@@ -11,43 +11,35 @@
          new/2,
          fetch/1,
          overview/0,
+         overview/1,
          delete/1
         ]).
 
-%% holds static or rarely changing fields
--record(cfg, {}).
--record(?MODULE, {cfg :: #cfg{}}).
-
--opaque state() :: #?MODULE{}.
-
 -type name() :: term().
-
--export_type([state/0]).
 
 -spec init() -> ok.
 init() ->
-    seshat_counters:new_group(osiris).
+    _ = seshat:new_group(osiris),
+    ok.
 
 -spec new(name(), [{Name :: atom(), Position :: non_neg_integer(),
                     Type :: atom(), Description :: term()}]) ->
                  counters:counters_ref().
 new(Name, Fields) ->
-    seshat_counters:new(osiris, Name, Fields).
+    seshat:new(osiris, Name, Fields).
 
 -spec fetch(name()) -> undefined | counters:counters_ref().
 fetch(Name) ->
-    seshat_counters:fetch(osiris, Name).
+    seshat:fetch(osiris, Name).
 
 -spec delete(term()) -> ok.
 delete(Name) ->
-    seshat_counters:delete(osiris, Name).
+    seshat:delete(osiris, Name).
 
 -spec overview() -> #{name() => #{atom() => non_neg_integer()}}.
 overview() ->
-    seshat_counters:overview(osiris).
+    seshat:overview(osiris).
 
--ifdef(TEST).
-
--include_lib("eunit/include/eunit.hrl").
-
--endif.
+-spec overview(name()) -> #{atom() => non_neg_integer()} | undefined.
+overview(Name) ->
+    seshat:overview(osiris, Name).

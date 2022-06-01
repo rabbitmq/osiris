@@ -16,18 +16,12 @@ load("@rules_erlang//:hex_pm.bzl", "hex_pm_erlang_app")
 
 hex_pm_erlang_app(
     name = "gen_batch_server",
-    version = "0.8.7",
+    version = "0.8.8",
 )
 
-github_erlang_app(
+hex_pm_erlang_app(
     name = "seshat",
-    extra_apps = [
-        "sasl",
-        "crypto",
-    ],
-    org = "rabbitmq",
-    ref = "0.1.0",
-    version = "0.1.0",
+    version = "0.3.1",
 )
 
 http_archive(
