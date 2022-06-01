@@ -21,7 +21,7 @@ hex_pm_erlang_app(
 
 hex_pm_erlang_app(
     name = "seshat",
-    version = "0.3.1",
+    version = "0.3.2",
 )
 
 http_archive(
