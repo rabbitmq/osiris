@@ -11,6 +11,7 @@
          new/2,
          fetch/1,
          overview/0,
+         overview/1,
          delete/1
         ]).
 
@@ -38,3 +39,7 @@ delete(Name) ->
 -spec overview() -> #{name() => #{atom() => non_neg_integer()}}.
 overview() ->
     seshat:overview(osiris).
+
+-spec overview(name()) -> #{atom() => non_neg_integer()} | undefined.
+overview(Name) ->
+    seshat:overview(osiris, Name).
