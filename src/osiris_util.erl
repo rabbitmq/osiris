@@ -15,13 +15,13 @@
          lists_find/2,
          hostname_from_node/0,
          get_replication_configuration_from_tls_dist/0,
-         get_replication_configuration_from_tls_dist/1,
+         get_replication_configuration_from_tls_dist/2,
          partition_parallel/3
         ]).
 
 %% For testing
 -export([inet_tls_enabled/1,
-         replication_over_tls_configuration/2]).
+         replication_over_tls_configuration/3]).
 
 -define(BASE64_URI_CHARS,
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01"
@@ -79,7 +79,8 @@ hostname_from_node() ->
     end.
 
 get_replication_configuration_from_tls_dist() ->
-    get_replication_configuration_from_tls_dist(fun (debug, Fmt, Args) ->
+    get_replication_configuration_from_tls_dist(fun file:consult/1,
+                                                fun (debug, Fmt, Args) ->
                                                         ?DEBUG(Fmt, Args);
                                                     (warn, Fmt, Args) ->
                                                         ?WARN(Fmt, Args);
@@ -89,7 +90,7 @@ get_replication_configuration_from_tls_dist() ->
                                                         ?INFO(Fmt, Args)
                                                 end).
 
-get_replication_configuration_from_tls_dist(LogFun) ->
+get_replication_configuration_from_tls_dist(FileConsultFun, LogFun) ->
     InitArguments = init:get_arguments(),
     case inet_tls_enabled(InitArguments) of
         true ->
@@ -97,13 +98,13 @@ get_replication_configuration_from_tls_dist(LogFun) ->
                    "Inter-node TLS enabled, "
                    ++ "configuring stream replication over TLS",
                    []),
-            replication_over_tls_configuration(InitArguments, LogFun);
+            replication_over_tls_configuration(InitArguments, FileConsultFun, LogFun);
         false ->
             LogFun(debug, "Inter-node TLS not enabled", []),
             []
     end.
 
-replication_over_tls_configuration(InitArgs, LogFun) ->
+replication_over_tls_configuration(InitArgs, FileConsultFun, LogFun) ->
     case proplists:lookup(ssl_dist_optfile, InitArgs) of
         none ->
             LogFun(debug,
@@ -121,7 +122,7 @@ replication_over_tls_configuration(InitArgs, LogFun) ->
                    "Using ssl_dist_optfile to configure "
                    ++ "stream replication over TLS",
                    []),
-            case file:consult(OptFile) of
+            case FileConsultFun(OptFile) of
                 {ok, [TlsDist]} ->
                     SslServerOptions = proplists:get_value(server, TlsDist, []),
                     SslClientOptions = proplists:get_value(client, TlsDist, []),

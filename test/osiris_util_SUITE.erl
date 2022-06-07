@@ -182,6 +182,7 @@ replication_over_tls_configuration_with_opt(_) ->
 
 replication_over_tls_configuration(Args) ->
     osiris_util:replication_over_tls_configuration(Args,
+                                                   fun file:consult/1,
                                                    fun tls_replication_log/3).
 
 tls_replication_log(_Level, Fmt, Args) ->
