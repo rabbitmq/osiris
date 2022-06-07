@@ -15,6 +15,7 @@
          lists_find/2,
          hostname_from_node/0,
          get_replication_configuration_from_tls_dist/0,
+         get_replication_configuration_from_tls_dist/1,
          get_replication_configuration_from_tls_dist/2,
          partition_parallel/3
         ]).
@@ -79,8 +80,7 @@ hostname_from_node() ->
     end.
 
 get_replication_configuration_from_tls_dist() ->
-    get_replication_configuration_from_tls_dist(fun file:consult/1,
-                                                fun (debug, Fmt, Args) ->
+    get_replication_configuration_from_tls_dist(fun (debug, Fmt, Args) ->
                                                         ?DEBUG(Fmt, Args);
                                                     (warn, Fmt, Args) ->
                                                         ?WARN(Fmt, Args);
@@ -89,6 +89,10 @@ get_replication_configuration_from_tls_dist() ->
                                                     (_, Fmt, Args) ->
                                                         ?INFO(Fmt, Args)
                                                 end).
+
+get_replication_configuration_from_tls_dist(LogFun) ->
+    get_replication_configuration_from_tls_dist(fun file:consult/1,
+                                                LogFun).
 
 get_replication_configuration_from_tls_dist(FileConsultFun, LogFun) ->
     InitArguments = init:get_arguments(),
