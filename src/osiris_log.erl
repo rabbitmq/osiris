@@ -574,33 +574,34 @@ maybe_fix_corrupted_files(IdxFiles) ->
     end.
 
 truncate_invalid_idx_records(IdxFile, SegSize) ->
+    SegFile = segment_from_index_file(IdxFile),
     {ok, IdxFd} = open(IdxFile, [raw, binary, write, read]),
     {ok, Pos} = position_at_idx_record_boundary(IdxFd, eof),
-    ok = skip_invalid_idx_records(IdxFd, SegSize, Pos),
+    ok = skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
     ok = file:truncate(IdxFd),
     file:close(IdxFd).
 
-skip_invalid_idx_records(IdxFd, SegSize, Pos) ->
+skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos) ->
     case Pos >= ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B of
         true ->
             {ok, _} = file:position(IdxFd, Pos - ?INDEX_RECORD_SIZE_B),
             case file:read(IdxFd, ?INDEX_RECORD_SIZE_B) of
                 {ok, <<0:(?INDEX_RECORD_SIZE_B*8)>>} ->
                     % trailing zeros found
-                    skip_invalid_idx_records(IdxFd, SegSize, Pos - ?INDEX_RECORD_SIZE_B);
+                    skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos - ?INDEX_RECORD_SIZE_B);
                 {ok, <<_ChunkId:64/unsigned,
                        _Timestamp:64/signed,
                        _Epoch:64/unsigned,
-                       FilePos:32/unsigned,
+                       ChunkPos:32/unsigned,
                        _ChType:8/unsigned>>} ->
                     % a non-zero index record
-                    case FilePos < SegSize of
+                    case ChunkPos < SegSize andalso is_valid_chunk_on_disk(SegFile, ChunkPos) of
                         true ->
-                             % TODO check CRC and skip if invalid
+                            % TODO check CRC and skip if invalid
                             ok;
                         false ->
-                            % this chunk doesn't exist in the segment
-                            skip_invalid_idx_records(IdxFd, SegSize, Pos - ?INDEX_RECORD_SIZE_B)
+                            % this chunk doesn't exist in the segment or is invalid
+                            skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos - ?INDEX_RECORD_SIZE_B)
                     end;
                 Err ->
                     Err
@@ -1337,6 +1338,38 @@ read_chunk_parsed(#?MODULE{mode = #read{type = RType,
         Ret ->
             Ret
     end.
+
+is_valid_chunk_on_disk(SegFile, Pos) ->
+    %% read a chunk from a specified location in the segment
+    %% then checks the CRC
+    {ok, SegFd} = file:open(SegFile, [read, raw, binary]),
+    {ok, Pos} = file:position(SegFd, Pos),
+    IsValid = case file:read(SegFd, ?HEADER_SIZE_B) of
+        {ok,
+         <<?MAGIC:4/unsigned,
+           ?VERSION:4/unsigned,
+           _ChType:8/unsigned,
+           _NumEntries:16/unsigned,
+           _NumRecords:32/unsigned,
+           _Timestamp:64/signed,
+           _Epoch:64/unsigned,
+           _NextChId0:64/unsigned,
+           Crc:32/integer,
+           DataSize:32/unsigned,
+           _TrailerSize:32/unsigned,
+           _Reserved:32>>} ->
+            {ok, Data} = file:read(SegFd, DataSize),
+            case erlang:crc32(Data) of
+                Crc ->
+                    true;
+                _ ->
+                    false
+            end;
+        _ ->
+            false
+    end,
+    file:close(SegFd),
+    IsValid.
 
 -spec send_file(gen_tcp:socket(), state()) ->
                    {ok, state()} |
