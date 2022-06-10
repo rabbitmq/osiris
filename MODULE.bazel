@@ -1,0 +1,38 @@
+module(
+    name = "osiris",
+    version = "1.0.0",
+)
+
+bazel_dep(
+    name = "rules_erlang",
+    version = "3.1.0",
+)
+
+archive_override(
+    module_name = "rules_erlang",
+    urls = ["https://github.com/rabbitmq/rules_erlang/archive/refs/tags/3.1.0.zip"],
+    strip_prefix = "rules_erlang-3.1.0",
+)
+
+erlang_package = use_extension(
+    "@rules_erlang//bzlmod:extensions.bzl",
+    "erlang_package",
+)
+
+erlang_package.hex_package(
+    name = "gen_batch_server",
+    sha256 = "c3e6a1a2a0fb62aee631a98cfa0fd8903e9562422cbf72043953e2fb1d203017",
+    version = "0.8.8",
+)
+
+erlang_package.hex_package(
+    name = "seshat",
+    version = "0.3.2",
+    sha256 = "20d820acbeef9d07298ee863d0c9d06f8e620acba100939ebb2925e4d6b0dfc7",
+)
+
+use_repo(
+    erlang_package,
+    "gen_batch_server",
+    "seshat",
+)

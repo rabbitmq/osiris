@@ -1,7 +1,7 @@
 load("@rules_erlang//:erlang_app.bzl", "erlang_app", "test_erlang_app")
 load("@rules_erlang//:xref.bzl", "xref")
 load("@rules_erlang//:dialyze.bzl", "DEFAULT_PLT_APPS", "dialyze", "plt")
-load("@rules_erlang//:ct_sharded.bzl", "ct_suite")
+load("@rules_erlang//:ct.bzl", "ct_suite")
 
 NAME = "osiris"
 
@@ -44,10 +44,7 @@ test_erlang_app(
     deps = DEPS,
 )
 
-xref(
-    size = "small",
-    tags = ["xref"],
-)
+xref()
 
 plt(
     name = "base_plt",
@@ -62,7 +59,6 @@ dialyze(
         "-Wunmatched_returns",
     ],
     plt = ":base_plt",
-    tags = ["dialyze"],
 )
 
 [ct_suite(
