@@ -1458,8 +1458,19 @@ needs_handling(_, _, _) ->
 
 -spec close(state()) -> ok.
 close(#?MODULE{cfg = #cfg{counter_id = CntId,
-                          readers_counter_fun = Fun}, fd = Fd}) ->
-    _ = file:close(Fd),
+                          readers_counter_fun = Fun},
+               fd = SegFd,
+               index_fd = IdxFd,
+               mode = Mode}) ->
+    case is_record(Mode, write) of
+        true ->
+            _ = file:sync(IdxFd),
+            _ = file:sync(SegFd);
+        false ->
+            ok
+    end,
+    _ = file:close(IdxFd),
+    _ = file:close(SegFd),
     Fun(-1),
     case CntId of
         undefined ->
@@ -2034,8 +2045,10 @@ write_chunk(Chunk,
     case max_segment_size_reached(Fd, SegSizeChunks, Cfg) of
         true ->
             %% close the current file
-            ok = file:close(Fd),
+            ok = file:sync(IdxFd),
             ok = file:close(IdxFd),
+            ok = file:sync(Fd),
+            ok = file:close(Fd),
             State#?MODULE{fd = undefined,
                           index_fd = undefined,
                           mode = Write#write{tail_info =
