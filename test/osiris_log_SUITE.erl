@@ -1117,6 +1117,8 @@ init_empty_last_files(Config) ->
     {ok, SegFd} = file:open(LastSegFile, [raw, binary, write]),
     file:close(SegFd),
 
+    ?assertEqual({{0,699},[{1,650}]}, osiris_log:overview(LDir)),
+
     Conf0 = ?config(osiris_conf, Config),
     Conf = Conf0#{dir => LDir},
     osiris_log:init(Conf),

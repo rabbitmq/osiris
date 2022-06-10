@@ -572,6 +572,19 @@ maybe_fix_corrupted_files(IdxFiles) ->
         LastSegFileSize ->
             ok = truncate_invalid_idx_records(LastIdxFile, LastSegFileSize)
     end.
+ 
+non_empty_index_files([]) ->
+    [];
+non_empty_index_files(#{dir := Dir}) ->
+    ok = non_empty_index_files(sorted_index_files(Dir));
+non_empty_index_files(IdxFiles) ->
+    LastIdxFile = lists:last(IdxFiles),
+    case filelib:file_size(LastIdxFile) of
+        0 ->
+            non_empty_index_files(IdxFiles -- [LastIdxFile]);
+        _ ->
+            IdxFiles
+    end.
 
 truncate_invalid_idx_records(IdxFile, SegSize) ->
     SegFile = segment_from_index_file(IdxFile),
@@ -1897,6 +1910,7 @@ last_epoch_offsets([FstIdxFile | _]  = IdxFiles) ->
                        _FstChunkPos:32/unsigned,
                        _FstChType:8/unsigned>>} = first_idx_record(FstFd),
                 ok = file:close(FstFd),
+                NonEmptyIdxFiles = non_empty_index_files(IdxFiles),
                 {LastE, LastO, Res} =
                     lists:foldl(
                       fun(IdxFile, {E, _, EOs} = Acc) ->
@@ -1919,7 +1933,7 @@ last_epoch_offsets([FstIdxFile | _]  = IdxFiles) ->
                                       ok = file:close(Fd),
                                       {Epoch, Offset, EOs}
                               end
-                      end, {FstE, FstO, []}, IdxFiles),
+                      end, {FstE, FstO, []}, NonEmptyIdxFiles),
                 lists:reverse([{LastE, LastO} | Res])
         end,
     {Time, Result} = timer:tc(F),
