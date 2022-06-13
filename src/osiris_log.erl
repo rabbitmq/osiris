@@ -620,9 +620,8 @@ skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos) ->
                     Err
             end;
         false ->
-            % this file doesn't have a single valid record but SegSize > 0
-            % TODO bof is not a great choice
-            file:position(IdxFd, bof),
+            %% TODO should we validate the correctness of index/segment headers?
+            file:position(IdxFd, ?IDX_HEADER_SIZE),
             ok
     end.
 
@@ -1623,24 +1622,19 @@ first_and_last_seginfos0([FstIdxFile | Rem] = IdxFiles) ->
     end.
 
 build_seg_info(IdxFile) ->
-    %% do not nead read_ahead here
-    {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
-    case last_idx_record(IdxFd) of
+    case last_valid_idx_record(IdxFile) of
         {ok, <<_Offset:64/unsigned,
                _Timestamp:64/signed,
                _Epoch:64/unsigned,
                LastChunkPos:32/unsigned,
                _ChType:8/unsigned>>} ->
-            ok = file:close(IdxFd),
             SegFile = segment_from_index_file(IdxFile),
             build_segment_info(SegFile, LastChunkPos, IdxFile);
-        {error, einval} ->
+        undefined ->
             %% this would happen if the file only contained a header
-            ok = file:close(IdxFd),
             SegFile = segment_from_index_file(IdxFile),
             {ok, #seg_info{file = SegFile, index = IdxFile}};
         {error, _} = Err ->
-            ok = file:close(IdxFd),
             Err
     end.
 
@@ -1657,6 +1651,26 @@ nth_last_idx_record(IdxFd, N) ->
         {ok, _} ->
             file:read(IdxFd, ?INDEX_RECORD_SIZE_B);
         Err ->
+            Err
+    end.
+
+last_valid_idx_record(IdxFile) ->
+    {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
+    case position_at_idx_record_boundary(IdxFd, eof) of
+        {ok, Pos} ->
+            SegFile = segment_from_index_file(IdxFile),
+            SegSize = filelib:file_size(SegFile),
+            skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
+            case file:position(IdxFd, {cur, -?INDEX_RECORD_SIZE_B}) of
+                {ok, _} ->
+                    IdxRecord = file:read(IdxFd, ?INDEX_RECORD_SIZE_B),
+                    _ = file:close(IdxFd),
+                    IdxRecord;
+                _ ->
+                    undefined
+            end;
+        Err ->
+            _ = file:close(IdxFd),
             Err
     end.
 
@@ -1890,7 +1904,8 @@ file_size(Path) ->
 last_epoch_offsets([IdxFile]) ->
     Fd = open_index_read(IdxFile),
     _ = file:advise(Fd, 0, 0, sequential),
-    case last_epoch_offset(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd, undefined) of
+    Record = file:read(Fd, ?INDEX_RECORD_SIZE_B),
+    case last_epoch_offset(Record, Fd, undefined) of
         undefined ->
             [];
         {LastE, LastO, Res} ->
@@ -1919,7 +1934,7 @@ last_epoch_offsets([FstIdxFile | _]  = IdxFiles) ->
                                      _Timestamp:64/signed,
                                      Epoch:64/unsigned,
                                      _LastChunkPos:32/unsigned,
-                                     _ChType:8/unsigned>>} = last_idx_record(Fd),
+                                     _ChType:8/unsigned>>} = last_valid_idx_record(IdxFile),
                               case Epoch > E of
                                   true ->
                                       %% we need to scan as the last index record
@@ -1973,7 +1988,11 @@ last_epoch_offset({ok,
                   Fd, {CurEpoch, LastOffs, Acc})
   when Epoch > CurEpoch ->
     last_epoch_offset(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
-                      {Epoch, O, [{CurEpoch, LastOffs} | Acc]}).
+                      {Epoch, O, [{CurEpoch, LastOffs} | Acc]});
+last_epoch_offset({ok, _}, Fd, Acc) ->
+    %% trailing data in the index file - ignore
+    ok = file:close(Fd),
+    Acc.
 
 
 segment_from_index_file(IdxFile) when is_list(IdxFile) ->
@@ -2154,7 +2173,8 @@ offset_range_from_idx_files([IdxFile]) ->
                    last = Last}} = build_seg_info(IdxFile),
     offset_range_from_chunk_range({First, Last});
 offset_range_from_idx_files(IdxFiles) when is_list(IdxFiles) ->
-    {_, FstSI, LstSI} = first_and_last_seginfos0(IdxFiles),
+    NonEmptyIdxFiles = non_empty_index_files(IdxFiles),
+    {_, FstSI, LstSI} = first_and_last_seginfos0(NonEmptyIdxFiles),
     ChunkRange = chunk_range_from_segment_infos([FstSI, LstSI]),
     offset_range_from_chunk_range(ChunkRange).
 

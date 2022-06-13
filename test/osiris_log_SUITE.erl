@@ -1067,6 +1067,10 @@ init_corrupted_log(Config) ->
     ok = file:write(IdxFd, <<0:480>>),
     ok = file:close(IdxFd),
 
+    % the overview should work even before init
+    {Range, _} = osiris_log:overview(LDir),
+    ?assertEqual({0, 1}, Range),
+
     Conf0 = ?config(osiris_conf, Config),
     Conf = Conf0#{dir => LDir},
     osiris_log:init(Conf),
