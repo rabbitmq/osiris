@@ -43,6 +43,7 @@ all_tests() ->
      tail_info_empty,
      tail_info,
      init_offset_reader_empty,
+     init_offset_reader_empty_directory,
      init_offset_reader,
      init_offset_reader_last_chunk_is_not_user_chunk,
      init_offset_reader_no_user_chunk_in_last_segment,
@@ -394,6 +395,17 @@ init_offset_reader_empty(Config) ->
 
     {error, {offset_out_of_range, empty}} =
         osiris_log:init_offset_reader({abs, 1}, RConf),
+    ok.
+
+init_offset_reader_empty_directory(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    LDir = ?config(leader_dir, Config),
+    RConf = Conf#{dir => LDir},
+    ?assertEqual({error, no_index_file}, osiris_log:init_offset_reader(first, RConf)),
+    ?assertEqual({error, no_index_file}, osiris_log:init_offset_reader(last, RConf)),
+    ?assertEqual({error, no_index_file}, osiris_log:init_offset_reader(next, RConf)),
+    ?assertEqual({error, no_index_file}, osiris_log:init_offset_reader(0, RConf)),
+    ?assertEqual({error, no_index_file}, osiris_log:init_offset_reader({abs, 1}, RConf)),
     ok.
 
 init_offset_reader(Config) ->
