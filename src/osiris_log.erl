@@ -999,7 +999,8 @@ init_data_reader_from(ChunkId,
                             {error,
                              {offset_out_of_range,
                               empty | {From :: offset(), To :: offset()}}} |
-                            {error, {invalid_chunk_header, term()}}.
+                            {error, {invalid_chunk_header, term()}} |
+                            {error, no_index_file}.
 init_offset_reader(OffsetSpec, Conf) ->
     try
         init_offset_reader0(OffsetSpec, Conf)
@@ -1009,16 +1010,20 @@ init_offset_reader(OffsetSpec, Conf) ->
     end.
 
 init_offset_reader0({abs, Offs}, #{dir := Dir} = Conf) ->
-    IdxFiles = sorted_index_files(Dir),
-    Range = offset_range_from_idx_files(IdxFiles),
-    case Range of
-        empty ->
-            {error, {offset_out_of_range, Range}};
-        {S, E} when Offs < S orelse Offs > E ->
-            {error, {offset_out_of_range, Range}};
-        _ ->
-            %% it is in range, convert to standard offset
-            init_offset_reader0(Offs, Conf)
+    case sorted_index_files(Dir) of
+        [] ->
+            {error, no_index_file};
+        IdxFiles ->
+            Range = offset_range_from_idx_files(IdxFiles),
+            case Range of
+                empty ->
+                    {error, {offset_out_of_range, Range}};
+                {S, E} when Offs < S orelse Offs > E ->
+                    {error, {offset_out_of_range, Range}};
+                _ ->
+                    %% it is in range, convert to standard offset
+                    init_offset_reader0(Offs, Conf)
+            end
     end;
 init_offset_reader0({timestamp, Ts}, #{} = Conf) ->
     case sorted_index_files_rev(Conf) of
@@ -1049,98 +1054,114 @@ init_offset_reader0({timestamp, Ts}, #{} = Conf) ->
             end
     end;
 init_offset_reader0(first, #{} = Conf) ->
-    [FstIdxFile | _ ] = sorted_index_files(Conf),
-    case build_seg_info(FstIdxFile) of
-        {ok, #seg_info{file = File,
-                       first = undefined}} ->
-            %% empty log, attach at 0
-            open_offset_reader_at(File, 0, ?LOG_HEADER_SIZE, Conf);
-        {ok, #seg_info{file = File,
-                       first = #chunk_info{id = FirstChunkId,
-                                           pos = FilePos}}} ->
-            open_offset_reader_at(File, FirstChunkId, FilePos, Conf);
-        {error, _} = Err ->
-            exit(Err)
+    case sorted_index_files(Conf) of
+        [] ->
+            {error, no_index_file};
+        [FstIdxFile | _ ] ->
+            case build_seg_info(FstIdxFile) of
+                {ok, #seg_info{file = File,
+                               first = undefined}} ->
+                    %% empty log, attach at 0
+                    open_offset_reader_at(File, 0, ?LOG_HEADER_SIZE, Conf);
+                {ok, #seg_info{file = File,
+                               first = #chunk_info{id = FirstChunkId,
+                                                   pos = FilePos}}} ->
+                    open_offset_reader_at(File, FirstChunkId, FilePos, Conf);
+                {error, _} = Err ->
+                    exit(Err)
+            end
     end;
 init_offset_reader0(next, #{} = Conf) ->
-    [LastIdxFile | _ ] = sorted_index_files_rev(Conf),
-    case build_seg_info(LastIdxFile) of
-        {ok, #seg_info{file = File,
-                       last = LastChunk}} ->
-            {NextChunkId, FilePos} = next_location(LastChunk),
-            open_offset_reader_at(File, NextChunkId, FilePos, Conf);
-        Err ->
-            exit(Err)
+    case sorted_index_files_rev(Conf) of
+        [] ->
+            {error, no_index_file};
+        [LastIdxFile | _ ] ->
+            case build_seg_info(LastIdxFile) of
+                {ok, #seg_info{file = File,
+                               last = LastChunk}} ->
+                    {NextChunkId, FilePos} = next_location(LastChunk),
+                    open_offset_reader_at(File, NextChunkId, FilePos, Conf);
+                Err ->
+                    exit(Err)
+            end
     end;
 init_offset_reader0(last, #{} = Conf) ->
-    IdxFiles = sorted_index_files_rev(Conf),
-    case last_user_chunk_location(IdxFiles) of
-        not_found ->
-            ?DEBUG("~s:~s user chunk not found, fall back to next",
-                   [?MODULE, ?FUNCTION_NAME]),
-            %% no user chunks in stream, this is awkward, fall back to next
-            init_offset_reader0(next, Conf);
-        {ChunkId, FilePos, IdxFile} ->
-            File = segment_from_index_file(IdxFile),
-            open_offset_reader_at(File, ChunkId, FilePos, Conf)
+    case sorted_index_files_rev(Conf) of
+        [] ->
+            {error, no_index_file};
+        IdxFiles ->
+            case last_user_chunk_location(IdxFiles) of
+                not_found ->
+                    ?DEBUG("~s:~s user chunk not found, fall back to next",
+                           [?MODULE, ?FUNCTION_NAME]),
+                    %% no user chunks in stream, this is awkward, fall back to next
+                    init_offset_reader0(next, Conf);
+                {ChunkId, FilePos, IdxFile} ->
+                    File = segment_from_index_file(IdxFile),
+                    open_offset_reader_at(File, ChunkId, FilePos, Conf)
+            end
     end;
 init_offset_reader0(OffsetSpec, #{} = Conf)
   when is_integer(OffsetSpec) ->
-    IdxFiles = sorted_index_files(Conf),
-    Range = offset_range_from_idx_files(IdxFiles),
-    ?DEBUG("osiris_log:init_offset_reader0/2 spec ~w range ~w ",
-            [OffsetSpec, Range]),
-    try
-        %% clamp start offset
-        StartOffset = case {OffsetSpec, Range} of
-                          {_, empty} ->
-                              0;
-                          {Offset, {_, LastOffs}}
-                            when Offset == LastOffs + 1 ->
-                              %% next but we can't use `next`
-                              %% due to race conditions
-                              Offset;
-                          {Offset, {_, LastOffs}}
-                            when Offset > LastOffs + 1 ->
-                              %% out of range, clamp as `next`
-                              throw({retry_with, next, Conf});
-                          {Offset, {FirstOffs, _LastOffs}} ->
-                              max(FirstOffs, Offset)
-                      end,
+    case sorted_index_files(Conf) of
+        [] ->
+            {error, no_index_file};
+        IdxFiles ->
+            Range = offset_range_from_idx_files(IdxFiles),
+            ?DEBUG("osiris_log:init_offset_reader0/2 spec ~w range ~w ",
+                   [OffsetSpec, Range]),
+            try
+                %% clamp start offset
+                StartOffset = case {OffsetSpec, Range} of
+                                  {_, empty} ->
+                                      0;
+                                  {Offset, {_, LastOffs}}
+                                    when Offset == LastOffs + 1 ->
+                                      %% next but we can't use `next`
+                                      %% due to race conditions
+                                      Offset;
+                                  {Offset, {_, LastOffs}}
+                                    when Offset > LastOffs + 1 ->
+                                      %% out of range, clamp as `next`
+                                      throw({retry_with, next, Conf});
+                                  {Offset, {FirstOffs, _LastOffs}} ->
+                                      max(FirstOffs, Offset)
+                              end,
 
-        case find_segment_for_offset(StartOffset, IdxFiles) of
-            not_found ->
-                {error, {offset_out_of_range, Range}};
-            {end_of_log, #seg_info{file = SegmentFile,
-                                   last = LastChunk}} ->
-                {ChunkId, FilePos} = next_location(LastChunk),
-                open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
-            {found, #seg_info{file = SegmentFile} = SegmentInfo} ->
-                {ChunkId, _Epoch, FilePos} =
-                    case offset_idx_scan(StartOffset, SegmentInfo) of
-                        eof ->
-                            exit(offset_out_of_range);
-                        enoent ->
-                            %% index file was not found
-                            %% throw should be caught and trigger a retry
-                            throw(missing_file);
-                        offset_out_of_range ->
-                            exit(offset_out_of_range);
-                        IdxResult when is_tuple(IdxResult) ->
-                            IdxResult
-                    end,
-                ?DEBUG("osiris_log:init_offset_reader0/2 resolved chunk_id ~b"
-                       " at file pos: ~w ", [ChunkId, FilePos]),
-                open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf)
-        end
-    catch
-        missing_file ->
-            %% Retention policies are likely being applied, let's try again
-            %% TODO: should we limit the number of retries?
-            %% Remove cached index_files from config
-            init_offset_reader0(OffsetSpec, maps:remove(index_files, Conf));
-        {retry_with, NewOffsSpec, NewConf} ->
-            init_offset_reader0(NewOffsSpec, NewConf)
+                case find_segment_for_offset(StartOffset, IdxFiles) of
+                    not_found ->
+                        {error, {offset_out_of_range, Range}};
+                    {end_of_log, #seg_info{file = SegmentFile,
+                                           last = LastChunk}} ->
+                        {ChunkId, FilePos} = next_location(LastChunk),
+                        open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
+                    {found, #seg_info{file = SegmentFile} = SegmentInfo} ->
+                        {ChunkId, _Epoch, FilePos} =
+                        case offset_idx_scan(StartOffset, SegmentInfo) of
+                            eof ->
+                                exit(offset_out_of_range);
+                            enoent ->
+                                %% index file was not found
+                                %% throw should be caught and trigger a retry
+                                throw(missing_file);
+                            offset_out_of_range ->
+                                exit(offset_out_of_range);
+                            IdxResult when is_tuple(IdxResult) ->
+                                IdxResult
+                        end,
+                        ?DEBUG("osiris_log:init_offset_reader0/2 resolved chunk_id ~b"
+                               " at file pos: ~w ", [ChunkId, FilePos]),
+                        open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf)
+                end
+            catch
+                missing_file ->
+                    %% Retention policies are likely being applied, let's try again
+                    %% TODO: should we limit the number of retries?
+                    %% Remove cached index_files from config
+                    init_offset_reader0(OffsetSpec, maps:remove(index_files, Conf));
+                {retry_with, NewOffsSpec, NewConf} ->
+                    init_offset_reader0(NewOffsSpec, NewConf)
+            end
     end.
 
 open_offset_reader_at(SegmentFile, NextChunkId, FilePos,

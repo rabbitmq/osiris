@@ -520,19 +520,21 @@ terminate(Reason, #?MODULE{cfg = #cfg{name = Name,
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
-format_status(#?MODULE{cfg = #cfg{name = Name,
-                                  reference = ExtRef},
-                       log = Log,
-                       parse_state = ParseState,
-                       offset_listeners = OffsetListeners,
-                       committed_offset = CommittedOffset}) ->
-    #{name => Name,
-      external_reference => ExtRef,
-      has_parse_state => ParseState /= undefined,
-      log => osiris_log:format_status(Log),
-      num_offset_listeners => length(OffsetListeners),
-      committed_offset => CommittedOffset
-     }.
+format_status(#{state := #?MODULE{cfg = #cfg{name = Name,
+                                             reference = ExtRef},
+                                  log = Log,
+                                  parse_state = ParseState,
+                                  offset_listeners = OffsetListeners,
+                                  committed_offset = CommittedOffset}} = Status) ->
+    maps:update(state,
+                #{name => Name,
+                  external_reference => ExtRef,
+                  has_parse_state => ParseState /= undefined,
+                  log => osiris_log:format_status(Log),
+                  num_offset_listeners => length(OffsetListeners),
+                  committed_offset => CommittedOffset
+                 },
+                Status).
 
 %%%===================================================================
 %%% Internal functions
