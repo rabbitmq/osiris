@@ -575,8 +575,6 @@ maybe_fix_corrupted_files(IdxFiles) ->
  
 non_empty_index_files([]) ->
     [];
-non_empty_index_files(#{dir := Dir}) ->
-    ok = non_empty_index_files(sorted_index_files(Dir));
 non_empty_index_files(IdxFiles) ->
     LastIdxFile = lists:last(IdxFiles),
     case filelib:file_size(LastIdxFile) of
@@ -620,8 +618,7 @@ skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos) ->
             end;
         false ->
             %% TODO should we validate the correctness of index/segment headers?
-            file:position(IdxFd, ?IDX_HEADER_SIZE),
-            ok
+            {ok, _} = file:position(IdxFd, ?IDX_HEADER_SIZE)
     end.
 
 -spec write([osiris:data()], state()) -> state().
@@ -1400,7 +1397,7 @@ is_valid_chunk_on_disk(SegFile, Pos) ->
         _ ->
             false
     end,
-    file:close(SegFd),
+    _ = file:close(SegFd),
     IsValid.
 
 -spec send_file(gen_tcp:socket(), state()) ->
@@ -1680,7 +1677,7 @@ last_valid_idx_record(IdxFile) ->
         {ok, Pos} ->
             SegFile = segment_from_index_file(IdxFile),
             SegSize = filelib:file_size(SegFile),
-            skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
+            ok = skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
             case file:position(IdxFd, {cur, -?INDEX_RECORD_SIZE_B}) of
                 {ok, _} ->
                     IdxRecord = file:read(IdxFd, ?INDEX_RECORD_SIZE_B),
