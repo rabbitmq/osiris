@@ -1494,7 +1494,8 @@ close(#?MODULE{cfg = #cfg{counter_id = CntId,
     case is_record(Mode, write) of
         true ->
             _ = file:sync(IdxFd),
-            _ = file:sync(SegFd);
+            _ = file:sync(SegFd),
+            ok;
         false ->
             ok
     end,
