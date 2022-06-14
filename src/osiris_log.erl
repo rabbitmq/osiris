@@ -529,7 +529,7 @@ init(#{dir := Dir,
             ok = file:truncate(SegFd),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, _} = file:position(IdxFd, eof),
-            maybe_open_new_segment(#?MODULE{cfg = Cfg,
+            maybe_close_current_segment(#?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
                                 tail_info = TailInfo,
@@ -2100,7 +2100,6 @@ max_segment_size_reached(SegFd, CurrentSizeChunks,
             #cfg{max_segment_size_bytes = MaxSizeBytes,
                  max_segment_size_chunks = MaxSizeChunks}) ->
     {ok, CurrentSizeBytes} = file:position(SegFd, cur),
-    ct:pal("max_segment_size_reached: CurrentSizeBytes=~p, MaxSizeBytes=~p, CurrentSizeChunks=~p, MaxSizeChunks=~p", [CurrentSizeBytes,MaxSizeBytes,CurrentSizeChunks,MaxSizeChunks]),
     CurrentSizeBytes >= MaxSizeBytes orelse
     CurrentSizeChunks >= MaxSizeChunks - 1.
 
@@ -2248,17 +2247,6 @@ make_file_name(N, Suff) ->
     lists:flatten(
         io_lib:format("~20..0B.~s", [N, Suff])).
 
-maybe_open_new_segment(#?MODULE{cfg = Cfg,
-                     fd = SegFd,
-                     mode =
-                         #write{segment_size = {_, CurrentSizeChunks}}} = State) ->
-    case max_segment_size_reached(SegFd, CurrentSizeChunks, Cfg) of
-        true ->
-            open_new_segment(State);
-        false ->
-            State
-    end.
-
 open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
                                      counter = Cnt},
                           fd = undefined,
@@ -2284,18 +2272,26 @@ open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
 
     State0#?MODULE{current_file = Filename,
                    fd = Fd,
-                   index_fd = IdxFd};
-open_new_segment(#?MODULE{fd = SegFd,
-                          index_fd = IdxFd,
-                          mode = #write{} = Write} = State0) ->
+                   index_fd = IdxFd}.
+
+maybe_close_current_segment(#?MODULE{cfg = Cfg,
+                    fd = SegFd,
+                    index_fd = IdxFd,
+                     mode =
+                         #write{segment_size = {_, CurrentSizeChunks}} = Write} = State0) ->
+    case max_segment_size_reached(SegFd, CurrentSizeChunks, Cfg) of
+        true ->
             %% close the current file
             _ = file:sync(IdxFd),
             _ = file:close(IdxFd),
             _ = file:sync(SegFd),
             _ = file:close(SegFd),
-            open_new_segment(State0#?MODULE{fd = undefined,
+            State0#?MODULE{fd = undefined,
                           index_fd = undefined,
-                          mode = Write#write{segment_size = {0, 0}}}).
+                          mode = Write#write{segment_size = {0, 0}}};
+        false ->
+            State0
+    end.
 
 open_index_read(File) ->
     {ok, Fd} = open(File, [read, raw, binary, read_ahead]),
