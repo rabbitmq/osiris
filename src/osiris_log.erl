@@ -563,8 +563,8 @@ maybe_fix_corrupted_files(IdxFiles) ->
     LastIdxFile = lists:last(IdxFiles),
     LastSegFile = segment_from_index_file(LastIdxFile),
     case filelib:file_size(LastSegFile) of
-        0 ->
-            % if the segment file is empty - just delete it
+        N when N =< ?HEADER_SIZE_B ->
+            % if the segment doesn't contain any chunks, just delete it
             ?WARNING("deleting an empty segment file: ~p", [LastSegFile]),
             ok = file:delete(LastIdxFile, [raw]),
             ok = file:delete(LastSegFile, [raw]),
@@ -580,7 +580,7 @@ non_empty_index_files(#{dir := Dir}) ->
 non_empty_index_files(IdxFiles) ->
     LastIdxFile = lists:last(IdxFiles),
     case filelib:file_size(LastIdxFile) of
-        0 ->
+        N when N =< ?IDX_HEADER_SIZE ->
             non_empty_index_files(IdxFiles -- [LastIdxFile]);
         _ ->
             IdxFiles
