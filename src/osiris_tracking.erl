@@ -71,10 +71,6 @@ add(TrkId, TrkType, TrkData, ChunkId,
     update_tracking(TrkId, TrkType, TrkData,
                     ChunkId, State#?MODULE{pending = Pend}).
 
-%% Convert for example 'offset' to 'offsets'.
-plural(Word) when is_atom(Word) ->
-    list_to_atom(atom_to_list(Word) ++ "s").
-
 -spec flush(state()) -> {iodata(), state()}.
 flush(#?MODULE{pending = Pending} = State) ->
     TData = maps:fold(fun(TrkType, TrackingMap, Acc) ->
@@ -193,6 +189,10 @@ max_sequences(#?MODULE{cfg = #cfg{max_sequences = MaxSequences}}) ->
     MaxSequences.
 
 %% INTERNAL
+plural(sequence) -> sequences;
+plural(offset) -> offsets;
+plural(timestamp) -> timestamps.
+
 update_tracking(TrkId, sequence, Tracking, ChId,
                 #?MODULE{sequences = Seqs0} = State) when is_integer(ChId) ->
     State#?MODULE{sequences = Seqs0#{TrkId => {ChId, Tracking}}};
