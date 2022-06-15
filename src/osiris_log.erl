@@ -618,7 +618,8 @@ skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos) ->
             end;
         false ->
             %% TODO should we validate the correctness of index/segment headers?
-            {ok, _} = file:position(IdxFd, ?IDX_HEADER_SIZE)
+            {ok, _} = file:position(IdxFd, ?IDX_HEADER_SIZE),
+            ok
     end.
 
 -spec write([osiris:data()], state()) -> state().
