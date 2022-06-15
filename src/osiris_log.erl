@@ -392,8 +392,9 @@
         {cfg :: #cfg{},
          mode :: #read{} | #write{},
          current_file :: undefined | file:filename(),
-         fd :: undefined | file:io_device(),
-         index_fd :: undefined | file:io_device()}).
+         index_fd :: undefined | file:io_device(),
+         fd :: undefined | file:io_device()
+        }).
 %% record chunk_info does not map exactly to an index record (field 'num' differs)
 -record(chunk_info,
         {id :: offset(),
@@ -1489,19 +1490,19 @@ needs_handling(_, _, _) ->
 -spec close(state()) -> ok.
 close(#?MODULE{cfg = #cfg{counter_id = CntId,
                           readers_counter_fun = Fun},
-               fd = SegFd,
                index_fd = IdxFd,
+               fd = SegFd,
                mode = Mode}) ->
     case is_record(Mode, write) of
         true ->
-            _ = file:sync(IdxFd),
-            _ = file:sync(SegFd),
+            sync_fd(IdxFd),
+            sync_fd(SegFd),
             ok;
         false ->
             ok
     end,
-    _ = file:close(IdxFd),
-    _ = file:close(SegFd),
+    close_fd(IdxFd),
+    close_fd(SegFd),
     Fun(-1),
     case CntId of
         undefined ->
@@ -2709,6 +2710,17 @@ timestamp_idx_file_search0(Ts, [IdxFile | Older], Prev) ->
             {scan, IdxFile}
     end.
 
+close_fd(undefined) ->
+    ok;
+close_fd(Fd) ->
+    _ = file:close(Fd),
+    ok.
+
+sync_fd(undefined) ->
+    ok;
+sync_fd(Fd) ->
+    _ = file:sync(Fd),
+    ok.
 
 -ifdef(TEST).
 

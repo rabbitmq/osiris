@@ -1070,11 +1070,11 @@ init_corrupted_log(Config) ->
     {ok, SegFd} = file:open(SegPath, [raw, binary, read, write]),
     % truncate the file so that chunk <<four>> is missing and <<three>> is corrupted
     {ok, _} = file:position(SegFd, SegSizeWith3Chunks - 3),
-    file:truncate(SegFd),
-    file:close(SegFd),
+    _ = file:truncate(SegFd),
+    _ = file:close(SegFd),
     % append 60 zeros to the index file
     {ok, IdxFd} =
-    file:open(IdxPath, [raw, binary, read, write]),
+    _ = file:open(IdxPath, [raw, binary, read, write]),
     {ok, _} = file:position(IdxFd, eof),
     ok = file:write(IdxFd, <<0:480>>),
     ok = file:close(IdxFd),
@@ -1085,7 +1085,7 @@ init_corrupted_log(Config) ->
 
     Conf0 = ?config(osiris_conf, Config),
     Conf = Conf0#{dir => LDir},
-    osiris_log:init(Conf),
+    _ = osiris_log:init(Conf),
     set_offset_ref(Conf, 2),
 
     % after osiris_log:init, the sizes of the index and segment files
@@ -1129,15 +1129,15 @@ init_empty_last_files(Config) ->
     LastIdxFile = lists:last(IdxFiles),
     LastSegFile = lists:last(SegFiles),
     {ok, IdxFd} = file:open(LastIdxFile, [raw, binary, write]),
-    file:close(IdxFd),
+    _ =file:close(IdxFd),
     {ok, SegFd} = file:open(LastSegFile, [raw, binary, write]),
-    file:close(SegFd),
+    _ = file:close(SegFd),
 
     ?assertEqual({{0,699},[{1,650}]}, osiris_log:overview(LDir)),
 
     Conf0 = ?config(osiris_conf, Config),
     Conf = Conf0#{dir => LDir},
-    osiris_log:init(Conf),
+    _ = osiris_log:init(Conf),
     set_offset_ref(Conf, 2),
 
     % the last segment and index files should no longer exist

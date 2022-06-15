@@ -20,6 +20,7 @@
 
 -dialyzer({no_match, start_child_node/3}).
 -dialyzer({nowarn_function, start_peer_node_25/3}).
+-dialyzer({nowarn_function, start_peer_node_pre_25/3}).
 
 %%%===================================================================
 %%% Common Test callbacks
