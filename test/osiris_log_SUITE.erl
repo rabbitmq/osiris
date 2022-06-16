@@ -1125,21 +1125,21 @@ init_only_one_corrupted_segment(Config) ->
     ?assertEqual(2, length(SegFiles)),
 
     % delete the first segment
-    file:delete(hd(IdxFiles)),
-    file:delete(hd(SegFiles)),
+    ok = file:delete(hd(IdxFiles)),
+    ok = file:delete(hd(SegFiles)),
 
     % truncate the last segment
     LastIdxFile = lists:last(IdxFiles),
     LastSegFile = lists:last(SegFiles),
     {ok, IdxFd} = file:open(LastIdxFile, [raw, binary, write]),
-    file:close(IdxFd),
+    ok = file:close(IdxFd),
     {ok, SegFd} = file:open(LastSegFile, [raw, binary, write]),
-    file:close(SegFd),
+    ok = file:close(SegFd),
 
     % init
     Conf0 = ?config(osiris_conf, Config),
     Conf = Conf0#{dir => LDir},
-    osiris_log:init(Conf),
+    _ = osiris_log:init(Conf),
     set_offset_ref(Conf, 1000),
 
     % there should be one segment, with nothing but headers
@@ -1149,10 +1149,10 @@ init_only_one_corrupted_segment(Config) ->
     ?assertEqual(?IDX_HEADER_SIZE, filelib:file_size(LastIdxFile)),
     {ok, IdxFd2} = file:open(LastIdxFile, [read, raw, binary]),
     {ok, ?IDX_HEADER} = file:read(IdxFd2, ?IDX_HEADER_SIZE),
-    file:close(IdxFd2),
+    ok = file:close(IdxFd2),
     {ok, SegFd2} = file:open(LastSegFile, [read, raw, binary]),
     {ok, ?LOG_HEADER} = file:read(SegFd2, ?LOG_HEADER_SIZE),
-    file:close(SegFd2),
+    ok = file:close(SegFd2),
     ok.
 
 init_empty_last_files(Config) ->

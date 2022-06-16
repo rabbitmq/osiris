@@ -556,14 +556,14 @@ maybe_fix_corrupted_files(#{dir := Dir}) ->
     ok = maybe_fix_corrupted_files(sorted_index_files(Dir));
 maybe_fix_corrupted_files([IdxFile]) ->
     SegFile = segment_from_index_file(IdxFile),
-    truncate_invalid_idx_records(IdxFile, filelib:file_size(SegFile)),
+    ok = truncate_invalid_idx_records(IdxFile, filelib:file_size(SegFile)),
     case filelib:file_size(IdxFile) =< ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B of
         true ->
             % the only index doesn't contain a single valid record
             % make sure it has a valid header
             {ok, IdxFd} = file:open(IdxFile, ?FILE_OPTS_WRITE),
             ok = file:write(IdxFd, ?IDX_HEADER),
-            file:close(IdxFd);
+            ok = file:close(IdxFd);
         false ->
             ok
     end,
@@ -573,7 +573,7 @@ maybe_fix_corrupted_files([IdxFile]) ->
             % make sure it has a valid header
             {ok, SegFd} = file:open(SegFile, ?FILE_OPTS_WRITE),
             ok = file:write(SegFd, ?LOG_HEADER),
-            file:close(SegFd);
+            ok = file:close(SegFd);
         false ->
             ok
     end;
