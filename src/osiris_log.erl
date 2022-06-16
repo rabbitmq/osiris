@@ -49,12 +49,6 @@
 -export([part_test/0]).
 -endif.
 
--define(IDX_VERSION, 1).
--define(LOG_VERSION, 1).
--define(IDX_HEADER, <<"OSII", ?IDX_VERSION:32/unsigned>>).
--define(LOG_HEADER, <<"OSIL", ?LOG_VERSION:32/unsigned>>).
--define(IDX_HEADER_SIZE, 8).
--define(LOG_HEADER_SIZE, 8).
 % maximum size of a segment in bytes
 -define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
 % maximum number of chunks per segment
@@ -560,6 +554,29 @@ maybe_fix_corrupted_files([]) ->
     ok;
 maybe_fix_corrupted_files(#{dir := Dir}) ->
     ok = maybe_fix_corrupted_files(sorted_index_files(Dir));
+maybe_fix_corrupted_files([IdxFile]) ->
+    SegFile = segment_from_index_file(IdxFile),
+    truncate_invalid_idx_records(IdxFile, filelib:file_size(SegFile)),
+    case filelib:file_size(IdxFile) =< ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B of
+        true ->
+            % the only index doesn't contain a single valid record
+            % make sure it has a valid header
+            {ok, IdxFd} = file:open(IdxFile, ?FILE_OPTS_WRITE),
+            ok = file:write(IdxFd, ?IDX_HEADER),
+            file:close(IdxFd);
+        false ->
+            ok
+    end,
+    case filelib:file_size(SegFile) =< ?LOG_HEADER_SIZE + ?HEADER_SIZE_B of
+        true ->
+            % the only segment doesn't contain a single valid chunk
+            % make sure it has a valid header
+            {ok, SegFd} = file:open(SegFile, ?FILE_OPTS_WRITE),
+            ok = file:write(SegFd, ?LOG_HEADER),
+            file:close(SegFd);
+        false ->
+            ok
+    end;
 maybe_fix_corrupted_files(IdxFiles) ->
     LastIdxFile = lists:last(IdxFiles),
     LastSegFile = segment_from_index_file(LastIdxFile),
@@ -586,6 +603,14 @@ non_empty_index_files(IdxFiles) ->
     end.
 
 truncate_invalid_idx_records(IdxFile, SegSize) ->
+    % TODO currently, if we have no valid index records,
+    % we truncate the segment, even though it could theoretically
+    % contain valid chunks. This should never happen in normal
+    % operations, since we write to the index first
+    % and fsync it first. However, it feels wrong, since we can
+    % reconstruct the index from a segment. We should probably
+    % add an option to perform a full segment scan and reconstruct
+    % the index for the valid chunks.
     SegFile = segment_from_index_file(IdxFile),
     {ok, IdxFd} = open(IdxFile, [raw, binary, write, read]),
     {ok, Pos} = position_at_idx_record_boundary(IdxFd, eof),

@@ -71,6 +71,7 @@ all_tests() ->
      init_epoch_offsets_discards_all_when_no_overlap_in_same_epoch,
      overview,
      init_corrupted_log,
+     init_only_one_corrupted_segment,
      init_empty_last_files,
      evaluate_retention_max_bytes,
      evaluate_retention_max_age,
@@ -1102,6 +1103,56 @@ init_corrupted_log(Config) ->
     {ReadChunk, R1} = osiris_log:read_chunk_parsed(R0),
     ?assertMatch([{1, <<"two">>}], ReadChunk),
     osiris_log:close(R1),
+    ok.
+
+init_only_one_corrupted_segment(Config) ->
+    Data = crypto:strong_rand_bytes(1500),
+    EpochChunks =
+    [begin {1, [Data || _ <- lists:seq(1, 50)]} end
+     || _ <- lists:seq(1, 20)],
+    LDir = ?config(leader_dir, Config),
+    Log = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(Log),
+
+    % we should have 2 segments for this test
+    IdxFiles =
+    filelib:wildcard(
+      filename:join(LDir, "*.index")),
+    ?assertEqual(2, length(IdxFiles)),
+    SegFiles =
+    filelib:wildcard(
+      filename:join(LDir, "*.segment")),
+    ?assertEqual(2, length(SegFiles)),
+
+    % delete the first segment
+    file:delete(hd(IdxFiles)),
+    file:delete(hd(SegFiles)),
+
+    % truncate the last segment
+    LastIdxFile = lists:last(IdxFiles),
+    LastSegFile = lists:last(SegFiles),
+    {ok, IdxFd} = file:open(LastIdxFile, [raw, binary, write]),
+    file:close(IdxFd),
+    {ok, SegFd} = file:open(LastSegFile, [raw, binary, write]),
+    file:close(SegFd),
+
+    % init
+    Conf0 = ?config(osiris_conf, Config),
+    Conf = Conf0#{dir => LDir},
+    osiris_log:init(Conf),
+    set_offset_ref(Conf, 1000),
+
+    % there should be one segment, with nothing but headers
+    % and its name should be the same as it was before
+    % (the file is used to store the last known chunk ID)
+    ?assertEqual(?LOG_HEADER_SIZE, filelib:file_size(LastSegFile)),
+    ?assertEqual(?IDX_HEADER_SIZE, filelib:file_size(LastIdxFile)),
+    {ok, IdxFd2} = file:open(LastIdxFile, [read, raw, binary]),
+    {ok, ?IDX_HEADER} = file:read(IdxFd2, ?IDX_HEADER_SIZE),
+    file:close(IdxFd2),
+    {ok, SegFd2} = file:open(LastSegFile, [read, raw, binary]),
+    {ok, ?LOG_HEADER} = file:read(SegFd2, ?LOG_HEADER_SIZE),
+    file:close(SegFd2),
     ok.
 
 init_empty_last_files(Config) ->
