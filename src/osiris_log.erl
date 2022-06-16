@@ -584,13 +584,13 @@ maybe_fix_corrupted_files(IdxFiles) ->
         N when N =< ?HEADER_SIZE_B ->
             % if the segment doesn't contain any chunks, just delete it
             ?WARNING("deleting an empty segment file: ~p", [LastSegFile]),
-            ok = file:delete(LastIdxFile, [raw]),
-            ok = file:delete(LastSegFile, [raw]),
+            ok = prim_file:delete(LastIdxFile),
+            ok = prim_file:delete(LastSegFile),
             maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile]);
         LastSegFileSize ->
             ok = truncate_invalid_idx_records(LastIdxFile, LastSegFileSize)
     end.
- 
+
 non_empty_index_files([]) ->
     [];
 non_empty_index_files(IdxFiles) ->
