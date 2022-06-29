@@ -19,6 +19,10 @@
              ?WARN("~s [~s:~s/~b] " Str,
                   [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
 
+-define(ERROR_(Name, Str, Args),
+             ?ERROR("~s [~s:~s/~b] " Str,
+                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
+
 -define(DEBUG_(Name, Str, Args),
              ?DEBUG("~s [~s:~s/~b] " Str,
                   [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
@@ -45,6 +49,8 @@
 -record(cfg,
         {name :: string(),
          leader_pid :: pid(),
+         acceptor_pid :: pid(),
+         replica_reader_pid :: pid(),
          directory :: file:filename(),
          port :: non_neg_integer(),
          transport :: osiris_log:transport(),
@@ -214,7 +220,7 @@ init(#{name := Name,
             ?DEBUG_(Name, "replica using '~s' transport for replication",
                    [Transport]),
             {Port, LSock} = open_listener(Transport, RecBuf, {Min, Max}, 0),
-            spawn_link(fun() -> accept(Name, Transport, LSock, Self) end),
+            Acceptor = spawn_link(fun() -> accept(Name, Transport, LSock, Self) end),
 
             ReplicaReaderConf = #{hosts => IpsHosts,
                                   port => Port,
@@ -235,6 +241,8 @@ init(#{name := Name,
              #?MODULE{cfg =
                       #cfg{name = Name,
                            leader_pid = LeaderPid,
+                           acceptor_pid = Acceptor,
+                           replica_reader_pid = RRPid,
                            directory = Dir,
                            port = Port,
                            gc_interval = Interval,
@@ -453,11 +461,23 @@ handle_info({'DOWN', _Ref, process, Pid, Info},
     ?DEBUG_(Name, "DOWN received for Pid ~w, Info: ~w",
            [Pid, Info]),
     {noreply, State};
+handle_info({'EXIT', RRPid, Info},
+            #?MODULE{cfg = #cfg{name = Name,
+                                replica_reader_pid = RRPid}} = State) ->
+    %% any replica reader exit is troublesome and requires the replica to also
+    %% terminate
+    ?ERROR_(Name, "replica reader ~w exited with ~w", [RRPid, Info]),
+    {stop, replica_reader_exit, State};
+handle_info({'EXIT', Ref, normal},
+            #?MODULE{cfg = #cfg{name = Name}} = State) ->
+    %% we assume any 'normal' EXIT is fine to ignore (port etc)
+    ?DEBUG_(Name, "EXIT received for ~w with 'normal'", [Ref]),
+    {noreply, State};
 handle_info({'EXIT', Ref, Info},
             #?MODULE{cfg = #cfg{name = Name}} = State) ->
-    ?DEBUG_(Name, "EXIT received for ~w, Info: ~w",
+    ?WARN_(Name, "unexpected linked process or port ~w exited with ~w",
            [Ref, Info]),
-    {noreply, State}.
+    {stop, unexpected_exit, State}.
 
 handle_incoming_data(Socket, Bin,
             #?MODULE{cfg =

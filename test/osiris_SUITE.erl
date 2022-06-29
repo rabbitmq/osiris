@@ -46,6 +46,7 @@ all_tests() ->
      cluster_restart_new_leader,
      cluster_delete,
      cluster_failure,
+     replica_reader_failure_should_stop_replica,
      start_cluster_invalid_replicas,
      restart_replica,
      replica_unknown_command,
@@ -791,8 +792,53 @@ cluster_failure(Config) ->
         flush(),
         exit(down_timeout_2)
     end,
-    [] =
+    [] = supervisor:which_children({osiris_replica_reader_sup, node(Leader)}),
+
+    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    ok.
+
+replica_reader_failure_should_stop_replica(Config) ->
+    %% when the leader exits the failure the replicas and replica readers
+    %% should also exit
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
+    [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => LeaderNode,
+          replica_nodes => Replicas},
+    {ok, #{leader_pid := Leader, replica_pids := [R1, R2]} = _Conf} =
+        osiris:start_cluster(Conf0),
+
+    [{_, RRPid1, _, _},
+     {_, RRPid2, _, _}] =
         supervisor:which_children({osiris_replica_reader_sup, node(Leader)}),
+
+    R1Ref = monitor(process, R1),
+    R2Ref = monitor(process, R2),
+
+    %% stop replica readers
+    proc_lib:stop(RRPid1),
+    proc_lib:stop(RRPid2),
+
+    %% check replicas are stopping
+    receive
+        {'DOWN', R1Ref, _, _, _} ->
+            ok
+    after 2000 ->
+        flush(),
+        exit(down_timeout_1)
+    end,
+    receive
+        {'DOWN', R2Ref, _, _, _} ->
+            ok
+    after 2000 ->
+        flush(),
+        exit(down_timeout_2)
+    end,
+    [] = supervisor:which_children({osiris_replica_reader_sup, node(Leader)}),
 
     [stop_peer(Ref) || {Ref, _} <- PeerStates],
     ok.
