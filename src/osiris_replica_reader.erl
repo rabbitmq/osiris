@@ -11,6 +11,7 @@
 
 -include("osiris.hrl").
 
+-define(DEF_SND_BUF, 146988 * 10).
 %% replica reader, spawned remoted by replica process, connects back to
 %% configured host/port, reads entries from master and uses file:sendfile to
 %% replicate read records
@@ -139,6 +140,7 @@ start(Node, ReplicaReaderConf) when is_map(ReplicaReaderConf) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
+
 init(#{hosts := Hosts,
        port := Port,
        transport := Transport,
@@ -150,11 +152,9 @@ init(#{hosts := Hosts,
        connection_token := Token}) ->
     process_flag(trap_exit, true),
 
-    SndBuf = 146988 * 10,
     ?DEBUG("trying to connect to replica at ~p", [Hosts]),
 
-    case maybe_connect(Transport, Hosts, Port,
-                       [binary, {packet, 0}, {nodelay, true}, {sndbuf, SndBuf}])
+    case maybe_connect(Transport, Hosts, Port, connect_options())
     of
         {ok, Sock, Host} ->
             ?DEBUG("successfully connected to host ~p", [Host]),
@@ -375,3 +375,12 @@ close(tcp, Socket) ->
     gen_tcp:close(Socket);
 close(ssl, Socket) ->
     ssl:close(Socket).
+
+connect_options() ->
+    SndBuf = application:get_env(osiris, replica_sndbuf, ?DEF_SND_BUF),
+    KeepAlive = application:get_env(osiris, replica_keepalive, false),
+    [binary,
+     {packet, 0},
+     {nodelay, true},
+     {sndbuf, SndBuf},
+     {keepalive, KeepAlive}].
