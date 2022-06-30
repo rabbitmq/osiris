@@ -1514,8 +1514,11 @@ needs_handling(_, _, _) ->
 
 -spec close(state()) -> ok.
 close(#?MODULE{cfg = #cfg{counter_id = CntId,
-                          readers_counter_fun = Fun}, fd = Fd}) ->
-    _ = file:close(Fd),
+                         readers_counter_fun = Fun},
+                         fd = SegFd,
+                         index_fd = IdxFd}) ->
+    close_fd(IdxFd),
+    close_fd(SegFd),
     Fun(-1),
     case CntId of
         undefined ->
@@ -2725,12 +2728,6 @@ close_fd(undefined) ->
     ok;
 close_fd(Fd) ->
     _ = file:close(Fd),
-    ok.
-
-sync_fd(undefined) ->
-    ok;
-sync_fd(Fd) ->
-    _ = file:sync(Fd),
     ok.
 
 -ifdef(TEST).
