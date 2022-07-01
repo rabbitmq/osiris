@@ -86,13 +86,12 @@ flush(#?MODULE{pending = Pending} = State) ->
                                       timestamps ->
                                           ?TRK_TYPE_TIMESTAMP
                                   end,
-                              TData0 = maps:fold(fun(TrkId, TrkData, Acc0) ->
-                                                         [<<T:8/unsigned,
-                                                            (byte_size(TrkId)):8/unsigned,
-                                                            TrkId/binary,
-                                                            TrkData:64/integer>> | Acc0]
-                                                 end, [], TrackingMap),
-                              [TData0| Acc]
+                              maps:fold(fun(TrkId, TrkData, Acc0) ->
+                                                [<<T:8/unsigned,
+                                                   (byte_size(TrkId)):8/unsigned,
+                                                   TrkId/binary,
+                                                   TrkData:64/integer>> | Acc0]
+                                        end, Acc, TrackingMap)
                       end, [], Pending),
     {TData, State#?MODULE{pending = init_pending()}}.
 

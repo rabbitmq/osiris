@@ -22,7 +22,7 @@
          first_offset/1,
          first_timestamp/1,
          tail_info/1,
-         is_open/1,
+         prepare/2,
          send_file/2,
          send_file/3,
          init_data_reader/2,
@@ -378,7 +378,7 @@
          chunk_selector :: all | user_data}).
 -record(write,
         {type = writer :: writer | acceptor,
-         segment_size = {0, 0} :: {non_neg_integer(), non_neg_integer()},
+         segment_size = {?LOG_HEADER_SIZE, 0} :: {non_neg_integer(), non_neg_integer()},
          current_epoch :: non_neg_integer(),
          tail_info = {0, empty} :: osiris:tail_info()
         }).
@@ -523,14 +523,16 @@ init(#{dir := Dir,
             %% at a valid chunk we can now truncate the segment to size in case there is trailing data
             ok = file:truncate(SegFd),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
-            {ok, _} = file:position(IdxFd, eof),
-            maybe_close_current_segment(#?MODULE{cfg = Cfg,
+            {ok, IdxEof} = file:position(IdxFd, eof),
+            NumChunks = (IdxEof - ?IDX_HEADER_SIZE) div ?INDEX_RECORD_SIZE_B,
+            #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
                                 tail_info = TailInfo,
+                                segment_size = {Size, NumChunks},
                                 current_epoch = Epoch},
                      fd = SegFd,
-                     index_fd = IdxFd});
+                     index_fd = IdxFd};
         {1, #seg_info{file = Filename,
                       index = IdxFilename,
                       last = undefined}, _} ->
@@ -664,18 +666,18 @@ write(Entries, Now, #?MODULE{mode = #write{}} = State)
             iodata(),
             state()) ->
                state().
-write([_ | _] = Entries,
-      ChType,
-      Now,
-      Trailer,
-      #?MODULE{cfg = #cfg{},
-               fd = undefined,
-               mode = #write{}} =
-          State0) ->
-    %% we need to open a new segment here to ensure tracking chunk
-    %% is made before the one that triggers the new segment to be created
-    trigger_retention_eval(
-      write(Entries, ChType, Now, Trailer, open_new_segment(State0)));
+% write([_ | _] = Entries,
+%       ChType,
+%       Now,
+%       Trailer,
+%       #?MODULE{cfg = #cfg{},
+%                fd = undefined,
+%                mode = #write{}} =
+%           State0) ->
+%     %% we need to open a new segment here to ensure tracking chunk
+%     %% is made before the one that triggers the new segment to be created
+%     trigger_retention_eval(
+%       write(Entries, ChType, Now, Trailer, open_new_segment(State0)));
 write([_ | _] = Entries,
       ChType,
       Now,
@@ -692,7 +694,7 @@ write([_ | _] = Entries,
     {ChunkData, NumRecords} =
         make_chunk(Entries, Trailer, ChType, Now, Epoch, Next),
     write_chunk(ChunkData, ChType, Now, Epoch, NumRecords, State0);
-write([], _ChType, _Now, _Writers, State) ->
+write([], _ChType, _Now, _Trailer, #?MODULE{} = State) ->
     State.
 
 -spec accept_chunk(iodata(), state()) -> state().
@@ -717,15 +719,13 @@ accept_chunk([<<?MAGIC:4/unsigned,
     validate_crc(Next, Crc, part(DataSize, DataAndTrailer)),
     %% assertion
     % true = iolist_size(DataAndTrailer) == (DataSize + TrailerSize),
-    %% acceptors do no need to maintain writer state in memory so we pass
-    %% the empty map here instead of parsing the trailer
-    case write_chunk(Chunk, ChType, Timestamp, Epoch, NumRecords, State0) of
-        full ->
-            trigger_retention_eval(
-              accept_chunk(Chunk, open_new_segment(State0)));
-        State ->
-            State
-    end;
+    write_chunk(Chunk, ChType, Timestamp, Epoch, NumRecords, State0);
+        % full ->
+        %     trigger_retention_eval(
+        %       accept_chunk(Chunk, open_new_segment(State0)));
+        % State ->
+        %     State
+    % end;
 accept_chunk(Binary, State) when is_binary(Binary) ->
     accept_chunk([Binary], State);
 accept_chunk([<<?MAGIC:4/unsigned,
@@ -762,9 +762,29 @@ first_timestamp(#?MODULE{cfg = #cfg{counter = Cnt}}) ->
 tail_info(#?MODULE{mode = #write{tail_info = TailInfo}}) ->
     TailInfo.
 
--spec is_open(state()) -> boolean().
-is_open(#?MODULE{mode = #write{}, fd = Fd}) ->
-    Fd =/= undefined.
+%% called by the writer before every write to evalaute segment size
+%% and write a tracking snapshot
+-spec prepare(state(), osiris_tracking:state()) ->
+    {state(), osiris_tracking:state()}.
+prepare(#?MODULE{mode = #write{type = writer}} = State0, Trk0) ->
+    IsEmpty = osiris_tracking:is_empty(Trk0),
+    case max_segment_size_reached(State0) of
+        true when not IsEmpty ->
+            State1 = open_new_segment(State0),
+            %% write a new tracking snapshot
+            Now = erlang:system_time(millisecond),
+            FstOffs = first_offset(State1),
+            FstTs = first_timestamp(State1),
+            {SnapBin, Trk1} = osiris_tracking:snapshot(FstOffs, FstTs, Trk0),
+            {trigger_retention_eval(
+               write([SnapBin],
+                     ?CHNK_TRK_SNAPSHOT,
+                     Now,
+                     <<>>,
+                     State1)), Trk1};
+        _ ->
+            {State0, Trk0}
+    end.
 
 % -spec
 -spec init_acceptor(range(), list(), config()) ->
@@ -2075,69 +2095,58 @@ make_chunk(Blobs, TData, ChType, Timestamp, Epoch, Next) ->
       EData, TData],
      NumRecords}.
 
-write_chunk(_Chunk,
-            _ChType,
-            _Timestamp,
-            _Epoch,
-            _NumRecords,
-            #?MODULE{fd = undefined} = _State) ->
-    full;
 write_chunk(Chunk,
             ChType,
             Timestamp,
             Epoch,
             NumRecords,
-            #?MODULE{cfg = #cfg{counter = CntRef} = Cfg,
+            #?MODULE{cfg = #cfg{counter = CntRef},
                      fd = Fd,
                      index_fd = IdxFd,
                      mode =
                          #write{segment_size = {SegSizeBytes, SegSizeChunks},
-                                % writers = Writers0,
                                 tail_info = {Next, _}} =
                              Write} =
                 State) ->
-    NextOffset = Next + NumRecords,
-    Size = iolist_size(Chunk),
-    {ok, Cur} = file:position(Fd, cur),
-    ok = file:write(Fd, Chunk),
-
-    ok =
-        file:write(IdxFd,
-                   <<Next:64/unsigned,
-                     Timestamp:64/signed,
-                     Epoch:64/unsigned,
-                     Cur:32/unsigned,
-                     ChType:8/unsigned>>),
-    %% update counters
-    counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
-    counters:add(CntRef, ?C_CHUNKS, 1),
-    case max_segment_size_reached(Fd, SegSizeChunks, Cfg) of
+    case max_segment_size_reached(State) of
         true ->
-            %% close the current file
-            ok = file:close(Fd),
-            ok = file:close(IdxFd),
-            State#?MODULE{fd = undefined,
-                          index_fd = undefined,
-                          mode = Write#write{tail_info =
-                                                 {NextOffset,
-                                                  {Epoch, Next, Timestamp}},
-                                             segment_size = {0, 0}}};
+            trigger_retention_eval(
+              write_chunk(Chunk,
+                          ChType,
+                          Timestamp,
+                          Epoch,
+                          NumRecords,
+                          open_new_segment(State)));
         false ->
+            NextOffset = Next + NumRecords,
+            Size = iolist_size(Chunk),
+            {ok, Cur} = file:position(Fd, cur),
+            ok = file:write(Fd, Chunk),
+
+            ok = file:write(IdxFd,
+                            <<Next:64/unsigned,
+                              Timestamp:64/signed,
+                              Epoch:64/unsigned,
+                              Cur:32/unsigned,
+                              ChType:8/unsigned>>),
+            %% update counters
+            counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
+            counters:add(CntRef, ?C_CHUNKS, 1),
             State#?MODULE{mode =
-                              Write#write{tail_info =
-                                              {NextOffset,
-                                               {Epoch, Next, Timestamp}},
-                                          segment_size = {SegSizeBytes + Size,
-                                                          SegSizeChunks + 1}}}
+                          Write#write{tail_info =
+                                      {NextOffset,
+                                       {Epoch, Next, Timestamp}},
+                                      segment_size = {SegSizeBytes + Size,
+                                                      SegSizeChunks + 1}}}
     end.
 
-max_segment_size_reached(SegFd, CurrentSizeChunks,
-            #cfg{max_segment_size_bytes = MaxSizeBytes,
-                 max_segment_size_chunks = MaxSizeChunks}) ->
-    {ok, CurrentSizeBytes} = file:position(SegFd, cur),
+max_segment_size_reached(
+  #?MODULE{mode = #write{segment_size = {CurrentSizeBytes,
+                                         CurrentSizeChunks}},
+           cfg = #cfg{max_segment_size_bytes = MaxSizeBytes,
+                      max_segment_size_chunks = MaxSizeChunks}}) ->
     CurrentSizeBytes >= MaxSizeBytes orelse
-    CurrentSizeChunks >= MaxSizeChunks - 1.
-
+    CurrentSizeChunks >= MaxSizeChunks.
 
 setopts(tcp, Sock, Opts) ->
     ok = inet:setopts(Sock, Opts);
@@ -2284,14 +2293,17 @@ make_file_name(N, Suff) ->
 
 open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
                                      counter = Cnt},
-                          fd = undefined,
-                          index_fd = undefined,
+                          fd = OldFd,
+                          index_fd = OldIdxFd,
                           mode = #write{type = _WriterType,
-                                        tail_info = {NextOffset, _}}} =
+                                        tail_info = {NextOffset, _}} = Write} =
                  State0) ->
+    _ = close_fd(OldFd),
+    _ = close_fd(OldIdxFd),
     Filename = make_file_name(NextOffset, "segment"),
     IdxFilename = make_file_name(NextOffset, "index"),
     ?DEBUG("~s: ~s : ~s", [?MODULE, ?FUNCTION_NAME, Filename]),
+    % ct:pal("~s: ~s : ~s", [?MODULE, ?FUNCTION_NAME, Filename]),
     {ok, Fd} =
         file:open(
             filename:join(Dir, Filename), ?FILE_OPTS_WRITE),
@@ -2307,26 +2319,9 @@ open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
 
     State0#?MODULE{current_file = Filename,
                    fd = Fd,
-                   index_fd = IdxFd}.
-
-maybe_close_current_segment(#?MODULE{cfg = Cfg,
-                    fd = SegFd,
-                    index_fd = IdxFd,
-                     mode =
-                         #write{segment_size = {_, CurrentSizeChunks}} = Write} = State0) ->
-    case max_segment_size_reached(SegFd, CurrentSizeChunks, Cfg) of
-        true ->
-            %% close the current file
-            _ = file:sync(IdxFd),
-            _ = file:close(IdxFd),
-            _ = file:sync(SegFd),
-            _ = file:close(SegFd),
-            State0#?MODULE{fd = undefined,
-                          index_fd = undefined,
-                          mode = Write#write{segment_size = {0, 0}}};
-        false ->
-            State0
-    end.
+                   %% reset segment_size counter
+                   index_fd = IdxFd,
+                   mode = Write#write{segment_size = {?LOG_HEADER_SIZE, 0}}}.
 
 open_index_read(File) ->
     {ok, Fd} = open(File, [read, raw, binary, read_ahead]),

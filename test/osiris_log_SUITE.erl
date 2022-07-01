@@ -332,15 +332,19 @@ write_multi_log(Config) ->
     S0 = osiris_log:init(Conf#{max_segment_size_bytes => 10 * 1000 * 1000}),
     Data = crypto:strong_rand_bytes(10000),
     BatchOf10 = [Data || _ <- lists:seq(1, 10)],
-    _S1 = lists:foldl(fun(_, Acc) -> osiris_log:write(BatchOf10, Acc) end,
+    % Trk = osiris_tracking:init(undefined, #{}),
+    S1 = lists:foldl(fun(_, Acc0) ->
+                              % {Acc, _} = osiris_log:prepare(Acc0, Trk),
+                              osiris_log:write(BatchOf10, Acc0) end,
                       S0, lists:seq(1, 101)),
+    NextOffset = osiris_log:next_offset(S1),
     Segments =
         filelib:wildcard(
             filename:join(?config(dir, Config), "*.segment")),
     ?assertEqual(2, length(Segments)),
 
     OffRef = atomics:new(2, []),
-    atomics:put(OffRef, 1, 1011), %% takes a single offset tracking data into account
+    atomics:put(OffRef, 1, NextOffset), %% takes a single offset tracking data into account
     %% ensure all records can be read
     {ok, R0} =
         osiris_log:init_offset_reader(first, Conf#{offset_ref => OffRef}),
@@ -354,7 +358,7 @@ write_multi_log(Config) ->
                         Acc
                      end,
                      R0, lists:seq(1, 101)),
-    ?assertEqual(1010, osiris_log:next_offset(R1)),
+    ?assertEqual(NextOffset, osiris_log:next_offset(R1)),
     ok.
 
 tail_info_empty(Config) ->
@@ -1452,29 +1456,15 @@ seed_log(Conf, Log, EpochChunks, _Config, Trk) ->
                 {Trk, Log}, EpochChunks).
 
 write_chunk(Conf, Epoch, Now, Records, Trk0, Log0) ->
-    HasTracking = not osiris_tracking:is_empty(Trk0),
-    case osiris_log:is_open(Log0) of
-        false when HasTracking ->
-            ct:pal("writing tracking snapshot ~w", [osiris_log:next_offset(Log0)]),
-            FirstOffset = osiris_log:first_offset(Log0),
-            FirstTs = osiris_log:first_timestamp(Log0),
-            {SnapBin, Trk} = osiris_tracking:snapshot(FirstOffset, FirstTs, Trk0),
-            write_chunk(Conf, Epoch, Now, Records, Trk,
-                        osiris_log:write([SnapBin],
-                                         ?CHNK_TRK_SNAPSHOT,
-                                         Now,
-                                         <<>>,
-                                         Log0));
+    {Log1, Trk1} = osiris_log:prepare(Log0, Trk0),
+    case osiris_log:get_current_epoch(Log1) of
+        Epoch ->
+            {Trk1, osiris_log:write(Records, Now, Log1)};
         _ ->
-            case osiris_log:get_current_epoch(Log0) of
-                Epoch ->
-                    {Trk0, osiris_log:write(Records, Now, Log0)};
-                _ ->
-                    %% need to re-init as new epoch
-                    osiris_log:close(Log0),
-                    Log = osiris_log:init(Conf#{epoch => Epoch}),
-                    {Trk0, osiris_log:write(Records, Log)}
-            end
+            %% need to re-init as new epoch
+            osiris_log:close(Log1),
+            Log = osiris_log:init(Conf#{epoch => Epoch}),
+            {Trk1, osiris_log:write(Records, Log)}
     end.
 
 now_ms() ->

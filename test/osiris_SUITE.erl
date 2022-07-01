@@ -1563,8 +1563,8 @@ empty_last_segment(Config) ->
     [LastSeg | _] = lists:reverse(lists:sort(filelib:wildcard(Wc))),
 
     {ok, Fd} = file:open(LastSeg, [raw, binary, read, write]),
-    file:truncate(Fd),
-    file:close(Fd),
+    ok = file:truncate(Fd),
+    ok = file:close(Fd),
     {ok, #{leader_pid := Leader2, replica_pids := []}} =
         osiris:start_cluster(Conf1),
     timer:sleep(100),
