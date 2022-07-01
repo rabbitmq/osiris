@@ -141,6 +141,9 @@ init_recover(Config) ->
     ok = osiris_log:close(S1),
     S2 = osiris_log:init(?config(osiris_conf, Config)),
     ?assertEqual(1, osiris_log:next_offset(S2)),
+    %% validate the segment filename is recovered
+    ?assertMatch(#{file := "00000000000000000000.segment"},
+                 osiris_log:format_status(S2)),
     ok.
 
 init_recover_with_writers(Config) ->

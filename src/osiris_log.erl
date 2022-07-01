@@ -382,6 +382,11 @@
          current_epoch :: non_neg_integer(),
          tail_info = {0, empty} :: osiris:tail_info()
         }).
+% -record(segment,
+%         {
+%          current_file :: undefined | file:filename(),
+%          index_fd :: undefined | file:io_device(),
+%          fd :: undefined | file:io_device()}).
 -record(?MODULE,
         {cfg :: #cfg{},
          mode :: #read{} | #write{},
@@ -531,6 +536,7 @@ init(#{dir := Dir,
                                 tail_info = TailInfo,
                                 segment_size = {Size, NumChunks},
                                 current_epoch = Epoch},
+                     current_file = filename:basename(Filename),
                      fd = SegFd,
                      index_fd = IdxFd};
         {1, #seg_info{file = Filename,
@@ -548,6 +554,7 @@ init(#{dir := Dir,
                          #write{type = WriterType,
                                 tail_info = {0, empty},
                                 current_epoch = Epoch},
+                     current_file = filename:basename(Filename),
                      fd = SegFd,
                      index_fd = IdxFd}
     end.
@@ -1534,9 +1541,9 @@ needs_handling(_, _, _) ->
 
 -spec close(state()) -> ok.
 close(#?MODULE{cfg = #cfg{counter_id = CntId,
-                         readers_counter_fun = Fun},
-                         fd = SegFd,
-                         index_fd = IdxFd}) ->
+                          readers_counter_fun = Fun},
+               fd = SegFd,
+               index_fd = IdxFd}) ->
     close_fd(IdxFd),
     close_fd(SegFd),
     Fun(-1),
@@ -2285,7 +2292,8 @@ can_read_next_offset(#read{type = data}) ->
     true.
 
 incr_next_offset(Num, #read{next_offset = NextOffset} = Read) ->
-    Read#read{last_offset = NextOffset, next_offset = NextOffset + Num}.
+    Read#read{last_offset = NextOffset,
+              next_offset = NextOffset + Num}.
 
 make_file_name(N, Suff) ->
     lists:flatten(
@@ -2303,7 +2311,6 @@ open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
     Filename = make_file_name(NextOffset, "segment"),
     IdxFilename = make_file_name(NextOffset, "index"),
     ?DEBUG("~s: ~s : ~s", [?MODULE, ?FUNCTION_NAME, Filename]),
-    % ct:pal("~s: ~s : ~s", [?MODULE, ?FUNCTION_NAME, Filename]),
     {ok, Fd} =
         file:open(
             filename:join(Dir, Filename), ?FILE_OPTS_WRITE),
