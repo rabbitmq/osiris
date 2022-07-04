@@ -335,9 +335,7 @@ write_multi_log(Config) ->
     S0 = osiris_log:init(Conf#{max_segment_size_bytes => 10 * 1000 * 1000}),
     Data = crypto:strong_rand_bytes(10000),
     BatchOf10 = [Data || _ <- lists:seq(1, 10)],
-    % Trk = osiris_tracking:init(undefined, #{}),
     S1 = lists:foldl(fun(_, Acc0) ->
-                              % {Acc, _} = osiris_log:prepare(Acc0, Trk),
                               osiris_log:write(BatchOf10, Acc0) end,
                       S0, lists:seq(1, 101)),
     NextOffset = osiris_log:next_offset(S1),
@@ -1459,7 +1457,7 @@ seed_log(Conf, Log, EpochChunks, _Config, Trk) ->
                 {Trk, Log}, EpochChunks).
 
 write_chunk(Conf, Epoch, Now, Records, Trk0, Log0) ->
-    {Log1, Trk1} = osiris_log:prepare(Log0, Trk0),
+    {Log1, Trk1} = osiris_log:evaluate_tracking_snapshot(Log0, Trk0),
     case osiris_log:get_current_epoch(Log1) of
         Epoch ->
             {Trk1, osiris_log:write(Records, Now, Log1)};
