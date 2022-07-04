@@ -2292,14 +2292,14 @@ open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
     Filename = make_file_name(NextOffset, "segment"),
     IdxFilename = make_file_name(NextOffset, "index"),
     ?DEBUG("~s: ~s : ~s", [?MODULE, ?FUNCTION_NAME, Filename]),
-    {ok, Fd} =
-        file:open(
-            filename:join(Dir, Filename), ?FILE_OPTS_WRITE),
-    ok = file:write(Fd, ?LOG_HEADER),
     {ok, IdxFd} =
         file:open(
             filename:join(Dir, IdxFilename), ?FILE_OPTS_WRITE),
     ok = file:write(IdxFd, ?IDX_HEADER),
+    {ok, Fd} =
+        file:open(
+            filename:join(Dir, Filename), ?FILE_OPTS_WRITE),
+    ok = file:write(Fd, ?LOG_HEADER),
     %% we always move to the end of the file
     {ok, _} = file:position(Fd, eof),
     {ok, _} = file:position(IdxFd, eof),
