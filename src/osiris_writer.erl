@@ -216,7 +216,7 @@ handle_batch(Commands,
     case catch lists:foldr(fun handle_command/2,
                            {State0, [], [], #{}, Trk0, []}, Commands) of
         {#?MODULE{log = Log0} = State1, Entries, Replies, Corrs, Trk1, Dupes} ->
-            {Log1, Trk2} = osiris_log:prepare(Log0, Trk1),
+            {Log1, Trk2} = osiris_log:evaluate_tracking_snapshot(Log0, Trk1),
             Now = erlang:system_time(millisecond),
             ThisBatchOffs = osiris_log:next_offset(Log1),
             {TrkData, Trk} = osiris_tracking:flush(Trk2),

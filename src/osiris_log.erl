@@ -22,7 +22,7 @@
          first_offset/1,
          first_timestamp/1,
          tail_info/1,
-         prepare/2,
+         evaluate_tracking_snapshot/2,
          send_file/2,
          send_file/3,
          init_data_reader/2,
@@ -673,18 +673,6 @@ write(Entries, Now, #?MODULE{mode = #write{}} = State)
             iodata(),
             state()) ->
                state().
-% write([_ | _] = Entries,
-%       ChType,
-%       Now,
-%       Trailer,
-%       #?MODULE{cfg = #cfg{},
-%                fd = undefined,
-%                mode = #write{}} =
-%           State0) ->
-%     %% we need to open a new segment here to ensure tracking chunk
-%     %% is made before the one that triggers the new segment to be created
-%     trigger_retention_eval(
-%       write(Entries, ChType, Now, Trailer, open_new_segment(State0)));
 write([_ | _] = Entries,
       ChType,
       Now,
@@ -727,12 +715,6 @@ accept_chunk([<<?MAGIC:4/unsigned,
     %% assertion
     % true = iolist_size(DataAndTrailer) == (DataSize + TrailerSize),
     write_chunk(Chunk, ChType, Timestamp, Epoch, NumRecords, State0);
-        % full ->
-        %     trigger_retention_eval(
-        %       accept_chunk(Chunk, open_new_segment(State0)));
-        % State ->
-        %     State
-    % end;
 accept_chunk(Binary, State) when is_binary(Binary) ->
     accept_chunk([Binary], State);
 accept_chunk([<<?MAGIC:4/unsigned,
@@ -771,24 +753,23 @@ tail_info(#?MODULE{mode = #write{tail_info = TailInfo}}) ->
 
 %% called by the writer before every write to evalaute segment size
 %% and write a tracking snapshot
--spec prepare(state(), osiris_tracking:state()) ->
+-spec evaluate_tracking_snapshot(state(), osiris_tracking:state()) ->
     {state(), osiris_tracking:state()}.
-prepare(#?MODULE{mode = #write{type = writer}} = State0, Trk0) ->
+evaluate_tracking_snapshot(#?MODULE{mode = #write{type = writer}} = State0, Trk0) ->
     IsEmpty = osiris_tracking:is_empty(Trk0),
     case max_segment_size_reached(State0) of
         true when not IsEmpty ->
-            State1 = open_new_segment(State0),
+            State1 = State0,
             %% write a new tracking snapshot
             Now = erlang:system_time(millisecond),
             FstOffs = first_offset(State1),
             FstTs = first_timestamp(State1),
             {SnapBin, Trk1} = osiris_tracking:snapshot(FstOffs, FstTs, Trk0),
-            {trigger_retention_eval(
-               write([SnapBin],
-                     ?CHNK_TRK_SNAPSHOT,
-                     Now,
-                     <<>>,
-                     State1)), Trk1};
+            {write([SnapBin],
+                   ?CHNK_TRK_SNAPSHOT,
+                   Now,
+                   <<>>,
+                   State1), Trk1};
         _ ->
             {State0, Trk0}
     end.
