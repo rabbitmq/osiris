@@ -70,6 +70,9 @@ all_tests() ->
      accept_chunk_in_other_epoch,
      init_epoch_offsets_discards_all_when_no_overlap_in_same_epoch,
      overview,
+     init_corrupted_log,
+     init_only_one_corrupted_segment,
+     init_empty_last_files,
      evaluate_retention_max_bytes,
      evaluate_retention_max_age,
      offset_tracking,
@@ -138,6 +141,9 @@ init_recover(Config) ->
     ok = osiris_log:close(S1),
     S2 = osiris_log:init(?config(osiris_conf, Config)),
     ?assertEqual(1, osiris_log:next_offset(S2)),
+    %% validate the segment filename is recovered
+    ?assertMatch(#{file := "00000000000000000000.segment"},
+                 osiris_log:format_status(S2)),
     ok.
 
 init_recover_with_writers(Config) ->
@@ -329,15 +335,17 @@ write_multi_log(Config) ->
     S0 = osiris_log:init(Conf#{max_segment_size_bytes => 10 * 1000 * 1000}),
     Data = crypto:strong_rand_bytes(10000),
     BatchOf10 = [Data || _ <- lists:seq(1, 10)],
-    _S1 = lists:foldl(fun(_, Acc) -> osiris_log:write(BatchOf10, Acc) end,
+    S1 = lists:foldl(fun(_, Acc0) ->
+                              osiris_log:write(BatchOf10, Acc0) end,
                       S0, lists:seq(1, 101)),
+    NextOffset = osiris_log:next_offset(S1),
     Segments =
         filelib:wildcard(
             filename:join(?config(dir, Config), "*.segment")),
     ?assertEqual(2, length(Segments)),
 
     OffRef = atomics:new(2, []),
-    atomics:put(OffRef, 1, 1011), %% takes a single offset tracking data into account
+    atomics:put(OffRef, 1, NextOffset), %% takes a single offset tracking data into account
     %% ensure all records can be read
     {ok, R0} =
         osiris_log:init_offset_reader(first, Conf#{offset_ref => OffRef}),
@@ -351,7 +359,7 @@ write_multi_log(Config) ->
                         Acc
                      end,
                      R0, lists:seq(1, 101)),
-    ?assertEqual(1010, osiris_log:next_offset(R1)),
+    ?assertEqual(NextOffset, osiris_log:next_offset(R1)),
     ok.
 
 tail_info_empty(Config) ->
@@ -1032,6 +1040,177 @@ overview(Config) ->
     {empty, []} = osiris_log:overview("/tmp/blahblah"),
     ok.
 
+init_corrupted_log(Config) ->
+    % this test intentionally corrupts the log in a way we observed
+    % when a working system was suddenly powered off; since index
+    % is written first, it contains an entry for a chunk that was not
+    % written; additionally the index contains some trailing zeros
+    % index:
+    % | index header
+    % | chunk0 record
+    % | chunk1 record
+    % | chunk2 record
+    % | chunk3 record
+    % | 000000000000000000000000000000000000000000000000000000000000
+    % segment:
+    % | segment header
+    % | {0, <<one>>}
+    % | {1, <<two>>}
+    % | {2, <<three   (this chunk is corrupted)
+    % | eof           (chunk3 is missing)
+    EpochChunks = [{1, [<<"one">>]}, {1, [<<"two">>]}],
+    LDir = ?config(leader_dir, Config),
+    Log0 = seed_log(LDir, EpochChunks, Config),
+    SegPath = filename:join(LDir, "00000000000000000000.segment"),
+    IdxPath = filename:join(LDir, "00000000000000000000.index"),
+    % record the segment and index sizes before corrupting the log
+    ValidSegSize = filelib:file_size(SegPath),
+    ValidIdxSize = filelib:file_size(IdxPath),
+    {{0, 1}, _} = osiris_log:overview(LDir),
+
+    % add one more chunk and truncate it from the segment but leave in the index)
+    Log1 = osiris_log:write([<<"three">>], Log0),
+    SegSizeWith3Chunks = filelib:file_size(SegPath),
+    Log2 = osiris_log:write([<<"four">>], Log1),
+    osiris_log:close(Log2),
+    {ok, SegFd} = file:open(SegPath, [raw, binary, read, write]),
+    % truncate the file so that chunk <<four>> is missing and <<three>> is corrupted
+    {ok, _} = file:position(SegFd, SegSizeWith3Chunks - 3),
+    _ = file:truncate(SegFd),
+    _ = file:close(SegFd),
+    % append 60 zeros to the index file
+    {ok, IdxFd} =
+    _ = file:open(IdxPath, [raw, binary, read, write]),
+    {ok, _} = file:position(IdxFd, eof),
+    ok = file:write(IdxFd, <<0:480>>),
+    ok = file:close(IdxFd),
+
+    % the overview should work even before init
+    {Range, _} = osiris_log:overview(LDir),
+    ?assertEqual({0, 1}, Range),
+
+    Conf0 = ?config(osiris_conf, Config),
+    Conf = Conf0#{dir => LDir},
+    _ = osiris_log:init(Conf),
+    set_offset_ref(Conf, 2),
+
+    % after osiris_log:init, the sizes of the index and segment files
+    % should be as they were before they got corrrupted
+    ?assertEqual(ValidIdxSize, filelib:file_size(IdxPath)),
+    ?assertEqual(ValidSegSize, filelib:file_size(SegPath)),
+
+    % the range should not include the corrupted chunk
+    {Range, _} = osiris_log:overview(LDir),
+    ?assertEqual({0, 1}, Range),
+
+    % a consumer asking for the last chunk, should receive "two"
+    {ok, R0} = osiris_log:init_offset_reader(last, Conf),
+    {ReadChunk, R1} = osiris_log:read_chunk_parsed(R0),
+    ?assertMatch([{1, <<"two">>}], ReadChunk),
+    osiris_log:close(R1),
+    ok.
+
+init_only_one_corrupted_segment(Config) ->
+    Data = crypto:strong_rand_bytes(1500),
+    EpochChunks =
+    [begin {1, [Data || _ <- lists:seq(1, 50)]} end
+     || _ <- lists:seq(1, 20)],
+    LDir = ?config(leader_dir, Config),
+    Log = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(Log),
+
+    % we should have 2 segments for this test
+    IdxFiles =
+    filelib:wildcard(
+      filename:join(LDir, "*.index")),
+    ?assertEqual(2, length(IdxFiles)),
+    SegFiles =
+    filelib:wildcard(
+      filename:join(LDir, "*.segment")),
+    ?assertEqual(2, length(SegFiles)),
+
+    % delete the first segment
+    ok = file:delete(hd(IdxFiles)),
+    ok = file:delete(hd(SegFiles)),
+
+    % truncate the last segment
+    LastIdxFile = lists:last(IdxFiles),
+    LastSegFile = lists:last(SegFiles),
+    {ok, IdxFd} = file:open(LastIdxFile, [raw, binary, write]),
+    ok = file:close(IdxFd),
+    {ok, SegFd} = file:open(LastSegFile, [raw, binary, write]),
+    ok = file:close(SegFd),
+
+    % init
+    Conf0 = ?config(osiris_conf, Config),
+    Conf = Conf0#{dir => LDir},
+    _ = osiris_log:init(Conf),
+    set_offset_ref(Conf, 1000),
+
+    % there should be one segment, with nothing but headers
+    % and its name should be the same as it was before
+    % (the file is used to store the last known chunk ID)
+    ?assertEqual(?LOG_HEADER_SIZE, filelib:file_size(LastSegFile)),
+    ?assertEqual(?IDX_HEADER_SIZE, filelib:file_size(LastIdxFile)),
+    {ok, IdxFd2} = file:open(LastIdxFile, [read, raw, binary]),
+    {ok, ?IDX_HEADER} = file:read(IdxFd2, ?IDX_HEADER_SIZE),
+    ok = file:close(IdxFd2),
+    {ok, SegFd2} = file:open(LastSegFile, [read, raw, binary]),
+    {ok, ?LOG_HEADER} = file:read(SegFd2, ?LOG_HEADER_SIZE),
+    ok = file:close(SegFd2),
+    ok.
+
+init_empty_last_files(Config) ->
+    % this test intentionally corrupts the log by truncating
+    % both the segment and the index files to zero bytes
+    Data = crypto:strong_rand_bytes(1500),
+    EpochChunks =
+    [begin {1, [Data || _ <- lists:seq(1, 50)]} end
+     || _ <- lists:seq(1, 20)],
+    LDir = ?config(leader_dir, Config),
+    Log = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(Log),
+
+    % we should have 2 segments for this test
+    IdxFiles =
+    filelib:wildcard(
+      filename:join(LDir, "*.index")),
+    ?assertEqual(2, length(IdxFiles)),
+    SegFiles =
+    filelib:wildcard(
+      filename:join(LDir, "*.segment")),
+    ?assertEqual(2, length(SegFiles)),
+
+    % truncate both files (by opening with "write" but without "read")
+    LastIdxFile = lists:last(IdxFiles),
+    LastSegFile = lists:last(SegFiles),
+    {ok, IdxFd} = file:open(LastIdxFile, [raw, binary, write]),
+    _ =file:close(IdxFd),
+    {ok, SegFd} = file:open(LastSegFile, [raw, binary, write]),
+    _ = file:close(SegFd),
+
+    ?assertEqual({{0,699},[{1,650}]}, osiris_log:overview(LDir)),
+
+    Conf0 = ?config(osiris_conf, Config),
+    Conf = Conf0#{dir => LDir},
+    _ = osiris_log:init(Conf),
+    set_offset_ref(Conf, 2),
+
+    % the last segment and index files should no longer exist
+    RecoveredIdxFiles =
+        lists:map(fun filename:basename/1,
+                  filelib:wildcard(
+                    filename:join(LDir, "*.index"))),
+    ?assertEqual(["00000000000000000000.index"],
+                 RecoveredIdxFiles, "an empty index file was not deleted"),
+    RecoveredSegFiles =
+        lists:map(fun filename:basename/1,
+                  filelib:wildcard(
+                    filename:join(LDir, "*.segment"))),
+    ?assertEqual(["00000000000000000000.segment"],
+                 RecoveredSegFiles, "an empty segment file was not deleted"),
+    ok.
+
 evaluate_retention_max_bytes(Config) ->
     Data = crypto:strong_rand_bytes(1500),
     EpochChunks =
@@ -1278,29 +1457,15 @@ seed_log(Conf, Log, EpochChunks, _Config, Trk) ->
                 {Trk, Log}, EpochChunks).
 
 write_chunk(Conf, Epoch, Now, Records, Trk0, Log0) ->
-    HasTracking = not osiris_tracking:is_empty(Trk0),
-    case osiris_log:is_open(Log0) of
-        false when HasTracking ->
-            ct:pal("writing tracking snapshot ~w", [osiris_log:next_offset(Log0)]),
-            FirstOffset = osiris_log:first_offset(Log0),
-            FirstTs = osiris_log:first_timestamp(Log0),
-            {SnapBin, Trk} = osiris_tracking:snapshot(FirstOffset, FirstTs, Trk0),
-            write_chunk(Conf, Epoch, Now, Records, Trk,
-                        osiris_log:write([SnapBin],
-                                         ?CHNK_TRK_SNAPSHOT,
-                                         Now,
-                                         <<>>,
-                                         Log0));
+    {Log1, Trk1} = osiris_log:evaluate_tracking_snapshot(Log0, Trk0),
+    case osiris_log:get_current_epoch(Log1) of
+        Epoch ->
+            {Trk1, osiris_log:write(Records, Now, Log1)};
         _ ->
-            case osiris_log:get_current_epoch(Log0) of
-                Epoch ->
-                    {Trk0, osiris_log:write(Records, Now, Log0)};
-                _ ->
-                    %% need to re-init as new epoch
-                    osiris_log:close(Log0),
-                    Log = osiris_log:init(Conf#{epoch => Epoch}),
-                    {Trk0, osiris_log:write(Records, Log)}
-            end
+            %% need to re-init as new epoch
+            osiris_log:close(Log1),
+            Log = osiris_log:init(Conf#{epoch => Epoch}),
+            {Trk1, osiris_log:write(Records, Log)}
     end.
 
 now_ms() ->

@@ -35,7 +35,13 @@
 -define(MAGIC, 5).
 %% chunk format version
 -define(VERSION, 0).
+-define(IDX_VERSION, 1).
+-define(LOG_VERSION, 1).
+-define(IDX_HEADER, <<"OSII", ?IDX_VERSION:32/unsigned>>).
+-define(LOG_HEADER, <<"OSIL", ?LOG_VERSION:32/unsigned>>).
 -define(HEADER_SIZE_B, 48).
+-define(IDX_HEADER_SIZE, 8).
+-define(LOG_HEADER_SIZE, 8).
 -define(FILE_OPTS_WRITE, [raw, binary, write, read]).
 
 

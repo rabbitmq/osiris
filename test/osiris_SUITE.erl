@@ -20,6 +20,7 @@
 
 -dialyzer({no_match, start_child_node/3}).
 -dialyzer({nowarn_function, start_peer_node_25/3}).
+-dialyzer({nowarn_function, start_peer_node_pre_25/3}).
 
 %%%===================================================================
 %%% Common Test callbacks
@@ -74,7 +75,8 @@ all_tests() ->
      writers_retention,
      single_node_reader_counters,
      cluster_reader_counters,
-     combine_ips_hosts_test].
+     combine_ips_hosts_test,
+     empty_last_segment].
 
 -define(BIN_SIZE, 800).
 
@@ -1581,6 +1583,38 @@ writers_retention(Config) ->
     ?assert(map_size(Writers) < 33),
 
     %% validate there are only a single entry
+    ok.
+
+empty_last_segment(Config) ->
+    %% can happen after unclean shutdown
+    DataDir = ?config(data_dir, Config),
+    Num = 150000,
+    Name = ?config(cluster_name, Config),
+    SegSize = 20000 * 1000,
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          retention => [{max_bytes, SegSize * 3}],
+          max_segment_size_bytes => SegSize,
+          replica_nodes => []},
+    {ok, #{leader_pid := Leader, replica_pids := []} = Conf1} =
+        osiris:start_cluster(Conf0),
+    timer:sleep(500),
+    write_n(Leader, Num, 0, 1000 * 8, #{}),
+    timer:sleep(100),
+    osiris:stop_cluster(Conf1),
+    Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
+    %% one file only
+    [LastSeg | _] = lists:reverse(lists:sort(filelib:wildcard(Wc))),
+
+    {ok, Fd} = file:open(LastSeg, [raw, binary, read, write]),
+    ok = file:truncate(Fd),
+    ok = file:close(Fd),
+    {ok, #{leader_pid := Leader2, replica_pids := []}} =
+        osiris:start_cluster(Conf1),
+    timer:sleep(100),
+    ?assert(erlang:is_process_alive(Leader2)),
     ok.
 
 %% Utility

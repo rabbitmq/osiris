@@ -216,43 +216,26 @@ handle_batch(Commands,
     case catch lists:foldr(fun handle_command/2,
                            {State0, [], [], #{}, Trk0, []}, Commands) of
         {#?MODULE{log = Log0} = State1, Entries, Replies, Corrs, Trk1, Dupes} ->
+            {Log1, Trk2} = osiris_log:evaluate_tracking_snapshot(Log0, Trk1),
             Now = erlang:system_time(millisecond),
-            ThisBatchOffs = osiris_log:next_offset(Log0),
-            NeedsFlush = osiris_tracking:needs_flush(Trk1),
-            {TrkBin, Trk2} = osiris_tracking:flush(Trk1),
-            Log1 = case Entries of
-                       [] when NeedsFlush ->
-                           %% TODO: we could set a timer for explicit tracking delta
-                           %% chunks in order to writer fewer of them
-                           osiris_log:write([TrkBin],
-                                            ?CHNK_TRK_DELTA,
-                                            Now,
-                                            <<>>,
-                                            Log0);
-                       _ ->
-                           osiris_log:write(Entries,
-                                            ?CHNK_USER,
-                                            Now,
-                                            TrkBin,
-                                            Log0)
-                   end,
-            HasTracking = not osiris_tracking:is_empty(Trk2),
-            {Log, Trk} = case osiris_log:is_open(Log1) of
-                             false when HasTracking ->
-                                 %% the log was closed, i.e. full
-                                 %% now we need to write a tracking snapshot
-                                 FstOffs = osiris_log:first_offset(Log1),
-                                 FstTs = osiris_log:first_timestamp(Log1),
-                                 {SnapBin, Trk3} = osiris_tracking:snapshot(FstOffs, FstTs, Trk2),
-
-                                 {osiris_log:write([SnapBin],
-                                                   ?CHNK_TRK_SNAPSHOT,
-                                                   Now,
-                                                   <<>>,
-                                                   Log1), Trk3};
-                             _ ->
-                                 {Log1, Trk2}
-                         end,
+            ThisBatchOffs = osiris_log:next_offset(Log1),
+            {TrkData, Trk} = osiris_tracking:flush(Trk2),
+            Log = case Entries of
+                      [] when TrkData =/= [] ->
+                          %% TODO: we could set a timer for explicit tracking delta
+                          %% chunks in order to writer fewer of them
+                          osiris_log:write([TrkData],
+                                           ?CHNK_TRK_DELTA,
+                                           Now,
+                                           <<>>,
+                                           Log1);
+                      _ ->
+                          osiris_log:write(Entries,
+                                           ?CHNK_USER,
+                                           Now,
+                                           TrkData,
+                                           Log1)
+                  end,
             State2 =
                 update_pending(ThisBatchOffs, Corrs,
                                State1#?MODULE{tracking = Trk,
@@ -273,19 +256,18 @@ handle_batch(Commands,
 
             RemDupes = handle_duplicates(COffs, Dupes ++ Dupes0, Cfg),
             %% if committed offset has increased - update
-            State =
-                case COffs > COffs0 of
-                    true ->
-                        P = State2#?MODULE.pending_corrs,
-                        atomics:put(ORef, 1, COffs),
-                        counters:put(Cnt, ?C_COMMITTED_OFFSET, COffs),
-                        Pending = notify_writers(P, COffs, Cfg),
-                        State2#?MODULE{committed_offset = COffs,
-                                       duplicates = RemDupes,
-                                       pending_corrs = Pending};
-                    false ->
-                        State2#?MODULE{duplicates = RemDupes}
-                end,
+            State = case COffs > COffs0 of
+                        true ->
+                            P = State2#?MODULE.pending_corrs,
+                            atomics:put(ORef, 1, COffs),
+                            counters:put(Cnt, ?C_COMMITTED_OFFSET, COffs),
+                            Pending = notify_writers(P, COffs, Cfg),
+                            State2#?MODULE{committed_offset = COffs,
+                                           duplicates = RemDupes,
+                                           pending_corrs = Pending};
+                        false ->
+                            State2#?MODULE{duplicates = RemDupes}
+                    end,
             {ok, [garbage_collect | Replies],
              notify_offset_listeners(notify_data_listeners(State))};
         {stop, normal} ->

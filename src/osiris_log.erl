@@ -22,7 +22,7 @@
          first_offset/1,
          first_timestamp/1,
          tail_info/1,
-         is_open/1,
+         evaluate_tracking_snapshot/2,
          send_file/2,
          send_file/3,
          init_data_reader/2,
@@ -49,12 +49,6 @@
 -export([part_test/0]).
 -endif.
 
--define(IDX_VERSION, 1).
--define(LOG_VERSION, 1).
--define(IDX_HEADER, <<"OSII", ?IDX_VERSION:32/unsigned>>).
--define(LOG_HEADER, <<"OSIL", ?LOG_VERSION:32/unsigned>>).
--define(IDX_HEADER_SIZE, 8).
--define(LOG_HEADER_SIZE, 8).
 % maximum size of a segment in bytes
 -define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
 % maximum number of chunks per segment
@@ -384,16 +378,22 @@
          chunk_selector :: all | user_data}).
 -record(write,
         {type = writer :: writer | acceptor,
-         segment_size = {0, 0} :: {non_neg_integer(), non_neg_integer()},
+         segment_size = {?LOG_HEADER_SIZE, 0} :: {non_neg_integer(), non_neg_integer()},
          current_epoch :: non_neg_integer(),
          tail_info = {0, empty} :: osiris:tail_info()
         }).
+% -record(segment,
+%         {
+%          current_file :: undefined | file:filename(),
+%          index_fd :: undefined | file:io_device(),
+%          fd :: undefined | file:io_device()}).
 -record(?MODULE,
         {cfg :: #cfg{},
          mode :: #read{} | #write{},
          current_file :: undefined | file:filename(),
-         fd :: undefined | file:io_device(),
-         index_fd :: undefined | file:io_device()}).
+         index_fd :: undefined | file:io_device(),
+         fd :: undefined | file:io_device()
+        }).
 %% record chunk_info does not map exactly to an index record (field 'num' differs)
 -record(chunk_info,
         {id :: offset(),
@@ -475,6 +475,7 @@ init(#{dir := Dir,
                counter = Cnt,
                counter_id = counter_id(Config),
                first_offset_fun = FirstOffsetFun},
+    ok = maybe_fix_corrupted_files(Config),
     case first_and_last_seginfos(Config) of
         none ->
             NextOffset = case Config of
@@ -521,37 +522,139 @@ init(#{dir := Dir,
                     ?FUNCTION_ARITY,
                     element(1, TailInfo),
                     FstChId]),
-            {ok, Fd} = open(Filename, ?FILE_OPTS_WRITE),
+            {ok, SegFd} = open(Filename, ?FILE_OPTS_WRITE),
+            {ok, Size} = file:position(SegFd, Size),
+            %% maybe_fix_corrupted_files has truncated the index to the last record poiting
+            %% at a valid chunk we can now truncate the segment to size in case there is trailing data
+            ok = file:truncate(SegFd),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
-            {ok, Size} = file:position(Fd, Size),
-            ok = file:truncate(Fd),
-            {ok, _} = position_at_idx_record_boundary(IdxFd, eof),
-            {ok, Size} = file:position(Fd, Size),
-            %% truncate segment to size in case there is trailing data
+            {ok, IdxEof} = file:position(IdxFd, eof),
+            NumChunks = (IdxEof - ?IDX_HEADER_SIZE) div ?INDEX_RECORD_SIZE_B,
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
                                 tail_info = TailInfo,
+                                segment_size = {Size, NumChunks},
                                 current_epoch = Epoch},
-                     fd = Fd,
+                     current_file = filename:basename(Filename),
+                     fd = SegFd,
                      index_fd = IdxFd};
         {1, #seg_info{file = Filename,
                       index = IdxFilename,
                       last = undefined}, _} ->
             %% the empty log case
-            {ok, Fd} = open(Filename, ?FILE_OPTS_WRITE),
+            {ok, SegFd} = open(Filename, ?FILE_OPTS_WRITE),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             %% TODO: do we potentially need to truncate the segment
             %% here too?
-            {ok, _} = file:position(Fd, eof),
+            {ok, _} = file:position(SegFd, eof),
             {ok, _} = file:position(IdxFd, eof),
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
                                 tail_info = {0, empty},
                                 current_epoch = Epoch},
-                     fd = Fd,
+                     current_file = filename:basename(Filename),
+                     fd = SegFd,
                      index_fd = IdxFd}
+    end.
+
+maybe_fix_corrupted_files([]) ->
+    ok;
+maybe_fix_corrupted_files(#{dir := Dir}) ->
+    ok = maybe_fix_corrupted_files(sorted_index_files(Dir));
+maybe_fix_corrupted_files([IdxFile]) ->
+    SegFile = segment_from_index_file(IdxFile),
+    ok = truncate_invalid_idx_records(IdxFile, filelib:file_size(SegFile)),
+    case filelib:file_size(IdxFile) =< ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B of
+        true ->
+            % the only index doesn't contain a single valid record
+            % make sure it has a valid header
+            {ok, IdxFd} = file:open(IdxFile, ?FILE_OPTS_WRITE),
+            ok = file:write(IdxFd, ?IDX_HEADER),
+            ok = file:close(IdxFd);
+        false ->
+            ok
+    end,
+    case filelib:file_size(SegFile) =< ?LOG_HEADER_SIZE + ?HEADER_SIZE_B of
+        true ->
+            % the only segment doesn't contain a single valid chunk
+            % make sure it has a valid header
+            {ok, SegFd} = file:open(SegFile, ?FILE_OPTS_WRITE),
+            ok = file:write(SegFd, ?LOG_HEADER),
+            ok = file:close(SegFd);
+        false ->
+            ok
+    end;
+maybe_fix_corrupted_files(IdxFiles) ->
+    LastIdxFile = lists:last(IdxFiles),
+    LastSegFile = segment_from_index_file(LastIdxFile),
+    case filelib:file_size(LastSegFile) of
+        N when N =< ?HEADER_SIZE_B ->
+            % if the segment doesn't contain any chunks, just delete it
+            ?WARNING("deleting an empty segment file: ~p", [LastSegFile]),
+            ok = prim_file:delete(LastIdxFile),
+            ok = prim_file:delete(LastSegFile),
+            maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile]);
+        LastSegFileSize ->
+            ok = truncate_invalid_idx_records(LastIdxFile, LastSegFileSize)
+    end.
+
+non_empty_index_files([]) ->
+    [];
+non_empty_index_files(IdxFiles) ->
+    LastIdxFile = lists:last(IdxFiles),
+    case filelib:file_size(LastIdxFile) of
+        N when N =< ?IDX_HEADER_SIZE ->
+            non_empty_index_files(IdxFiles -- [LastIdxFile]);
+        _ ->
+            IdxFiles
+    end.
+
+truncate_invalid_idx_records(IdxFile, SegSize) ->
+    % TODO currently, if we have no valid index records,
+    % we truncate the segment, even though it could theoretically
+    % contain valid chunks. This should never happen in normal
+    % operations, since we write to the index first
+    % and fsync it first. However, it feels wrong, since we can
+    % reconstruct the index from a segment. We should probably
+    % add an option to perform a full segment scan and reconstruct
+    % the index for the valid chunks.
+    SegFile = segment_from_index_file(IdxFile),
+    {ok, IdxFd} = open(IdxFile, [raw, binary, write, read]),
+    {ok, Pos} = position_at_idx_record_boundary(IdxFd, eof),
+    ok = skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
+    ok = file:truncate(IdxFd),
+    file:close(IdxFd).
+
+skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos) ->
+    case Pos >= ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B of
+        true ->
+            {ok, _} = file:position(IdxFd, Pos - ?INDEX_RECORD_SIZE_B),
+            case file:read(IdxFd, ?INDEX_RECORD_SIZE_B) of
+                {ok, <<0:(?INDEX_RECORD_SIZE_B*8)>>} ->
+                    % trailing zeros found
+                    skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos - ?INDEX_RECORD_SIZE_B);
+                {ok, <<_ChunkId:64/unsigned,
+                       _Timestamp:64/signed,
+                       _Epoch:64/unsigned,
+                       ChunkPos:32/unsigned,
+                       _ChType:8/unsigned>>} ->
+                    % a non-zero index record
+                    case ChunkPos < SegSize andalso is_valid_chunk_on_disk(SegFile, ChunkPos) of
+                        true ->
+                            ok;
+                        false ->
+                            % this chunk doesn't exist in the segment or is invalid
+                            skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos - ?INDEX_RECORD_SIZE_B)
+                    end;
+                Err ->
+                    Err
+            end;
+        false ->
+            %% TODO should we validate the correctness of index/segment headers?
+            {ok, _} = file:position(IdxFd, ?IDX_HEADER_SIZE),
+            ok
     end.
 
 -spec write([osiris:data()], state()) -> state().
@@ -575,18 +678,6 @@ write([_ | _] = Entries,
       Now,
       Trailer,
       #?MODULE{cfg = #cfg{},
-               fd = undefined,
-               mode = #write{}} =
-          State0) ->
-    %% we need to open a new segment here to ensure tracking chunk
-    %% is made before the one that triggers the new segment to be created
-    trigger_retention_eval(
-      write(Entries, ChType, Now, Trailer, open_new_segment(State0)));
-write([_ | _] = Entries,
-      ChType,
-      Now,
-      Trailer,
-      #?MODULE{cfg = #cfg{},
                mode =
                    #write{current_epoch = Epoch, tail_info = {Next, _}} =
                        _Write0} =
@@ -598,7 +689,7 @@ write([_ | _] = Entries,
     {ChunkData, NumRecords} =
         make_chunk(Entries, Trailer, ChType, Now, Epoch, Next),
     write_chunk(ChunkData, ChType, Now, Epoch, NumRecords, State0);
-write([], _ChType, _Now, _Writers, State) ->
+write([], _ChType, _Now, _Trailer, #?MODULE{} = State) ->
     State.
 
 -spec accept_chunk(iodata(), state()) -> state().
@@ -623,15 +714,7 @@ accept_chunk([<<?MAGIC:4/unsigned,
     validate_crc(Next, Crc, part(DataSize, DataAndTrailer)),
     %% assertion
     % true = iolist_size(DataAndTrailer) == (DataSize + TrailerSize),
-    %% acceptors do no need to maintain writer state in memory so we pass
-    %% the empty map here instead of parsing the trailer
-    case write_chunk(Chunk, ChType, Timestamp, Epoch, NumRecords, State0) of
-        full ->
-            trigger_retention_eval(
-              accept_chunk(Chunk, open_new_segment(State0)));
-        State ->
-            State
-    end;
+    write_chunk(Chunk, ChType, Timestamp, Epoch, NumRecords, State0);
 accept_chunk(Binary, State) when is_binary(Binary) ->
     accept_chunk([Binary], State);
 accept_chunk([<<?MAGIC:4/unsigned,
@@ -668,9 +751,28 @@ first_timestamp(#?MODULE{cfg = #cfg{counter = Cnt}}) ->
 tail_info(#?MODULE{mode = #write{tail_info = TailInfo}}) ->
     TailInfo.
 
--spec is_open(state()) -> boolean().
-is_open(#?MODULE{mode = #write{}, fd = Fd}) ->
-    Fd =/= undefined.
+%% called by the writer before every write to evalaute segment size
+%% and write a tracking snapshot
+-spec evaluate_tracking_snapshot(state(), osiris_tracking:state()) ->
+    {state(), osiris_tracking:state()}.
+evaluate_tracking_snapshot(#?MODULE{mode = #write{type = writer}} = State0, Trk0) ->
+    IsEmpty = osiris_tracking:is_empty(Trk0),
+    case max_segment_size_reached(State0) of
+        true when not IsEmpty ->
+            State1 = State0,
+            %% write a new tracking snapshot
+            Now = erlang:system_time(millisecond),
+            FstOffs = first_offset(State1),
+            FstTs = first_timestamp(State1),
+            {SnapBin, Trk1} = osiris_tracking:snapshot(FstOffs, FstTs, Trk0),
+            {write([SnapBin],
+                   ?CHNK_TRK_SNAPSHOT,
+                   Now,
+                   <<>>,
+                   State1), Trk1};
+        _ ->
+            {State0, Trk0}
+    end.
 
 % -spec
 -spec init_acceptor(range(), list(), config()) ->
@@ -1022,7 +1124,7 @@ init_offset_reader0(last, #{} = Conf) ->
         IdxFiles ->
             case last_user_chunk_location(IdxFiles) of
                 not_found ->
-                    ?DEBUG("~s:~s use chunk not found, fall back to next",
+                    ?DEBUG("~s:~s user chunk not found, fall back to next",
                            [?MODULE, ?FUNCTION_NAME]),
                     %% no user chunks in stream, this is awkward, fall back to next
                     init_offset_reader0(next, Conf);
@@ -1301,6 +1403,38 @@ read_chunk_parsed(#?MODULE{mode = #read{type = RType,
             Ret
     end.
 
+is_valid_chunk_on_disk(SegFile, Pos) ->
+    %% read a chunk from a specified location in the segment
+    %% then checks the CRC
+    {ok, SegFd} = file:open(SegFile, [read, raw, binary]),
+    {ok, Pos} = file:position(SegFd, Pos),
+    IsValid = case file:read(SegFd, ?HEADER_SIZE_B) of
+        {ok,
+         <<?MAGIC:4/unsigned,
+           ?VERSION:4/unsigned,
+           _ChType:8/unsigned,
+           _NumEntries:16/unsigned,
+           _NumRecords:32/unsigned,
+           _Timestamp:64/signed,
+           _Epoch:64/unsigned,
+           _NextChId0:64/unsigned,
+           Crc:32/integer,
+           DataSize:32/unsigned,
+           _TrailerSize:32/unsigned,
+           _Reserved:32>>} ->
+            {ok, Data} = file:read(SegFd, DataSize),
+            case erlang:crc32(Data) of
+                Crc ->
+                    true;
+                _ ->
+                    false
+            end;
+        _ ->
+            false
+    end,
+    _ = file:close(SegFd),
+    IsValid.
+
 -spec send_file(gen_tcp:socket(), state()) ->
                    {ok, state()} |
                    {error, term()} |
@@ -1388,8 +1522,11 @@ needs_handling(_, _, _) ->
 
 -spec close(state()) -> ok.
 close(#?MODULE{cfg = #cfg{counter_id = CntId,
-                          readers_counter_fun = Fun}, fd = Fd}) ->
-    _ = file:close(Fd),
+                          readers_counter_fun = Fun},
+               fd = SegFd,
+               index_fd = IdxFd}) ->
+    close_fd(IdxFd),
+    close_fd(SegFd),
     Fun(-1),
     case CntId of
         undefined ->
@@ -1529,32 +1666,55 @@ first_and_last_seginfos0([FstIdxFile | Rem] = IdxFiles) ->
     end.
 
 build_seg_info(IdxFile) ->
-    %% do not nead read_ahead here
-    {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
-    case last_idx_record(IdxFd) of
+    case last_valid_idx_record(IdxFile) of
         {ok, <<_Offset:64/unsigned,
                _Timestamp:64/signed,
                _Epoch:64/unsigned,
                LastChunkPos:32/unsigned,
                _ChType:8/unsigned>>} ->
-            ok = file:close(IdxFd),
             SegFile = segment_from_index_file(IdxFile),
             build_segment_info(SegFile, LastChunkPos, IdxFile);
-        {error, einval} ->
+        undefined ->
             %% this would happen if the file only contained a header
-            ok = file:close(IdxFd),
             SegFile = segment_from_index_file(IdxFile),
             {ok, #seg_info{file = SegFile, index = IdxFile}};
         {error, _} = Err ->
-            ok = file:close(IdxFd),
             Err
     end.
 
 last_idx_record(IdxFd) ->
-    case position_at_idx_record_boundary(IdxFd, {eof, -?INDEX_RECORD_SIZE_B}) of
+    nth_last_idx_record(IdxFd, 1).
+
+nth_last_idx_record(IdxFile, N) when is_list(IdxFile) ->
+    {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
+    IdxRecord = nth_last_idx_record(IdxFd, N),
+    _ = file:close(IdxFd),
+    IdxRecord;
+nth_last_idx_record(IdxFd, N) ->
+    case position_at_idx_record_boundary(IdxFd, {eof, -?INDEX_RECORD_SIZE_B * N}) of
         {ok, _} ->
             file:read(IdxFd, ?INDEX_RECORD_SIZE_B);
         Err ->
+            Err
+    end.
+
+last_valid_idx_record(IdxFile) ->
+    {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
+    case position_at_idx_record_boundary(IdxFd, eof) of
+        {ok, Pos} ->
+            SegFile = segment_from_index_file(IdxFile),
+            SegSize = filelib:file_size(SegFile),
+            ok = skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
+            case file:position(IdxFd, {cur, -?INDEX_RECORD_SIZE_B}) of
+                {ok, _} ->
+                    IdxRecord = file:read(IdxFd, ?INDEX_RECORD_SIZE_B),
+                    _ = file:close(IdxFd),
+                    IdxRecord;
+                _ ->
+                    undefined
+            end;
+        Err ->
+            _ = file:close(IdxFd),
             Err
     end.
 
@@ -1577,8 +1737,8 @@ position_at_idx_record_boundary(IdxFd, At) ->
 build_segment_info(SegFile, LastChunkPos, IdxFile) ->
     try
         {ok, Fd} = open(SegFile, [read, binary, raw]),
-	%% we don't want to read blocks into page cache we are unlikely to need
-	_ = file:advise(Fd, 0, 0, random),
+        %% we don't want to read blocks into page cache we are unlikely to need
+        _ = file:advise(Fd, 0, 0, random),
         case file:pread(Fd, ?LOG_HEADER_SIZE, ?HEADER_SIZE_B) of
             eof ->
                 _ = file:close(Fd),
@@ -1596,44 +1756,62 @@ build_segment_info(SegFile, LastChunkPos, IdxFile) ->
                FirstSize:32/unsigned,
                FirstTSize:32/unsigned,
                _/binary>>} ->
-                {ok,
-                 <<?MAGIC:4/unsigned,
-                   ?VERSION:4/unsigned,
-                   LastChType:8/unsigned,
-                   _LastNumEntries:16/unsigned,
-                   LastNumRecords:32/unsigned,
-                   LastTs:64/signed,
-                   LastEpoch:64/unsigned,
-                   LastChId:64/unsigned,
-                   _LastCrc:32/integer,
-                   LastSize:32/unsigned,
-                   LastTSize:32/unsigned,
-                   _Reserved:32>>} = file:pread(Fd, LastChunkPos, ?HEADER_SIZE_B),
-                Size = LastChunkPos + LastSize + LastTSize + ?HEADER_SIZE_B,
-                {ok, Eof} = file:position(Fd, eof),
-                ?DEBUG_IF("~s: segment ~s has trailing data ~w ~w",
-                          [?MODULE, filename:basename(SegFile),
-                           Size, Eof], Size =/= Eof),
-                _ = file:close(Fd),
-                {ok, #seg_info{file = SegFile,
-                           index = IdxFile,
-                           size = Size,
-                           first =
-                               #chunk_info{epoch = FirstEpoch,
-                                           timestamp = FirstTs,
-                                           id = FirstChId,
-                                           num = FirstNumRecords,
-                                           type = FirstChType,
-                                           size = FirstSize + FirstTSize,
-                                           pos = ?LOG_HEADER_SIZE},
-                           last =
-                               #chunk_info{epoch = LastEpoch,
-                                           timestamp = LastTs,
-                                           id = LastChId,
-                                           num = LastNumRecords,
-                                           type = LastChType,
-                                           size = LastSize + LastTSize,
-                                           pos = LastChunkPos}}}
+                case file:pread(Fd, LastChunkPos, ?HEADER_SIZE_B) of
+                    {ok,
+                     <<?MAGIC:4/unsigned,
+                       ?VERSION:4/unsigned,
+                       LastChType:8/unsigned,
+                       _LastNumEntries:16/unsigned,
+                       LastNumRecords:32/unsigned,
+                       LastTs:64/signed,
+                       LastEpoch:64/unsigned,
+                       LastChId:64/unsigned,
+                       _LastCrc:32/integer,
+                       LastSize:32/unsigned,
+                       LastTSize:32/unsigned,
+                       _Reserved:32>>} ->
+                        Size = LastChunkPos + LastSize + LastTSize + ?HEADER_SIZE_B,
+                        {ok, Eof} = file:position(Fd, eof),
+                        ?DEBUG_IF("~s: segment ~s has trailing data ~w ~w",
+                                  [?MODULE, filename:basename(SegFile),
+                                   Size, Eof], Size =/= Eof),
+                        _ = file:close(Fd),
+                        {ok, #seg_info{file = SegFile,
+                                       index = IdxFile,
+                                       size = Size,
+                                       first =
+                                       #chunk_info{epoch = FirstEpoch,
+                                                   timestamp = FirstTs,
+                                                   id = FirstChId,
+                                                   num = FirstNumRecords,
+                                                   type = FirstChType,
+                                                   size = FirstSize + FirstTSize,
+                                                   pos = ?LOG_HEADER_SIZE},
+                                       last =
+                                       #chunk_info{epoch = LastEpoch,
+                                                   timestamp = LastTs,
+                                                   id = LastChId,
+                                                   num = LastNumRecords,
+                                                   type = LastChType,
+                                                   size = LastSize + LastTSize,
+                                                   pos = LastChunkPos}}};
+                    _ ->
+                        % last chunk is corrupted - try the previous one
+                        _ = file:close(Fd),
+                        {ok, <<_Offset:64/unsigned,
+                               _Timestamp:64/signed,
+                               _Epoch:64/unsigned,
+                               PreviousChunkPos:32/unsigned,
+                               _ChType:8/unsigned>>} = nth_last_idx_record(IdxFile, 2),
+                        case PreviousChunkPos == LastChunkPos of
+                            false ->
+                                build_segment_info(SegFile, PreviousChunkPos, IdxFile);
+                            true ->
+                                % avoid an infinite loop if multiple chunks are corrupted
+                                ?ERROR("Multiple corrupted chunks in segment file ~p", [SegFile]),
+                                exit({corrupted_segment, {segment_file, SegFile}})
+                        end
+                end
         end
     catch
         missing_file ->
@@ -1770,7 +1948,8 @@ file_size(Path) ->
 last_epoch_offsets([IdxFile]) ->
     Fd = open_index_read(IdxFile),
     _ = file:advise(Fd, 0, 0, sequential),
-    case last_epoch_offset(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd, undefined) of
+    Record = file:read(Fd, ?INDEX_RECORD_SIZE_B),
+    case last_epoch_offset(Record, Fd, undefined) of
         undefined ->
             [];
         {LastE, LastO, Res} ->
@@ -1790,6 +1969,7 @@ last_epoch_offsets([FstIdxFile | _]  = IdxFiles) ->
                        _FstChunkPos:32/unsigned,
                        _FstChType:8/unsigned>>} = first_idx_record(FstFd),
                 ok = file:close(FstFd),
+                NonEmptyIdxFiles = non_empty_index_files(IdxFiles),
                 {LastE, LastO, Res} =
                     lists:foldl(
                       fun(IdxFile, {E, _, EOs} = Acc) ->
@@ -1798,7 +1978,7 @@ last_epoch_offsets([FstIdxFile | _]  = IdxFiles) ->
                                      _Timestamp:64/signed,
                                      Epoch:64/unsigned,
                                      _LastChunkPos:32/unsigned,
-                                     _ChType:8/unsigned>>} = last_idx_record(Fd),
+                                     _ChType:8/unsigned>>} = last_valid_idx_record(IdxFile),
                               case Epoch > E of
                                   true ->
                                       %% we need to scan as the last index record
@@ -1812,7 +1992,7 @@ last_epoch_offsets([FstIdxFile | _]  = IdxFiles) ->
                                       ok = file:close(Fd),
                                       {Epoch, Offset, EOs}
                               end
-                      end, {FstE, FstO, []}, IdxFiles),
+                      end, {FstE, FstO, []}, NonEmptyIdxFiles),
                 lists:reverse([{LastE, LastO} | Res])
         end,
     {Time, Result} = timer:tc(F),
@@ -1852,7 +2032,11 @@ last_epoch_offset({ok,
                   Fd, {CurEpoch, LastOffs, Acc})
   when Epoch > CurEpoch ->
     last_epoch_offset(file:read(Fd, ?INDEX_RECORD_SIZE_B), Fd,
-                      {Epoch, O, [{CurEpoch, LastOffs} | Acc]}).
+                      {Epoch, O, [{CurEpoch, LastOffs} | Acc]});
+last_epoch_offset({ok, _}, Fd, Acc) ->
+    %% trailing data in the index file - ignore
+    ok = file:close(Fd),
+    Acc.
 
 
 segment_from_index_file(IdxFile) when is_list(IdxFile) ->
@@ -1899,69 +2083,58 @@ make_chunk(Blobs, TData, ChType, Timestamp, Epoch, Next) ->
       EData, TData],
      NumRecords}.
 
-write_chunk(_Chunk,
-            _ChType,
-            _Timestamp,
-            _Epoch,
-            _NumRecords,
-            #?MODULE{fd = undefined} = _State) ->
-    full;
 write_chunk(Chunk,
             ChType,
             Timestamp,
             Epoch,
             NumRecords,
-            #?MODULE{cfg = #cfg{counter = CntRef} = Cfg,
+            #?MODULE{cfg = #cfg{counter = CntRef},
                      fd = Fd,
                      index_fd = IdxFd,
                      mode =
                          #write{segment_size = {SegSizeBytes, SegSizeChunks},
-                                % writers = Writers0,
                                 tail_info = {Next, _}} =
                              Write} =
                 State) ->
-    NextOffset = Next + NumRecords,
-    Size = iolist_size(Chunk),
-    {ok, Cur} = file:position(Fd, cur),
-    ok = file:write(Fd, Chunk),
-
-    ok =
-        file:write(IdxFd,
-                   <<Next:64/unsigned,
-                     Timestamp:64/signed,
-                     Epoch:64/unsigned,
-                     Cur:32/unsigned,
-                     ChType:8/unsigned>>),
-    %% update counters
-    counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
-    counters:add(CntRef, ?C_CHUNKS, 1),
-    case max_segment_size_reached(Fd, SegSizeChunks, Cfg) of
+    case max_segment_size_reached(State) of
         true ->
-            %% close the current file
-            ok = file:close(Fd),
-            ok = file:close(IdxFd),
-            State#?MODULE{fd = undefined,
-                          index_fd = undefined,
-                          mode = Write#write{tail_info =
-                                                 {NextOffset,
-                                                  {Epoch, Next, Timestamp}},
-                                             segment_size = {0, 0}}};
+            trigger_retention_eval(
+              write_chunk(Chunk,
+                          ChType,
+                          Timestamp,
+                          Epoch,
+                          NumRecords,
+                          open_new_segment(State)));
         false ->
+            NextOffset = Next + NumRecords,
+            Size = iolist_size(Chunk),
+            {ok, Cur} = file:position(Fd, cur),
+            ok = file:write(Fd, Chunk),
+
+            ok = file:write(IdxFd,
+                            <<Next:64/unsigned,
+                              Timestamp:64/signed,
+                              Epoch:64/unsigned,
+                              Cur:32/unsigned,
+                              ChType:8/unsigned>>),
+            %% update counters
+            counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
+            counters:add(CntRef, ?C_CHUNKS, 1),
             State#?MODULE{mode =
-                              Write#write{tail_info =
-                                              {NextOffset,
-                                               {Epoch, Next, Timestamp}},
-                                          segment_size = {SegSizeBytes + Size,
-                                                          SegSizeChunks + 1}}}
+                          Write#write{tail_info =
+                                      {NextOffset,
+                                       {Epoch, Next, Timestamp}},
+                                      segment_size = {SegSizeBytes + Size,
+                                                      SegSizeChunks + 1}}}
     end.
 
-max_segment_size_reached(SegFd, CurrentSizeChunks,
-            #cfg{max_segment_size_bytes = MaxSizeBytes,
-                 max_segment_size_chunks = MaxSizeChunks}) ->
-    {ok, CurrentSizeBytes} = file:position(SegFd, cur),
+max_segment_size_reached(
+  #?MODULE{mode = #write{segment_size = {CurrentSizeBytes,
+                                         CurrentSizeChunks}},
+           cfg = #cfg{max_segment_size_bytes = MaxSizeBytes,
+                      max_segment_size_chunks = MaxSizeChunks}}) ->
     CurrentSizeBytes >= MaxSizeBytes orelse
-    CurrentSizeChunks >= MaxSizeChunks - 1.
-
+    CurrentSizeChunks >= MaxSizeChunks.
 
 setopts(tcp, Sock, Opts) ->
     ok = inet:setopts(Sock, Opts);
@@ -2031,7 +2204,8 @@ offset_range_from_idx_files([IdxFile]) ->
                    last = Last}} = build_seg_info(IdxFile),
     offset_range_from_chunk_range({First, Last});
 offset_range_from_idx_files(IdxFiles) when is_list(IdxFiles) ->
-    {_, FstSI, LstSI} = first_and_last_seginfos0(IdxFiles),
+    NonEmptyIdxFiles = non_empty_index_files(IdxFiles),
+    {_, FstSI, LstSI} = first_and_last_seginfos0(NonEmptyIdxFiles),
     ChunkRange = chunk_range_from_segment_infos([FstSI, LstSI]),
     offset_range_from_chunk_range(ChunkRange).
 
@@ -2099,7 +2273,8 @@ can_read_next_offset(#read{type = data}) ->
     true.
 
 incr_next_offset(Num, #read{next_offset = NextOffset} = Read) ->
-    Read#read{last_offset = NextOffset, next_offset = NextOffset + Num}.
+    Read#read{last_offset = NextOffset,
+              next_offset = NextOffset + Num}.
 
 make_file_name(N, Suff) ->
     lists:flatten(
@@ -2107,22 +2282,24 @@ make_file_name(N, Suff) ->
 
 open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
                                      counter = Cnt},
-                          fd = undefined,
-                          index_fd = undefined,
+                          fd = OldFd,
+                          index_fd = OldIdxFd,
                           mode = #write{type = _WriterType,
-                                        tail_info = {NextOffset, _}}} =
+                                        tail_info = {NextOffset, _}} = Write} =
                  State0) ->
+    _ = close_fd(OldFd),
+    _ = close_fd(OldIdxFd),
     Filename = make_file_name(NextOffset, "segment"),
     IdxFilename = make_file_name(NextOffset, "index"),
     ?DEBUG("~s: ~s : ~s", [?MODULE, ?FUNCTION_NAME, Filename]),
-    {ok, Fd} =
-        file:open(
-            filename:join(Dir, Filename), ?FILE_OPTS_WRITE),
-    ok = file:write(Fd, ?LOG_HEADER),
     {ok, IdxFd} =
         file:open(
             filename:join(Dir, IdxFilename), ?FILE_OPTS_WRITE),
     ok = file:write(IdxFd, ?IDX_HEADER),
+    {ok, Fd} =
+        file:open(
+            filename:join(Dir, Filename), ?FILE_OPTS_WRITE),
+    ok = file:write(Fd, ?LOG_HEADER),
     %% we always move to the end of the file
     {ok, _} = file:position(Fd, eof),
     {ok, _} = file:position(IdxFd, eof),
@@ -2130,7 +2307,9 @@ open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
 
     State0#?MODULE{current_file = Filename,
                    fd = Fd,
-                   index_fd = IdxFd}.
+                   %% reset segment_size counter
+                   index_fd = IdxFd,
+                   mode = Write#write{segment_size = {?LOG_HEADER_SIZE, 0}}}.
 
 open_index_read(File) ->
     {ok, Fd} = open(File, [read, raw, binary, read_ahead]),
@@ -2528,6 +2707,11 @@ timestamp_idx_file_search0(Ts, [IdxFile | Older], Prev) ->
             {scan, IdxFile}
     end.
 
+close_fd(undefined) ->
+    ok;
+close_fd(Fd) ->
+    _ = file:close(Fd),
+    ok.
 
 -ifdef(TEST).
 
