@@ -12,7 +12,7 @@
 -include("osiris.hrl").
 
 -define(DEF_SND_BUF, 146988 * 10).
-%% replica reader, spawned remoted by replica process, connects back to
+%% replica reader, spawned remotely by replica process, connects back to
 %% configured host/port, reads entries from master and uses file:sendfile to
 %% replicate read records
 

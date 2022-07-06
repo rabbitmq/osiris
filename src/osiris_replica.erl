@@ -26,8 +26,9 @@
 -define(DEBUG_(Name, Str, Args),
              ?DEBUG("~s [~s:~s/~b] " Str,
                   [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
-%% osiris replica, spaws remote reader, TCP listener
-%% replicates and confirms latest offset back to primary
+%% osiris replica, starts TCP listener ("server side" of the link),
+%% spawns remote reader, TCP listener replicates and
+%% confirms latest offset back to primary
 
 %% API functions
 -export([start/2,
@@ -232,17 +233,17 @@ init(#{name := Name,
                                   connection_token => Token},
             RRPid = osiris_replica_reader:start(Node, ReplicaReaderConf),
             true = link(RRPid),
-            GcInterval = application:get_env(osiris,
+            GcInterval0 = application:get_env(osiris,
                                              replica_forced_gc_default_interval,
                                              4999),
 
-            case is_integer(GcInterval) of
-                true ->
-                    _ = erlang:send_after(GcInterval, self(), force_gc),
-                    ok;
-                false ->
-                    ok
-            end,
+            GcInterval1 = case is_integer(GcInterval0) of
+                              true ->
+                                  _ = erlang:send_after(GcInterval0, self(), force_gc),
+                                  GcInterval0;
+                              false ->
+                                  infinity
+                          end,
             counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
             EvtFmt = maps:get(event_formatter, Config, undefined),
             {ok,
@@ -253,7 +254,7 @@ init(#{name := Name,
                            replica_reader_pid = RRPid,
                            directory = Dir,
                            port = Port,
-                           gc_interval = GcInterval,
+                           gc_interval = GcInterval1,
                            reference = ExtRef,
                            offset_ref = ORef,
                            event_formatter = EvtFmt,
