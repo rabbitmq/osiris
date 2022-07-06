@@ -26,8 +26,9 @@
 -define(DEBUG_(Name, Str, Args),
              ?DEBUG("~s [~s:~s/~b] " Str,
                   [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
-%% osiris replica, spaws remote reader, TCP listener
-%% replicates and confirms latest offset back to primary
+%% osiris replica, starts TCP listener ("server side" of the link),
+%% spawns remote reader, TCP listener replicates and
+%% confirms latest offset back to primary
 
 %% API functions
 -export([start/2,
@@ -55,7 +56,7 @@
          port :: non_neg_integer(),
          transport :: osiris_log:transport(),
          socket :: undefined | gen_tcp:socket() | ssl:sslsocket(),
-         gc_interval :: non_neg_integer(),
+         gc_interval :: infinity | non_neg_integer(),
          reference :: term(),
          offset_ref :: atomics:atomics_ref(),
          event_formatter :: undefined | mfa(),
@@ -215,11 +216,10 @@ init(#{name := Name,
 
             Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
             ?DEBUG_(Name, "replica resolved host endpoints: ~w",
-                   [IpsHosts]),
-            RecBuf = application:get_env(osiris, replica_recbuf, ?DEF_REC_BUF),
+                    [IpsHosts]),
             ?DEBUG_(Name, "replica using '~s' transport for replication",
-                   [Transport]),
-            {Port, LSock} = open_listener(Transport, RecBuf, {Min, Max}, 0),
+                    [Transport]),
+            {Port, LSock} = open_listener(Transport, {Min, Max}, 0),
             Acceptor = spawn_link(fun() -> accept(Name, Transport, LSock, Self) end),
 
             ReplicaReaderConf = #{hosts => IpsHosts,
@@ -233,8 +233,17 @@ init(#{name := Name,
                                   connection_token => Token},
             RRPid = osiris_replica_reader:start(Node, ReplicaReaderConf),
             true = link(RRPid),
-            Interval = maps:get(replica_gc_interval, Config, 5000),
-            erlang:send_after(Interval, self(), force_gc),
+            GcInterval0 = application:get_env(osiris,
+                                             replica_forced_gc_default_interval,
+                                             4999),
+
+            GcInterval1 = case is_integer(GcInterval0) of
+                              true ->
+                                  _ = erlang:send_after(GcInterval0, self(), force_gc),
+                                  GcInterval0;
+                              false ->
+                                  infinity
+                          end,
             counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
             EvtFmt = maps:get(event_formatter, Config, undefined),
             {ok,
@@ -245,7 +254,7 @@ init(#{name := Name,
                            replica_reader_pid = RRPid,
                            directory = Dir,
                            port = Port,
-                           gc_interval = Interval,
+                           gc_interval = GcInterval1,
                            reference = ExtRef,
                            offset_ref = ORef,
                            event_formatter = EvtFmt,
@@ -267,16 +276,17 @@ combine_ips_hosts(ssl, IPs, HostName, HostNameFromHost) when
 combine_ips_hosts(ssl, IPs, HostName, _HostNameFromHost) ->
     lists:append([HostName], IPs).
 
-open_listener(_Transport, _RcvBuf, Range, 100) ->
+open_listener(_Transport, Range, 100) ->
     throw({stop, {no_available_ports_in_range, Range}});
-open_listener(Transport, RcvBuf, {Min, Max} = Range, Attempts) ->
+open_listener(Transport, {Min, Max} = Range, Attempts) ->
     Offs = rand:uniform(Max - Min),
     Port = Min + Offs,
-    case listen(Transport, Port, RcvBuf) of
+    Options = listener_opts(),
+    case listen(Transport, Port, Options) of
         {ok, LSock} ->
             {Port, LSock};
         {error, eaddrinuse} ->
-            open_listener(Transport, RcvBuf, Range, Attempts + 1);
+            open_listener(Transport, Range, Attempts + 1);
         E ->
             throw({stop, E})
     end.
@@ -401,11 +411,18 @@ handle_cast(Msg, #?MODULE{cfg = #cfg{name = Name}} = State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info(force_gc,
-            #?MODULE{cfg = #cfg{gc_interval = Interval, counter = Cnt}} =
+            #?MODULE{cfg = #cfg{gc_interval = Interval,
+                                counter = Cnt}} =
                 State) ->
     garbage_collect(),
     counters:add(Cnt, ?C_FORCED_GCS, 1),
-    erlang:send_after(Interval, self(), force_gc),
+    case is_integer(Interval) of
+        true ->
+            _ = erlang:send_after(Interval, self(), force_gc),
+            ok;
+        false ->
+            ok
+    end,
     {noreply, State};
 handle_info({socket, Socket}, #?MODULE{cfg = #cfg{name = Name,
                                                   token = Token,
@@ -668,17 +685,21 @@ setopts(tcp, Socket, Options) ->
 setopts(ssl, Socket, Options) ->
     ssl:setopts(Socket, Options).
 
-listener_opts(RcvBuf) ->
+listener_opts() ->
+    RcvBuf = application:get_env(osiris, replica_recbuf, ?DEF_REC_BUF),
+    Buffer = application:get_env(osiris, replica_buffer, RcvBuf * 2),
+    KeepAlive = application:get_env(osiris, replica_keepalive, false),
     [binary,
      {reuseaddr, true},
      {backlog, 0},
      {packet, raw},
      {active, false},
-     {buffer, RcvBuf * 2},
-     {recbuf, RcvBuf}
+     {buffer, Buffer},
+     {recbuf, RcvBuf},
+     {keepalive, KeepAlive}
     ].
 
-listen(tcp, Port, RcvBuf) ->
-    gen_tcp:listen(Port, listener_opts(RcvBuf));
-listen(ssl, Port, RcvBuf) ->
-    ssl:listen(Port, listener_opts(RcvBuf)).
+listen(tcp, Port, Options) ->
+    gen_tcp:listen(Port, Options);
+listen(ssl, Port, Options) ->
+    ssl:listen(Port, Options).
