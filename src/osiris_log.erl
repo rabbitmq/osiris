@@ -1918,7 +1918,11 @@ eval_age([IdxFile | IdxFiles] = AllIdxFiles, Age) ->
             end;
         _Err ->
             AllIdxFiles
-    end.
+    end;
+eval_age([], _Age) ->
+    %% this could happen if retention is evaluated whilst
+    %% a stream is being deleted
+    [].
 
 eval_max_bytes([], _) -> [];
 eval_max_bytes(IdxFiles, MaxSize) ->
@@ -2197,8 +2201,12 @@ first_timestamp_from_index_files([IdxFile | _]) ->
             end;
         _Err ->
             0
-    end.
+    end;
+first_timestamp_from_index_files([]) ->
+    0.
 
+offset_range_from_idx_files([]) ->
+    empty;
 offset_range_from_idx_files([IdxFile]) ->
     {ok, #seg_info{first = First,
                    last = Last}} = build_seg_info(IdxFile),
