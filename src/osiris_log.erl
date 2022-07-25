@@ -1440,10 +1440,10 @@ is_valid_chunk_on_disk(SegFile, Pos) ->
                    {error, term()} |
                    {end_of_stream, state()}.
 send_file(Sock, State) ->
-    send_file(Sock, State, fun(_, _) -> ok end).
+    send_file(Sock, State, fun(_, _, _) -> ok end).
 
 -spec send_file(gen_tcp:socket(), state(),
-                fun((header_map(), non_neg_integer()) -> term())) ->
+                fun((header_map(), non_neg_integer(), offset()) -> term())) ->
                    {ok, state()} |
                    {error, term()} |
                    {end_of_stream, state()}.
@@ -1484,7 +1484,8 @@ send_file(Sock,
                     %% this avoids any data sent in the Callback to be dispatched
                     %% in it's own TCP frame
                     ok = setopts(Transport, Sock, [{nopush, true}]),
-                    _ = Callback(Header, ToSend),
+                    LastCommittedOffset = committed_offset(State),
+                    _ = Callback(Header, ToSend, LastCommittedOffset),
                     case sendfile(Transport, Fd, Sock, Pos, ToSend) of
                         ok ->
                             ok = setopts(Transport, Sock, [{nopush, false}]),
