@@ -634,14 +634,16 @@ skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos) ->
             case file:read(IdxFd, ?INDEX_RECORD_SIZE_B) of
                 {ok, <<0:(?INDEX_RECORD_SIZE_B*8)>>} ->
                     % trailing zeros found
-                    skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos - ?INDEX_RECORD_SIZE_B);
+                    skip_invalid_idx_records(IdxFd, SegFile, SegSize,
+                                             Pos - ?INDEX_RECORD_SIZE_B);
                 {ok, <<_ChunkId:64/unsigned,
                        _Timestamp:64/signed,
                        _Epoch:64/unsigned,
                        ChunkPos:32/unsigned,
                        _ChType:8/unsigned>>} ->
                     % a non-zero index record
-                    case ChunkPos < SegSize andalso is_valid_chunk_on_disk(SegFile, ChunkPos) of
+                    case ChunkPos < SegSize andalso
+                         is_valid_chunk_on_disk(SegFile, ChunkPos) of
                         true ->
                             ok;
                         false ->
@@ -1038,6 +1040,7 @@ init_offset_reader(OffsetSpec, Conf) ->
         init_offset_reader0(OffsetSpec, Conf)
     catch
         missing_file ->
+            ?INFO("MISSING FILE ~p", [Conf]),
             init_offset_reader0(OffsetSpec, Conf)
     end.
 
@@ -1139,10 +1142,10 @@ init_offset_reader0(OffsetSpec, #{} = Conf)
         [] ->
             {error, no_index_file};
         IdxFiles ->
-            Range = offset_range_from_idx_files(IdxFiles),
-            ?DEBUG("osiris_log:init_offset_reader0/2 spec ~w range ~w ",
-                   [OffsetSpec, Range]),
             try
+                Range = offset_range_from_idx_files(IdxFiles),
+                ?DEBUG("osiris_log:init_offset_reader0/2 spec ~w range ~w ",
+                       [OffsetSpec, Range]),
                 %% clamp start offset
                 StartOffset = case {OffsetSpec, Range} of
                                   {_, empty} ->
@@ -1406,34 +1409,39 @@ read_chunk_parsed(#?MODULE{mode = #read{type = RType,
 is_valid_chunk_on_disk(SegFile, Pos) ->
     %% read a chunk from a specified location in the segment
     %% then checks the CRC
-    {ok, SegFd} = file:open(SegFile, [read, raw, binary]),
-    {ok, Pos} = file:position(SegFd, Pos),
-    IsValid = case file:read(SegFd, ?HEADER_SIZE_B) of
-        {ok,
-         <<?MAGIC:4/unsigned,
-           ?VERSION:4/unsigned,
-           _ChType:8/unsigned,
-           _NumEntries:16/unsigned,
-           _NumRecords:32/unsigned,
-           _Timestamp:64/signed,
-           _Epoch:64/unsigned,
-           _NextChId0:64/unsigned,
-           Crc:32/integer,
-           DataSize:32/unsigned,
-           _TrailerSize:32/unsigned,
-           _Reserved:32>>} ->
-            {ok, Data} = file:read(SegFd, DataSize),
-            case erlang:crc32(Data) of
-                Crc ->
-                    true;
-                _ ->
-                    false
-            end;
-        _ ->
+    case open(SegFile, [read, raw, binary]) of
+        {ok, SegFd} ->
+            {ok, Pos} = file:position(SegFd, Pos),
+            IsValid = case file:read(SegFd, ?HEADER_SIZE_B) of
+                          {ok,
+                           <<?MAGIC:4/unsigned,
+                             ?VERSION:4/unsigned,
+                             _ChType:8/unsigned,
+                             _NumEntries:16/unsigned,
+                             _NumRecords:32/unsigned,
+                             _Timestamp:64/signed,
+                             _Epoch:64/unsigned,
+                             _NextChId0:64/unsigned,
+                             Crc:32/integer,
+                             DataSize:32/unsigned,
+                             _TrailerSize:32/unsigned,
+                             _Reserved:32>>} ->
+                              {ok, Data} = file:read(SegFd, DataSize),
+                              case erlang:crc32(Data) of
+                                  Crc ->
+                                      true;
+                                  _ ->
+                                      false
+                              end;
+                          _ ->
+                              false
+                      end,
+            _ = file:close(SegFd),
+            IsValid;
+       _Err ->
             false
-    end,
-    _ = file:close(SegFd),
-    IsValid.
+    end.
+
 
 -spec send_file(gen_tcp:socket(), state()) ->
                    {ok, state()} |
@@ -1648,21 +1656,26 @@ first_and_last_seginfos0([FstIdxFile]) ->
     {1, SegInfo, SegInfo};
 first_and_last_seginfos0([FstIdxFile | Rem] = IdxFiles) ->
     %% this function is only used by init
-    {ok, FstSegInfo} = build_seg_info(FstIdxFile),
-    LastIdxFile = lists:last(Rem),
-    case build_seg_info(LastIdxFile) of
-        {ok, #seg_info{first = undefined,
-                       last = undefined}} ->
-            %% the last index file doesn't have any index records yet
-            %% retry without it
-            [_ | RetryIndexFiles] = lists:reverse(IdxFiles),
-            first_and_last_seginfos0(lists:reverse(RetryIndexFiles));
-        {ok, LastSegInfo} ->
-            {length(Rem) + 1, FstSegInfo, LastSegInfo};
-        {error, Err} ->
-            ?ERROR("~s: failed to build seg_info from file ~s, error: ~w",
-                   [?MODULE, LastIdxFile, Err]),
-            error(Err)
+    case build_seg_info(FstIdxFile) of
+        {ok, FstSegInfo} ->
+            LastIdxFile = lists:last(Rem),
+            case build_seg_info(LastIdxFile) of
+                {ok, #seg_info{first = undefined,
+                               last = undefined}} ->
+                    %% the last index file doesn't have any index records yet
+                    %% retry without it
+                    [_ | RetryIndexFiles] = lists:reverse(IdxFiles),
+                    first_and_last_seginfos0(lists:reverse(RetryIndexFiles));
+                {ok, LastSegInfo} ->
+                    {length(Rem) + 1, FstSegInfo, LastSegInfo};
+                {error, Err} ->
+                    ?ERROR("~s: failed to build seg_info from file ~s, error: ~w",
+                           [?MODULE, LastIdxFile, Err]),
+                    error(Err)
+            end;
+        {error, enoent} ->
+            %% most likely retention race condition
+            first_and_last_seginfos0(Rem)
     end.
 
 build_seg_info(IdxFile) ->
@@ -1703,15 +1716,22 @@ last_valid_idx_record(IdxFile) ->
     case position_at_idx_record_boundary(IdxFd, eof) of
         {ok, Pos} ->
             SegFile = segment_from_index_file(IdxFile),
-            SegSize = filelib:file_size(SegFile),
-            ok = skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
-            case file:position(IdxFd, {cur, -?INDEX_RECORD_SIZE_B}) of
-                {ok, _} ->
-                    IdxRecord = file:read(IdxFd, ?INDEX_RECORD_SIZE_B),
-                    _ = file:close(IdxFd),
-                    IdxRecord;
-                _ ->
-                    undefined
+            case safe_file_size(SegFile) of
+                {ok, SegSize} ->
+                    ok = skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
+                    case file:position(IdxFd, {cur, -?INDEX_RECORD_SIZE_B}) of
+                        {ok, _} ->
+                            IdxRecord = file:read(IdxFd, ?INDEX_RECORD_SIZE_B),
+                            _ = file:close(IdxFd),
+                            IdxRecord;
+                        _ ->
+                            _ = file:close(IdxFd),
+                            undefined
+                    end;
+                {error, enoent} ->
+                    throw(missing_file);
+                Err ->
+                    Err
             end;
         Err ->
             _ = file:close(IdxFd),
@@ -1947,6 +1967,14 @@ file_size(Path) ->
     case prim_file:read_file_info(Path) of
         {ok, #file_info{size = Size}} -> Size;
         _ -> 0
+    end.
+
+safe_file_size(Path) ->
+    case prim_file:read_file_info(Path) of
+        {ok, #file_info{size = Size}} ->
+            {ok, Size};
+        Err ->
+            Err
     end.
 
 last_epoch_offsets([IdxFile]) ->
@@ -2208,6 +2236,8 @@ first_timestamp_from_index_files([]) ->
 offset_range_from_idx_files([]) ->
     empty;
 offset_range_from_idx_files([IdxFile]) ->
+    %% there is an invariant that if there is a single index file
+    %% there should also be a segment file
     {ok, #seg_info{first = First,
                    last = Last}} = build_seg_info(IdxFile),
     offset_range_from_chunk_range({First, Last});
