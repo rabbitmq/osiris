@@ -565,8 +565,8 @@ maybe_fix_corrupted_files(#{dir := Dir}) ->
     ok = maybe_fix_corrupted_files(sorted_index_files(Dir));
 maybe_fix_corrupted_files([IdxFile]) ->
     SegFile = segment_from_index_file(IdxFile),
-    ok = truncate_invalid_idx_records(IdxFile, filelib:file_size(SegFile)),
-    case filelib:file_size(IdxFile) =< ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B of
+    ok = truncate_invalid_idx_records(IdxFile, file_size(SegFile)),
+    case file_size(IdxFile) =< ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B of
         true ->
             % the only index doesn't contain a single valid record
             % make sure it has a valid header
@@ -576,7 +576,7 @@ maybe_fix_corrupted_files([IdxFile]) ->
         false ->
             ok
     end,
-    case filelib:file_size(SegFile) =< ?LOG_HEADER_SIZE + ?HEADER_SIZE_B of
+    case file_size(SegFile) =< ?LOG_HEADER_SIZE + ?HEADER_SIZE_B of
         true ->
             % the only segment doesn't contain a single valid chunk
             % make sure it has a valid header
@@ -589,7 +589,7 @@ maybe_fix_corrupted_files([IdxFile]) ->
 maybe_fix_corrupted_files(IdxFiles) ->
     LastIdxFile = lists:last(IdxFiles),
     LastSegFile = segment_from_index_file(LastIdxFile),
-    case filelib:file_size(LastSegFile) of
+    case file_size(LastSegFile) of
         N when N =< ?HEADER_SIZE_B ->
             % if the segment doesn't contain any chunks, just delete it
             ?WARNING("deleting an empty segment file: ~p", [LastSegFile]),
@@ -604,7 +604,7 @@ non_empty_index_files([]) ->
     [];
 non_empty_index_files(IdxFiles) ->
     LastIdxFile = lists:last(IdxFiles),
-    case filelib:file_size(LastIdxFile) of
+    case file_size(LastIdxFile) of
         N when N =< ?IDX_HEADER_SIZE ->
             non_empty_index_files(IdxFiles -- [LastIdxFile]);
         _ ->
@@ -1034,14 +1034,25 @@ init_data_reader_from(ChunkId,
                              {offset_out_of_range,
                               empty | {From :: offset(), To :: offset()}}} |
                             {error, {invalid_chunk_header, term()}} |
-                            {error, no_index_file}.
+                            {error, no_index_file} |
+                            {error, retries_exhausted}.
 init_offset_reader(OffsetSpec, Conf) ->
+    init_offset_reader(OffsetSpec, Conf, 3).
+
+init_offset_reader(_OffsetSpec, _Conf, 0) ->
+    {error, retries_exhausted};
+init_offset_reader(OffsetSpec, Conf, Attempt) ->
     try
         init_offset_reader0(OffsetSpec, Conf)
     catch
         missing_file ->
-            ?INFO("MISSING FILE ~p", [Conf]),
-            init_offset_reader0(OffsetSpec, Conf)
+            %% Retention policies are likely being applied, let's try again
+            %% TODO: should we limit the number of retries?
+            %% Remove cached index_files from config
+            init_offset_reader(OffsetSpec,
+                               maps:remove(index_files, Conf), Attempt - 1);
+        {retry_with, NewOffsSpec, NewConf} ->
+            init_offset_reader(NewOffsSpec, NewConf, Attempt - 1)
     end.
 
 init_offset_reader0({abs, Offs}, #{dir := Dir} = Conf) ->
@@ -1142,36 +1153,35 @@ init_offset_reader0(OffsetSpec, #{} = Conf)
         [] ->
             {error, no_index_file};
         IdxFiles ->
-            try
-                Range = offset_range_from_idx_files(IdxFiles),
-                ?DEBUG("osiris_log:init_offset_reader0/2 spec ~w range ~w ",
-                       [OffsetSpec, Range]),
-                %% clamp start offset
-                StartOffset = case {OffsetSpec, Range} of
-                                  {_, empty} ->
-                                      0;
-                                  {Offset, {_, LastOffs}}
-                                    when Offset == LastOffs + 1 ->
-                                      %% next but we can't use `next`
-                                      %% due to race conditions
-                                      Offset;
-                                  {Offset, {_, LastOffs}}
-                                    when Offset > LastOffs + 1 ->
-                                      %% out of range, clamp as `next`
-                                      throw({retry_with, next, Conf});
-                                  {Offset, {FirstOffs, _LastOffs}} ->
-                                      max(FirstOffs, Offset)
-                              end,
+            Range = offset_range_from_idx_files(IdxFiles),
+            ?DEBUG("osiris_log:init_offset_reader0/2 spec ~w range ~w ",
+                   [OffsetSpec, Range]),
+            %% clamp start offset
+            StartOffset = case {OffsetSpec, Range} of
+                              {_, empty} ->
+                                  0;
+                              {Offset, {_, LastOffs}}
+                                when Offset == LastOffs + 1 ->
+                                  %% next but we can't use `next`
+                                  %% due to race conditions
+                                  Offset;
+                              {Offset, {_, LastOffs}}
+                                when Offset > LastOffs + 1 ->
+                                  %% out of range, clamp as `next`
+                                  throw({retry_with, next, Conf});
+                              {Offset, {FirstOffs, _LastOffs}} ->
+                                  max(FirstOffs, Offset)
+                          end,
 
-                case find_segment_for_offset(StartOffset, IdxFiles) of
-                    not_found ->
-                        {error, {offset_out_of_range, Range}};
-                    {end_of_log, #seg_info{file = SegmentFile,
-                                           last = LastChunk}} ->
-                        {ChunkId, FilePos} = next_location(LastChunk),
-                        open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
-                    {found, #seg_info{file = SegmentFile} = SegmentInfo} ->
-                        {ChunkId, _Epoch, FilePos} =
+            case find_segment_for_offset(StartOffset, IdxFiles) of
+                not_found ->
+                    {error, {offset_out_of_range, Range}};
+                {end_of_log, #seg_info{file = SegmentFile,
+                                       last = LastChunk}} ->
+                    {ChunkId, FilePos} = next_location(LastChunk),
+                    open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
+                {found, #seg_info{file = SegmentFile} = SegmentInfo} ->
+                    {ChunkId, _Epoch, FilePos} =
                         case offset_idx_scan(StartOffset, SegmentInfo) of
                             eof ->
                                 exit(offset_out_of_range);
@@ -1184,18 +1194,9 @@ init_offset_reader0(OffsetSpec, #{} = Conf)
                             IdxResult when is_tuple(IdxResult) ->
                                 IdxResult
                         end,
-                        ?DEBUG("osiris_log:init_offset_reader0/2 resolved chunk_id ~b"
-                               " at file pos: ~w ", [ChunkId, FilePos]),
-                        open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf)
-                end
-            catch
-                missing_file ->
-                    %% Retention policies are likely being applied, let's try again
-                    %% TODO: should we limit the number of retries?
-                    %% Remove cached index_files from config
-                    init_offset_reader0(OffsetSpec, maps:remove(index_files, Conf));
-                {retry_with, NewOffsSpec, NewConf} ->
-                    init_offset_reader0(NewOffsSpec, NewConf)
+                    ?DEBUG("osiris_log:init_offset_reader0/2 resolved chunk_id ~b"
+                           " at file pos: ~w ", [ChunkId, FilePos]),
+                    open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf)
             end
     end.
 
@@ -1237,22 +1238,16 @@ last_user_chunk_id0([]) ->
     %% There are no user chunks in any index files.
     not_found;
 last_user_chunk_id0([IdxFile | Rest]) ->
-    try
-        %% Do not read-ahead since we read the index file backwards chunk by chunk.
-        {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
-        {ok, EofPos} = position_at_idx_record_boundary(IdxFd, eof),
-        Last = last_user_chunk_id_in_index(EofPos - ?INDEX_RECORD_SIZE_B, IdxFd),
-        _ = file:close(IdxFd),
-        case Last of
-            {ok, Id, Pos} ->
-                {Id, Pos, IdxFile};
-            {error, Reason} ->
-                ?DEBUG("Could not find user chunk in index file ~s (~p)", [IdxFile, Reason]),
-                last_user_chunk_id0(Rest)
-        end
-    catch
-        missing_file ->
-            ?DEBUG("Index file does not exist: ~s", [IdxFile]),
+    %% Do not read-ahead since we read the index file backwards chunk by chunk.
+    {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
+    {ok, EofPos} = position_at_idx_record_boundary(IdxFd, eof),
+    Last = last_user_chunk_id_in_index(EofPos - ?INDEX_RECORD_SIZE_B, IdxFd),
+    _ = file:close(IdxFd),
+    case Last of
+        {ok, Id, Pos} ->
+            {Id, Pos, IdxFile};
+        {error, Reason} ->
+            ?DEBUG("Could not find user chunk in index file ~s (~p)", [IdxFile, Reason]),
             last_user_chunk_id0(Rest)
     end.
 
@@ -1716,22 +1711,16 @@ last_valid_idx_record(IdxFile) ->
     case position_at_idx_record_boundary(IdxFd, eof) of
         {ok, Pos} ->
             SegFile = segment_from_index_file(IdxFile),
-            case safe_file_size(SegFile) of
-                {ok, SegSize} ->
-                    ok = skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
-                    case file:position(IdxFd, {cur, -?INDEX_RECORD_SIZE_B}) of
-                        {ok, _} ->
-                            IdxRecord = file:read(IdxFd, ?INDEX_RECORD_SIZE_B),
-                            _ = file:close(IdxFd),
-                            IdxRecord;
-                        _ ->
-                            _ = file:close(IdxFd),
-                            undefined
-                    end;
-                {error, enoent} ->
-                    throw(missing_file);
-                Err ->
-                    Err
+            SegSize = file_size(SegFile),
+            ok = skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
+            case file:position(IdxFd, {cur, -?INDEX_RECORD_SIZE_B}) of
+                {ok, _} ->
+                    IdxRecord = file:read(IdxFd, ?INDEX_RECORD_SIZE_B),
+                    _ = file:close(IdxFd),
+                    IdxRecord;
+                _ ->
+                    _ = file:close(IdxFd),
+                    undefined
             end;
         Err ->
             _ = file:close(IdxFd),
@@ -1755,89 +1744,82 @@ position_at_idx_record_boundary(IdxFd, At) ->
     end.
 
 build_segment_info(SegFile, LastChunkPos, IdxFile) ->
-    try
-        {ok, Fd} = open(SegFile, [read, binary, raw]),
-        %% we don't want to read blocks into page cache we are unlikely to need
-        _ = file:advise(Fd, 0, 0, random),
-        case file:pread(Fd, ?LOG_HEADER_SIZE, ?HEADER_SIZE_B) of
-            eof ->
-                _ = file:close(Fd),
-                eof;
-            {ok,
-             <<?MAGIC:4/unsigned,
-               ?VERSION:4/unsigned,
-               FirstChType:8/unsigned,
-               _NumEntries:16/unsigned,
-               FirstNumRecords:32/unsigned,
-               FirstTs:64/signed,
-               FirstEpoch:64/unsigned,
-               FirstChId:64/unsigned,
-               _FirstCrc:32/integer,
-               FirstSize:32/unsigned,
-               FirstTSize:32/unsigned,
-               _/binary>>} ->
-                case file:pread(Fd, LastChunkPos, ?HEADER_SIZE_B) of
-                    {ok,
-                     <<?MAGIC:4/unsigned,
-                       ?VERSION:4/unsigned,
-                       LastChType:8/unsigned,
-                       _LastNumEntries:16/unsigned,
-                       LastNumRecords:32/unsigned,
-                       LastTs:64/signed,
-                       LastEpoch:64/unsigned,
-                       LastChId:64/unsigned,
-                       _LastCrc:32/integer,
-                       LastSize:32/unsigned,
-                       LastTSize:32/unsigned,
-                       _Reserved:32>>} ->
-                        Size = LastChunkPos + LastSize + LastTSize + ?HEADER_SIZE_B,
-                        {ok, Eof} = file:position(Fd, eof),
-                        ?DEBUG_IF("~s: segment ~s has trailing data ~w ~w",
-                                  [?MODULE, filename:basename(SegFile),
-                                   Size, Eof], Size =/= Eof),
-                        _ = file:close(Fd),
-                        {ok, #seg_info{file = SegFile,
-                                       index = IdxFile,
-                                       size = Size,
-                                       first =
-                                       #chunk_info{epoch = FirstEpoch,
-                                                   timestamp = FirstTs,
-                                                   id = FirstChId,
-                                                   num = FirstNumRecords,
-                                                   type = FirstChType,
-                                                   size = FirstSize + FirstTSize,
-                                                   pos = ?LOG_HEADER_SIZE},
-                                       last =
-                                       #chunk_info{epoch = LastEpoch,
-                                                   timestamp = LastTs,
-                                                   id = LastChId,
-                                                   num = LastNumRecords,
-                                                   type = LastChType,
-                                                   size = LastSize + LastTSize,
-                                                   pos = LastChunkPos}}};
-                    _ ->
-                        % last chunk is corrupted - try the previous one
-                        _ = file:close(Fd),
-                        {ok, <<_Offset:64/unsigned,
-                               _Timestamp:64/signed,
-                               _Epoch:64/unsigned,
-                               PreviousChunkPos:32/unsigned,
-                               _ChType:8/unsigned>>} = nth_last_idx_record(IdxFile, 2),
-                        case PreviousChunkPos == LastChunkPos of
-                            false ->
-                                build_segment_info(SegFile, PreviousChunkPos, IdxFile);
-                            true ->
-                                % avoid an infinite loop if multiple chunks are corrupted
-                                ?ERROR("Multiple corrupted chunks in segment file ~p", [SegFile]),
-                                exit({corrupted_segment, {segment_file, SegFile}})
-                        end
-                end
-        end
-    catch
-        missing_file ->
-            %% Indexes and segments could be deleted by retention policies while
-            %% the log overview is being built. Ignore those segments and keep going
-            missing_file
+    {ok, Fd} = open(SegFile, [read, binary, raw]),
+    %% we don't want to read blocks into page cache we are unlikely to need
+    _ = file:advise(Fd, 0, 0, random),
+    case file:pread(Fd, ?LOG_HEADER_SIZE, ?HEADER_SIZE_B) of
+        eof ->
+            _ = file:close(Fd),
+            eof;
+        {ok,
+         <<?MAGIC:4/unsigned,
+           ?VERSION:4/unsigned,
+           FirstChType:8/unsigned,
+           _NumEntries:16/unsigned,
+           FirstNumRecords:32/unsigned,
+           FirstTs:64/signed,
+           FirstEpoch:64/unsigned,
+           FirstChId:64/unsigned,
+           _FirstCrc:32/integer,
+           FirstSize:32/unsigned,
+           FirstTSize:32/unsigned,
+           _/binary>>} ->
+            case file:pread(Fd, LastChunkPos, ?HEADER_SIZE_B) of
+                {ok,
+                 <<?MAGIC:4/unsigned,
+                   ?VERSION:4/unsigned,
+                   LastChType:8/unsigned,
+                   _LastNumEntries:16/unsigned,
+                   LastNumRecords:32/unsigned,
+                   LastTs:64/signed,
+                   LastEpoch:64/unsigned,
+                   LastChId:64/unsigned,
+                   _LastCrc:32/integer,
+                   LastSize:32/unsigned,
+                   LastTSize:32/unsigned,
+                   _Reserved:32>>} ->
+                    Size = LastChunkPos + LastSize + LastTSize + ?HEADER_SIZE_B,
+                    {ok, Eof} = file:position(Fd, eof),
+                    ?DEBUG_IF("~s: segment ~s has trailing data ~w ~w",
+                              [?MODULE, filename:basename(SegFile),
+                               Size, Eof], Size =/= Eof),
+                    _ = file:close(Fd),
+                    {ok, #seg_info{file = SegFile,
+                                   index = IdxFile,
+                                   size = Size,
+                                   first =
+                                   #chunk_info{epoch = FirstEpoch,
+                                               timestamp = FirstTs,
+                                               id = FirstChId,
+                                               num = FirstNumRecords,
+                                               type = FirstChType,
+                                               size = FirstSize + FirstTSize,
+                                               pos = ?LOG_HEADER_SIZE},
+                                   last =
+                                   #chunk_info{epoch = LastEpoch,
+                                               timestamp = LastTs,
+                                               id = LastChId,
+                                               num = LastNumRecords,
+                                               type = LastChType,
+                                               size = LastSize + LastTSize,
+                                               pos = LastChunkPos}}};
+                _ ->
+                    % last chunk is corrupted - try the previous one
+                    _ = file:close(Fd),
+                    {ok, <<_Offset:64/unsigned,
+                           _Timestamp:64/signed,
+                           _Epoch:64/unsigned,
+                           PreviousChunkPos:32/unsigned,
+                           _ChType:8/unsigned>>} = nth_last_idx_record(IdxFile, 2),
+                    case PreviousChunkPos == LastChunkPos of
+                        false ->
+                            build_segment_info(SegFile, PreviousChunkPos, IdxFile);
+                        true ->
+                            % avoid an infinite loop if multiple chunks are corrupted
+                            ?ERROR("Multiple corrupted chunks in segment file ~p", [SegFile]),
+                            exit({corrupted_segment, {segment_file, SegFile}})
+                    end
+            end
     end.
 
 -spec overview(term()) -> {range(), [{epoch(), offset()}]}.
@@ -1947,8 +1929,9 @@ eval_age([], _Age) ->
 eval_max_bytes([], _) -> [];
 eval_max_bytes(IdxFiles, MaxSize) ->
     [Latest|Older] = lists:reverse(IdxFiles),
-    eval_max_bytes(Older, MaxSize - file_size(
-                                     segment_from_index_file(Latest)), [Latest]).
+    eval_max_bytes(Older,
+                   MaxSize - file_size(segment_from_index_file(Latest)),
+                   [Latest]).
 
 eval_max_bytes([], _, Acc) ->
     Acc;
@@ -1965,16 +1948,10 @@ eval_max_bytes([IdxFile | Rest], Limit, Acc) ->
 
 file_size(Path) ->
     case prim_file:read_file_info(Path) of
-        {ok, #file_info{size = Size}} -> Size;
-        _ -> 0
-    end.
-
-safe_file_size(Path) ->
-    case prim_file:read_file_info(Path) of
         {ok, #file_info{size = Size}} ->
-            {ok, Size};
-        Err ->
-            Err
+            Size;
+        {error, enoent} ->
+            throw(missing_file)
     end.
 
 last_epoch_offsets([IdxFile]) ->
@@ -2010,7 +1987,8 @@ last_epoch_offsets([FstIdxFile | _]  = IdxFiles) ->
                                      _Timestamp:64/signed,
                                      Epoch:64/unsigned,
                                      _LastChunkPos:32/unsigned,
-                                     _ChType:8/unsigned>>} = last_valid_idx_record(IdxFile),
+                                     _ChType:8/unsigned>>} =
+                                  last_valid_idx_record(IdxFile),
                               case Epoch > E of
                                   true ->
                                       %% we need to scan as the last index record
