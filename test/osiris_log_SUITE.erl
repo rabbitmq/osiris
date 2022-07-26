@@ -75,6 +75,7 @@ all_tests() ->
      init_empty_last_files,
      evaluate_retention_max_bytes,
      evaluate_retention_max_age,
+     evaluate_retention_max_age_empty,
      offset_tracking,
      offset_tracking_snapshot,
      many_segment_overview
@@ -1234,6 +1235,15 @@ evaluate_retention_max_bytes(Config) ->
                               end,
                               SegFiles),
                  "the retention process didn't delete the oldest segment"),
+    ok.
+
+evaluate_retention_max_age_empty(Config) ->
+    %% simulates what may occur if retention is evaluated whilst
+    %% the stream member is being deleted
+    %% it should not crash
+    LDir = ?config(leader_dir, Config),
+    Spec = [{max_bytes, 100000000}, {max_age, 1000}],
+    _ = osiris_log:evaluate_retention(LDir, Spec),
     ok.
 
 evaluate_retention_max_age(Config) ->
