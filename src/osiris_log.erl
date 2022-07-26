@@ -445,10 +445,11 @@ init(#{dir := Dir,
     MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks,
                                         ?DEFAULT_MAX_SEGMENT_SIZE_C),
     Retention = maps:get(retention, Config, []),
-    ?INFO("Will use ~s for osiris log data directory", [Dir]),
-    ?DEBUG("osiris_log:init/1 max_segment_size_bytes: ~b,
+    ?INFO("Stream: ~s will use ~s for osiris log data directory",
+          [Name, Dir]),
+    ?DEBUG("osiris_log:init/1 stream ~s max_segment_size_bytes: ~b,
            max_segment_size_chunks ~b, retention ~w",
-          [MaxSizeBytes, MaxSizeChunks, Retention]),
+          [Name, MaxSizeBytes, MaxSizeChunks, Retention]),
     ok = filelib:ensure_dir(Dir),
     case file:make_dir(Dir) of
         ok ->
@@ -516,10 +517,11 @@ init(#{dir := Dir,
             counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
             counters:put(Cnt, ?C_OFFSET, LastChId + LastNum - 1),
             counters:put(Cnt, ?C_SEGMENTS, NumSegments),
-            ?DEBUG("~s:~s/~b: next offset ~b first offset ~b",
+            ?DEBUG("~s:~s/~b: ~s next offset ~b first offset ~b",
                    [?MODULE,
                     ?FUNCTION_NAME,
                     ?FUNCTION_ARITY,
+                    Name,
                     element(1, TailInfo),
                     FstChId]),
             {ok, SegFd} = open(Filename, ?FILE_OPTS_WRITE),
@@ -794,8 +796,8 @@ init_acceptor(Range, EpochOffsets0,
 
     %% then truncate to
     IdxFiles = sorted_index_files(Dir),
-    ?DEBUG("~s: ~s from epoch offsets: ~w range ~w",
-           [?MODULE, ?FUNCTION_NAME, EpochOffsets, Range]),
+    ?DEBUG("~s: ~s ~s from epoch offsets: ~w range ~w",
+           [?MODULE, ?FUNCTION_NAME, Name, EpochOffsets, Range]),
     RemIdxFiles = truncate_to(Name, Range, EpochOffsets, IdxFiles),
     %% after truncation we can do normal init
     InitOffset = case Range  of
@@ -926,12 +928,13 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
                             empty | {offset(), offset()}}} |
                           {error,
                            {invalid_last_offset_epoch, epoch(), offset()}}.
-init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir} = Config) ->
+init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir,
+                                            name := Name} = Config) ->
     IdxFiles = sorted_index_files(Dir),
     Range = offset_range_from_idx_files(IdxFiles),
-    ?DEBUG("osiris_segment:init_data_reader/2 at ~b prev "
+    ?DEBUG("osiris_segment:init_data_reader/2 ~s at ~b prev "
            "~w local range: ~w",
-           [StartChunkId, PrevEOT, Range]),
+           [Name, StartChunkId, PrevEOT, Range]),
     %% Invariant:  there is always at least one segment left on disk
     case Range of
         {FstOffs, LastOffs}
@@ -2296,7 +2299,8 @@ make_file_name(N, Suff) ->
     lists:flatten(
         io_lib:format("~20..0B.~s", [N, Suff])).
 
-open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
+open_new_segment(#?MODULE{cfg = #cfg{name = Name,
+                                     directory = Dir,
                                      counter = Cnt},
                           fd = OldFd,
                           index_fd = OldIdxFd,
@@ -2307,7 +2311,7 @@ open_new_segment(#?MODULE{cfg = #cfg{directory = Dir,
     _ = close_fd(OldIdxFd),
     Filename = make_file_name(NextOffset, "segment"),
     IdxFilename = make_file_name(NextOffset, "index"),
-    ?DEBUG("~s: ~s : ~s", [?MODULE, ?FUNCTION_NAME, Filename]),
+    ?DEBUG("~s: ~s ~s: ~s", [?MODULE, ?FUNCTION_NAME, Name, Filename]),
     {ok, IdxFd} =
         file:open(
             filename:join(Dir, IdxFilename), ?FILE_OPTS_WRITE),
