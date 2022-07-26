@@ -1,6 +1,6 @@
 module(
     name = "osiris",
-    version = "1.0.0",
+    version = "1.2.8",
 )
 
 bazel_dep(
