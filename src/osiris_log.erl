@@ -832,8 +832,8 @@ chunk_id_index_scan0(Fd, ChunkId) ->
 delete_segment_from_index(Index) ->
     File = segment_from_index_file(Index),
     ?DEBUG("osiris_log: deleting segment ~s", [File]),
-    ok = file:delete(File),
-    ok = file:delete(Index),
+    ok = prim_file:delete(Index),
+    ok = prim_file:delete(File),
     ok.
 
 truncate_to(_Name, _Range, _EpochOffsets, []) ->
