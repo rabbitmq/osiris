@@ -1933,7 +1933,10 @@ eval_max_bytes([], _) -> [];
 eval_max_bytes(IdxFiles, MaxSize) ->
     [Latest|Older] = lists:reverse(IdxFiles),
     eval_max_bytes(Older,
-                   MaxSize - file_size(segment_from_index_file(Latest)),
+                   %% for retention eval it is ok to use a file size function
+                   %% that implicitly return 0 when file is not found
+                   MaxSize - file_size_or_zero(
+                               segment_from_index_file(Latest)),
                    [Latest]).
 
 eval_max_bytes([], _, Acc) ->
@@ -1955,6 +1958,14 @@ file_size(Path) ->
             Size;
         {error, enoent} ->
             throw(missing_file)
+    end.
+
+file_size_or_zero(Path) ->
+    case prim_file:read_file_info(Path) of
+        {ok, #file_info{size = Size}} ->
+            Size;
+        {error, enoent} ->
+            0
     end.
 
 last_epoch_offsets([IdxFile]) ->
