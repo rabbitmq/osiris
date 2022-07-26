@@ -1484,8 +1484,8 @@ send_file(Sock,
                     %% this avoids any data sent in the Callback to be dispatched
                     %% in it's own TCP frame
                     ok = setopts(Transport, Sock, [{nopush, true}]),
-                    LastCommittedOffset = committed_offset(State),
-                    _ = Callback(Header, ToSend, LastCommittedOffset),
+                    CommittedOffset = committed_offset(State),
+                    _ = Callback(Header, ToSend, CommittedOffset),
                     case sendfile(Transport, Fd, Sock, Pos, ToSend) of
                         ok ->
                             ok = setopts(Transport, Sock, [{nopush, false}]),
