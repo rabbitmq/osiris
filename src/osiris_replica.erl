@@ -483,7 +483,7 @@ handle_info({'EXIT', RRPid, shutdown = Info},
                                 replica_reader_pid = RRPid}} = State) ->
     %% any replica reader exit is troublesome and requires the replica to also
     %% terminate
-    ?ERROR_(Name, "replica reader ~w exited with ~w", [RRPid, Info]),
+    ?INFO_(Name, "replica reader ~w exited with ~w", [RRPid, Info]),
     %% the replica reader shut down normally, so we use the normal return code
     %% to avoid logging the whole stack trace
     {stop, normal, State};
