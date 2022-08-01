@@ -82,7 +82,7 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 """,
-    sha256 = "cac7afd62f347f575141db3394ff04c9742a6f63b943ad9fc088280d2b751d6a",
+    sha256 = "2cda9a35cf20f4d1307ad807c76aca0cb961bfe497bb349f739f93be88bcb425",
     strip_prefix = "tls-gen-main",
     urls = ["https://github.com/rabbitmq/tls-gen/archive/refs/heads/main.zip"],
 )
