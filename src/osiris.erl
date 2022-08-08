@@ -25,7 +25,8 @@
          start_writer/1,
          start_replica/2,
          delete_cluster/1,
-         configure_logger/1]).
+         configure_logger/1,
+         get_stats/1]).
 
 %% holds static or rarely changing fields
 -record(cfg, {}).
@@ -273,3 +274,12 @@ start_replicas(Config, [Node | Nodes], ReplicaPids) ->
 configure_logger(Module) ->
     persistent_term:put('$osiris_logger', Module).
 
+-spec get_stats(pid()) -> #{committed_chunk_id => integer(),
+                            first_chunk_id => integer()}.
+get_stats(Pid)
+    when node(Pid) =:= node() ->
+    {ok, #{offset_ref := ORef}} = gen:call(Pid, '$gen_call', get_reader_context),
+    #{committed_chunk_id => atomics:get(ORef, 1),
+      first_chunk_id => atomics:get(ORef, 2)};
+get_stats(Pid) when is_pid(Pid) ->
+    erpc:call(node(Pid), ?MODULE, ?FUNCTION_NAME, [Pid]).
