@@ -636,12 +636,11 @@ cluster_restart(Config) ->
 
     timer:sleep(1),
     RangesBeforeRecovery =
-    [ erpc:call(node(P),
-                fun () ->
-                        {ok, #{offset_ref := ORef}} = gen:call(P, '$gen_call', get_reader_context),
-                        {atomics:get(ORef, 2), atomics:get(ORef, 1)}
-                end)
-      || P <- [Leader, Replica1, Replica2]],
+    [begin
+         #{committed_chunk_id := E,
+           first_chunk_id := S} = osiris:get_stats(P),
+         {S, E}
+     end || P <- [Leader, Replica1, Replica2]],
 
     ?assertEqual([{0,0}, {0,0}, {0,0}], RangesBeforeRecovery),
 
@@ -655,12 +654,11 @@ cluster_restart(Config) ->
     %% get all log ranges after recovery for each member and validate they are all
     %% the same
     RangesAfterRecovery =
-    [ erpc:call(node(P),
-                fun () ->
-                        {ok, #{offset_ref := ORef}} = gen:call(P, '$gen_call', get_reader_context),
-                        {atomics:get(ORef, 2), atomics:get(ORef, 1)}
-                end)
-      || P <- [Leader1, ReplicaPid1, ReplicaPid2]],
+    [begin
+         #{committed_chunk_id := E,
+           first_chunk_id := S} = osiris:get_stats(P),
+         {S, E}
+     end || P <- [Leader1, ReplicaPid1, ReplicaPid2]],
     ?assertEqual([{0,0}, {0,0}, {0,0}], RangesAfterRecovery),
     ct:pal("~p ~p", [RangesBeforeRecovery, RangesAfterRecovery]),
     ok = validate_log_offset_reader(Leader1, [{0, <<"before-restart">>}]),
