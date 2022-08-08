@@ -161,12 +161,13 @@ handle_continue(#{name := Name,
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
     ORef = atomics:new(2, [{signed, true}]),
+    atomics:put(ORef, 2, -1),
     CntName = {?MODULE, ExtRef},
     Log = osiris_log:init(Config#{dir => Dir,
                                   first_offset_fun =>
-                                  fun (Fst) ->
-                                          atomics:put(ORef, 2, Fst)
-                                  end,
+                                      fun (Fst) ->
+                                              atomics:put(ORef, 2, Fst)
+                                      end,
                                   counter_spec =>
                                       {CntName, ?ADD_COUNTER_FIELDS}}),
     Trk = osiris_log:recover_tracking(Log),

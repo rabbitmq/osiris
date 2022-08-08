@@ -621,7 +621,9 @@ cluster_restart(Config) ->
           epoch => 1,
           replica_nodes => Replicas,
           leader_node => LeaderNode},
-    {ok, #{leader_pid := Leader} = Conf} = osiris:start_cluster(Conf0),
+    {ok, #{leader_pid := Leader,
+           replica_pids := [Replica1, Replica2]} = Conf} =
+        osiris:start_cluster(Conf0),
     WriterId = <<"wid1">>,
     ok = osiris:write(Leader, WriterId, 42, <<"before-restart">>),
     receive
@@ -632,12 +634,38 @@ cluster_restart(Config) ->
         exit(osiris_written_timeout)
     end,
 
+    timer:sleep(1),
+    RangesBeforeRecovery =
+    [ erpc:call(node(P),
+                fun () ->
+                        {ok, #{offset_ref := ORef}} = gen:call(P, '$gen_call', get_reader_context),
+                        {atomics:get(ORef, 2), atomics:get(ORef, 1)}
+                end)
+      || P <- [Leader, Replica1, Replica2]],
+
+    ?assertEqual([{0,0}, {0,0}, {0,0}], RangesBeforeRecovery),
+
     osiris:stop_cluster(Conf),
-    {ok, #{leader_pid := Leader1}} =
+    {ok, #{leader_pid := Leader1,
+           replica_pids := [ReplicaPid1, ReplicaPid2]}} =
         osiris:start_cluster(Conf0#{epoch => 2}),
     %% give leader some time to discover the committed offset
     timer:sleep(1000),
-    ok = validate_log(Leader1, [{0, <<"before-restart">>}]),
+
+    %% get all log ranges after recovery for each member and validate they are all
+    %% the same
+    RangesAfterRecovery =
+    [ erpc:call(node(P),
+                fun () ->
+                        {ok, #{offset_ref := ORef}} = gen:call(P, '$gen_call', get_reader_context),
+                        {atomics:get(ORef, 2), atomics:get(ORef, 1)}
+                end)
+      || P <- [Leader1, ReplicaPid1, ReplicaPid2]],
+    ?assertEqual([{0,0}, {0,0}, {0,0}], RangesAfterRecovery),
+    ct:pal("~p ~p", [RangesBeforeRecovery, RangesAfterRecovery]),
+    ok = validate_log_offset_reader(Leader1, [{0, <<"before-restart">>}]),
+    ok = validate_log_offset_reader(ReplicaPid1, [{0, <<"before-restart">>}]),
+    ok = validate_log_offset_reader(ReplicaPid2, [{0, <<"before-restart">>}]),
 
     ok = osiris:write(Leader1, WriterId, 43, <<"after-restart">>),
     receive
@@ -648,9 +676,11 @@ cluster_restart(Config) ->
         exit(osiris_written_timeout)
     end,
 
-    ok =
-        validate_log(Leader1,
-                     [{0, <<"before-restart">>}, {1, <<"after-restart">>}]),
+    ExpectedLog = [{0, <<"before-restart">>}, {1, <<"after-restart">>}],
+
+    ok = validate_log_offset_reader(Leader1, ExpectedLog),
+    ok = validate_log_offset_reader(ReplicaPid1, ExpectedLog),
+    ok = validate_log_offset_reader(ReplicaPid2, ExpectedLog),
     [stop_peer(Ref) || {Ref, _} <- PeerStates],
     ok.
 
@@ -1835,7 +1865,8 @@ search_paths() ->
 validate_log(Leader, Exp) when is_pid(Leader) ->
     case node(Leader) == node() of
         true ->
-            {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty}, #{counter_spec => {'test', []}}),
+            {ok, Log0} = osiris_writer:init_data_reader(Leader, {0, empty},
+                                                        #{counter_spec => {'test', []}}),
             validate_log(Log0, Exp);
         false ->
             ok = erpc:call(node(Leader), ?MODULE, ?FUNCTION_NAME, [Leader, Exp])
@@ -1849,6 +1880,25 @@ validate_log(Log0, Expected) ->
             ct:fail("validate log failed, rem: ~p", [Expected]);
         {Entries, Log} ->
             validate_log(Log, Expected -- Entries)
+    end.
+
+validate_log_offset_reader(Leader, Exp) when is_pid(Leader) ->
+    case node(Leader) == node() of
+        true ->
+            {ok, Log0} = osiris:init_reader(Leader, first, {'test', []}),
+            validate_log_offset_reader(Log0, Exp);
+        false ->
+            ok = erpc:call(node(Leader), ?MODULE, ?FUNCTION_NAME, [Leader, Exp])
+    end;
+validate_log_offset_reader(Log, []) ->
+    ok = osiris_log:close(Log),
+    ok;
+validate_log_offset_reader(Log0, Expected) ->
+    case osiris_log:read_chunk_parsed(Log0) of
+        {end_of_stream, _} ->
+            ct:fail("validate log failed, rem: ~p", [Expected]);
+        {Entries, Log} ->
+            validate_log_offset_reader(Log, Expected -- Entries)
     end.
 
 print_counters() ->

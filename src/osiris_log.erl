@@ -486,6 +486,7 @@ init(#{dir := Dir,
                              _ ->
                                  0
                          end,
+            FirstOffsetFun(NextOffset - 1),
             open_new_segment(#?MODULE{cfg = Cfg,
                                       mode =
                                           #write{type = WriterType,
@@ -517,6 +518,7 @@ init(#{dir := Dir,
             counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
             counters:put(Cnt, ?C_OFFSET, LastChId + LastNum - 1),
             counters:put(Cnt, ?C_SEGMENTS, NumSegments),
+            FirstOffsetFun(FstChId),
             ?DEBUG("~s:~s/~b: ~s next offset ~b first offset ~b",
                    [?MODULE,
                     ?FUNCTION_NAME,
@@ -551,6 +553,7 @@ init(#{dir := Dir,
             %% here too?
             {ok, _} = file:position(SegFd, eof),
             {ok, _} = file:position(IdxFd, eof),
+            FirstOffsetFun(-1),
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
@@ -2112,7 +2115,7 @@ write_chunk(Chunk,
             Timestamp,
             Epoch,
             NumRecords,
-            #?MODULE{cfg = #cfg{counter = CntRef},
+            #?MODULE{cfg = #cfg{counter = CntRef} = Cfg,
                      fd = Fd,
                      index_fd = IdxFd,
                      mode =
@@ -2144,6 +2147,7 @@ write_chunk(Chunk,
             %% update counters
             counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
             counters:add(CntRef, ?C_CHUNKS, 1),
+            maybe_set_first_offset(Next, Cfg),
             State#?MODULE{mode =
                           Write#write{tail_info =
                                       {NextOffset,
@@ -2151,6 +2155,12 @@ write_chunk(Chunk,
                                       segment_size = {SegSizeBytes + Size,
                                                       SegSizeChunks + 1}}}
     end.
+
+
+maybe_set_first_offset(0, #cfg{first_offset_fun = Fun}) ->
+    Fun(0);
+maybe_set_first_offset(_, _Cfg) ->
+    ok.
 
 max_segment_size_reached(
   #?MODULE{mode = #write{segment_size = {CurrentSizeBytes,
