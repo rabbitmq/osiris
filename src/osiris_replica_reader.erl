@@ -77,7 +77,7 @@ maybe_connect(ssl, [H | T], Port, Options) ->
         {error, E} ->
             ?DEBUG("osiris replica TLS connection refused, host:~p - port: ~p", [H, Port]),
             ?DEBUG("error while trying to establish TLS connection ~p", [E]),
-            {error, connection_refused}
+            maybe_connect(ssl, T, Port, Options)
     end.
 
 maybe_add_sni_option(H) when is_binary(H) ->
