@@ -5,7 +5,30 @@ module(
 
 bazel_dep(
     name = "rules_erlang",
-    version = "3.2.0",
+    version = "3.8.2",
+)
+
+erlang_config = use_extension(
+    "@rules_erlang//bzlmod:extensions.bzl",
+    "erlang_config",
+    dev_dependency = True,
+)
+
+erlang_config.internal_erlang_from_github_release(
+    name = "24",
+    sha256 = "8444ff9abe23aea268adbb95463561fc222c965052d35d7c950b17be01c3ad82",
+    version = "24.3.4.6",
+)
+
+erlang_config.internal_erlang_from_github_release(
+    name = "25",
+    sha256 = "42840c32e13a27bdb2c376d69aa22466513d441bfe5eb882de23baf8218308d3",
+    version = "25.1.1",
+)
+
+use_repo(
+    erlang_config,
+    "erlang_config",
 )
 
 erlang_package = use_extension(

@@ -23,3 +23,5 @@ osiris.d
 
 /user.bazelrc
 /bazel-*
+
+/.vscode/
