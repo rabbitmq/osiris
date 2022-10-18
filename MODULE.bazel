@@ -4,6 +4,11 @@ module(
 )
 
 bazel_dep(
+    name = "platforms",
+    version = "0.0.5",
+)
+
+bazel_dep(
     name = "rules_erlang",
     version = "3.8.2",
 )
@@ -31,25 +36,12 @@ use_repo(
     "erlang_config",
 )
 
-erlang_package = use_extension(
-    "@rules_erlang//bzlmod:extensions.bzl",
-    "erlang_package",
-)
-
-erlang_package.hex_package(
+bazel_dep(
     name = "gen_batch_server",
-    sha256 = "c3e6a1a2a0fb62aee631a98cfa0fd8903e9562422cbf72043953e2fb1d203017",
     version = "0.8.8",
 )
 
-erlang_package.hex_package(
+bazel_dep(
     name = "seshat",
     version = "0.3.2",
-    sha256 = "20d820acbeef9d07298ee863d0c9d06f8e620acba100939ebb2925e4d6b0dfc7",
-)
-
-use_repo(
-    erlang_package,
-    "gen_batch_server",
-    "seshat",
 )
