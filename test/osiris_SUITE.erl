@@ -347,18 +347,23 @@ single_node_reader_counters(Config) ->
           leader_node => node(),
           replica_nodes => []},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-    {ok, Log0} = osiris:init_reader(Leader, next, {test, []}),
+    {ok, Log0} = osiris:init_reader(Leader, next, {offset_reader_1, []}),
     Overview = osiris_counters:overview(),
     ?assertEqual(1, maps:get(readers, maps:get({'osiris_writer', Name}, Overview))),
-    {ok, Log1} = osiris_writer:init_data_reader(Leader, {0, empty}, #{counter_spec => {'test_data', []}}),
+    ?assert(maps:is_key(offset_reader_1, Overview)),
+    {ok, Log1} = osiris_writer:init_data_reader(Leader, {0, empty}, #{counter_spec => {data_reader_1, []}}),
     Overview1 = osiris_counters:overview(),
     ?assertEqual(2, maps:get(readers, maps:get({'osiris_writer', Name}, Overview1))),
+    ?assert(maps:is_key(data_reader_1, Overview1)),
     osiris_log:close(Log0),
+    ?assertNot(maps:is_key(offset_reader_1, osiris_counters:overview())),
     Overview2 = osiris_counters:overview(),
     ?assertEqual(1, maps:get(readers, maps:get({'osiris_writer', Name}, Overview2))),
     osiris_log:close(Log1),
     Overview3 = osiris_counters:overview(),
-    ?assertEqual(0, maps:get(readers, maps:get({'osiris_writer', Name}, Overview3))).
+    ?assertEqual(0, maps:get(readers, maps:get({'osiris_writer', Name}, Overview3))),
+    ?assertNot(maps:is_key(data_reader_1, osiris_counters:overview())),
+    ok.
 
 cluster_reader_counters(Config) ->
     PrivDir = ?config(data_dir, Config),
