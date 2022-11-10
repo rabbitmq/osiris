@@ -30,6 +30,8 @@
                                                             domain => [osiris]}),
        ok).
 
+-define(IS_STRING(S), is_list(S) orelse is_binary(S)).
+
 -define(C_NUM_LOG_FIELDS, 5).
 
 -define(MAGIC, 5).

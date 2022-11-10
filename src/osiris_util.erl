@@ -17,7 +17,8 @@
          get_replication_configuration_from_tls_dist/0,
          get_replication_configuration_from_tls_dist/1,
          get_replication_configuration_from_tls_dist/2,
-         partition_parallel/3
+         partition_parallel/3,
+         normalise_name/1
         ]).
 
 %% For testing
@@ -28,8 +29,8 @@
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01"
         "23456789_-=").
 
--spec validate_base64uri(string()) -> boolean().
-validate_base64uri(Str) when is_list(Str) ->
+-spec validate_base64uri(string() | binary()) -> boolean().
+validate_base64uri(Str) when ?IS_STRING(Str) ->
     catch begin
               [begin
                    case lists:member(C, ?BASE64_URI_CHARS) of
@@ -43,8 +44,8 @@ validate_base64uri(Str) when is_list(Str) ->
               string:is_empty(Str) == false
           end.
 
--spec to_base64uri(string()) -> string().
-to_base64uri(Str) when is_list(Str) ->
+-spec to_base64uri(string() | binary()) -> string().
+to_base64uri(Str) when ?IS_STRING(Str) ->
     lists:foldr(fun(G, Acc) ->
                    case lists:member(G, ?BASE64_URI_CHARS) of
                        true -> [G | Acc];
@@ -261,3 +262,8 @@ collect([{{Pid, MRef}, E} | Next], {Left, Right}, Timeout) ->
     after Timeout ->
               exit(partition_parallel_timeout)
     end.
+
+normalise_name(Name) when is_binary(Name) ->
+    Name;
+normalise_name(Name) when is_list(Name) ->
+    list_to_binary(Name).

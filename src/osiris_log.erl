@@ -327,7 +327,7 @@
     ?CHNK_TRK_SNAPSHOT.
 -type config() ::
     osiris:config() |
-    #{dir := file:filename(),
+    #{dir := file:filename_all(),
       epoch => non_neg_integer(),
       % first_offset_fun => fun((integer()) -> ok),
       shared => atomics:atomics_ref(),
@@ -340,7 +340,7 @@
       %% a cached list of the index files for a given log
       %% avoids scanning disk for files multiple times if already know
       %% e.g. in init_acceptor
-      index_files => [filename:filename()]}.
+      index_files => [file:filename_all()]}.
 -type record() :: {offset(), osiris:data()}.
 -type offset_spec() :: osiris:offset_spec().
 -type retention_spec() :: osiris:retention_spec().
@@ -360,8 +360,8 @@
 
 %% holds static or rarely changing fields
 -record(cfg,
-        {directory :: file:filename(),
-         name :: string(),
+        {directory :: file:filename_all(),
+         name :: osiris:name(),
          max_segment_size_bytes = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer(),
          max_segment_size_chunks = ?DEFAULT_MAX_SEGMENT_SIZE_C :: non_neg_integer(),
          tracking_config = #{} :: osiris_tracking:config(),
@@ -392,7 +392,7 @@
 -record(?MODULE,
         {cfg :: #cfg{},
          mode :: #read{} | #write{},
-         current_file :: undefined | file:filename(),
+         current_file :: undefined | file:filename_all(),
          index_fd :: undefined | file:io_device(),
          fd :: undefined | file:io_device()
         }).
@@ -409,9 +409,9 @@
          pos :: integer()
         }).
 -record(seg_info,
-        {file :: file:filename(),
+        {file :: file:filename_all(),
          size = 0 :: non_neg_integer(),
-         index :: file:filename(),
+         index :: file:filename_all(),
          first :: undefined | #chunk_info{},
          last :: undefined | #chunk_info{}}).
 
@@ -422,13 +422,13 @@
               config/0,
               counter_spec/0]).
 
--spec directory(osiris:config() | list()) -> file:filename().
+-spec directory(osiris:config() | list()) -> file:filename_all().
 directory(#{name := Name, dir := Dir}) ->
     filename:join(Dir, Name);
 directory(#{name := Name}) ->
     {ok, Dir} = application:get_env(osiris, data_dir),
     filename:join(Dir, Name);
-directory(Name) when is_list(Name) ->
+directory(Name) when ?IS_STRING(Name) ->
     {ok, Dir} = application:get_env(osiris, data_dir),
     filename:join(Dir, Name).
 
@@ -808,7 +808,8 @@ init_acceptor(Range, EpochOffsets0,
     init(Conf#{initial_offset => InitOffset,
                index_files => RemIdxFiles}, acceptor).
 
-chunk_id_index_scan(IdxFile, ChunkId) when is_list(IdxFile) ->
+chunk_id_index_scan(IdxFile, ChunkId)
+  when ?IS_STRING(IdxFile) ->
     Fd = open_index_read(IdxFile),
     chunk_id_index_scan0(Fd, ChunkId).
 
@@ -1232,7 +1233,8 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                   fd = Fd}}.
 
 %% Searches the index files backwards for the ID of the last user chunk.
-last_user_chunk_location(RevdIdxFiles) when is_list(RevdIdxFiles) ->
+last_user_chunk_location(RevdIdxFiles)
+  when is_list(RevdIdxFiles) ->
     {Time, Result} = timer:tc(
                        fun() ->
                                last_user_chunk_id0(RevdIdxFiles)
@@ -1290,7 +1292,7 @@ set_committed_chunk_id(#?MODULE{mode = #write{},
 get_current_epoch(#?MODULE{mode = #write{current_epoch = Epoch}}) ->
     Epoch.
 
--spec get_directory(state()) -> file:filename().
+-spec get_directory(state()) -> file:filename_all().
 get_directory(#?MODULE{cfg = #cfg{directory = Dir}}) ->
     Dir.
 
@@ -1554,7 +1556,7 @@ close(#?MODULE{cfg = #cfg{counter_id = CntId,
 
 delete_directory(#{name := Name} = Config) when is_map(Config) ->
     delete_directory(Name);
-delete_directory(Name) when is_list(Name) ->
+delete_directory(Name) when ?IS_STRING(Name) ->
     Dir = directory(Name),
     ?DEBUG("osiris_log: deleting directory ~s", [Dir]),
     case file:list_dir(Dir) of
@@ -1630,7 +1632,7 @@ sorted_index_files(#{index_files := IdxFiles}) ->
     IdxFiles;
 sorted_index_files(#{dir := Dir}) ->
     sorted_index_files(Dir);
-sorted_index_files(Dir) when is_list(Dir) orelse is_binary(Dir) ->
+sorted_index_files(Dir) when ?IS_STRING(Dir) ->
     Files = index_files_unsorted(Dir),
     lists:sort(Files).
 
@@ -1649,7 +1651,9 @@ index_files_unsorted(Dir) ->
             [];
         {ok, Files} ->
             [filename:join(Dir, F)
-             || F <- Files, filename:extension(F) == ".index"]
+             || F <- Files,
+                filename:extension(F) == ".index" orelse
+                filename:extension(F) == <<".index">>]
     end.
 
 first_and_last_seginfos(#{index_files := IdxFiles}) ->
@@ -1707,7 +1711,7 @@ build_seg_info(IdxFile) ->
 last_idx_record(IdxFd) ->
     nth_last_idx_record(IdxFd, 1).
 
-nth_last_idx_record(IdxFile, N) when is_list(IdxFile) ->
+nth_last_idx_record(IdxFile, N) when ?IS_STRING(IdxFile) ->
     {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
     IdxRecord = nth_last_idx_record(IdxFd, N),
     _ = file:close(IdxFd),
@@ -1888,7 +1892,8 @@ update_retention(Retention,
     trigger_retention_eval(State).
 
 -spec evaluate_retention(file:filename_all(), [retention_spec()]) ->
-    {range(), non_neg_integer()}.
+    {range(), FirstTimestamp :: osiris:timestamp(),
+     NumRemainingFiles :: non_neg_integer()}.
 evaluate_retention(Dir, Specs) when is_list(Dir) ->
     % convert to binary for faster operations later
     % mostly in segment_from_index_file/1
@@ -2426,8 +2431,8 @@ throw_missing({error, enoent}) ->
 throw_missing(Any) ->
     Any.
 
-open(SegFile, Options) ->
-    throw_missing(file:open(SegFile, Options)).
+open(File, Options) ->
+    throw_missing(file:open(File, Options)).
 
 chunk_location_for_timestamp(Idx, Ts) ->
     Fd = open_index_read(Idx),
@@ -2648,23 +2653,25 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
     end.
 
 trigger_retention_eval(#?MODULE{cfg =
-                                    #cfg{directory = Dir,
+                                    #cfg{name = Name,
+                                         directory = Dir,
                                          retention = RetentionSpec,
                                          counter = Cnt,
                                          shared = Shared}} = State) ->
 
     %% updates first offset and first timestamp
     %% after retention has been evaluated
-    EvalFun = fun ({{FstOff, _}, FstTs, Seg}) when is_integer(FstOff),
-                                                   is_integer(FstTs) ->
+    EvalFun = fun ({{FstOff, _}, FstTs, NumSegLeft})
+                    when is_integer(FstOff),
+                         is_integer(FstTs) ->
                       osiris_log_shared:set_first_chunk_id(Shared, FstOff),
                       counters:put(Cnt, ?C_FIRST_OFFSET, FstOff),
                       counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
-                      counters:put(Cnt, ?C_SEGMENTS, Seg);
+                      counters:put(Cnt, ?C_SEGMENTS, NumSegLeft);
                   (_) ->
                       ok
               end,
-    ok = osiris_retention:eval(Dir, RetentionSpec, EvalFun),
+    ok = osiris_retention:eval(Name, Dir, RetentionSpec, EvalFun),
     State.
 
 next_location(undefined) ->
@@ -2675,8 +2682,10 @@ next_location(#chunk_info{id = Id,
                           size = Size}) ->
     {Id + Num, Pos + Size + ?HEADER_SIZE_B}.
 
-index_file_first_offset(IdxFile) ->
-    list_to_integer(filename:basename(IdxFile, ".index")).
+index_file_first_offset(IdxFile) when is_list(IdxFile) ->
+    list_to_integer(filename:basename(IdxFile, ".index"));
+index_file_first_offset(IdxFile) when is_binary(IdxFile) ->
+    binary_to_integer(filename:basename(IdxFile, <<".index">>)).
 
 first_last_timestamps(IdxFile) ->
     case file:open(IdxFile, [raw, read, binary]) of

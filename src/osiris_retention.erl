@@ -11,7 +11,7 @@
 
 %% API functions
 -export([start_link/0,
-         eval/3]).
+         eval/4]).
 %% gen_server callbacks
 -export([init/1,
          handle_call/3,
@@ -20,7 +20,9 @@
          terminate/2,
          code_change/3]).
 
--record(state, {}).
+-define(DEFAULT_SHEDULED_EVAL_TIME, 1000 * 60 * 60). %% 1HR
+
+-record(state, {scheduled = #{} :: #{osiris:name() => timer:tref()}}).
 
 %%%===================================================================
 %%% API functions
@@ -30,13 +32,13 @@
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []).
 
--spec eval(file:filename(), [osiris:retention_spec()],
+-spec eval(osiris:name(), file:name_all(), [osiris:retention_spec()],
            fun((osiris_log:range()) -> ok)) ->
-              ok.
-eval(_Dir, [], _Fun) ->
+    ok.
+eval(_Name, _Dir, [], _Fun) ->
     ok;
-eval(Dir, Specs, Fun) ->
-    gen_server:cast(?MODULE, {eval, Dir, Specs, Fun}).
+eval(Name, Dir, Specs, Fun) ->
+    gen_server:cast(?MODULE, {eval, Name, Dir, Specs, Fun}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -63,10 +65,10 @@ handle_call(_Request, _From, State) ->
 %% @spec handle_cast(Msg, State) -> {noreply, State} |
 %%                                  {noreply, State, Timeout} |
 %%                                  {stop, Reason, State}
-handle_cast({eval, Dir, Specs, Fun}, State) ->
-    Range = osiris_log:evaluate_retention(Dir, Specs),
-    _ = Fun(Range),
-    {noreply, State}.
+handle_cast({eval, Name, Dir, Specs, Fun}, State) ->
+    Result = osiris_log:evaluate_retention(Dir, Specs),
+    _ = Fun(Result),
+    {noreply, schedule(osiris_util:normalise_name(Name), Specs, Result, State)}.
 
 %% @spec handle_info(Info, State) -> {noreply, State} |
 %%                                   {noreply, State, Timeout} |
@@ -85,3 +87,6 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
+schedule(_Name, _Specs, _Result, State) ->
+    State.
+

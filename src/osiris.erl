@@ -29,8 +29,9 @@
          get_stats/1]).
 
 
+-type name() :: string() | binary().
 -type config() ::
-    #{name := string(),
+    #{name := name(),
       reference => term(),
       event_formatter => {module(), atom(), list()},
       retention => [osiris:retention_spec()],
@@ -72,7 +73,8 @@
                             chunk_selector => all | user_data
                            }.
 
--export_type([config/0,
+-export_type([name/0,
+              config/0,
               offset/0,
               epoch/0,
               tail_info/0,
@@ -84,8 +86,9 @@
               data/0]).
 
 -spec start_cluster(config()) ->
-                       {ok, config()} | {error, term()} |
-                       {error, term(), config()}.
+    {ok, config()} |
+    {error, term()} |
+    {error, term(), config()}.
 start_cluster(Config00 = #{name := Name}) ->
     ?DEBUG("osiris: starting new cluster ~s", [Name]),
     true = osiris_util:validate_base64uri(Name),
@@ -124,7 +127,7 @@ start_replica(Replica, Config) ->
             WriterId :: binary() | undefined,
             CorrOrSeq :: non_neg_integer() | term(),
             Data :: data()) ->
-               ok.
+    ok.
 write(Pid, WriterId, Corr, Data) ->
     osiris_writer:write(Pid, self(), WriterId, Corr, Data).
 
@@ -221,7 +224,7 @@ register_offset_listener(Pid, Offset, EvtFormatter) ->
     ok.
 
 -spec update_retention(pid(), [osiris:retention_spec()]) ->
-                          ok | {error, term()}.
+    ok | {error, term()}.
 update_retention(Pid, Retention)
     when is_pid(Pid) andalso is_list(Retention) ->
     Msg = {update_retention, Retention},

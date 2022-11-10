@@ -47,10 +47,10 @@
 %% manages incoming max index
 
 -record(cfg,
-        {name :: string(),
+        {name :: osiris:name(),
          reference :: term(),
          replicas = [] :: [node()],
-         directory :: file:filename(),
+         directory :: file:filename_all(),
          counter :: counters:counters_ref(),
          event_formatter :: undefined | mfa()}).
 -record(?MODULE,
@@ -72,20 +72,21 @@
 
 start(Config = #{name := Name, leader_node := Leader}) ->
     supervisor:start_child({?SUP, Leader},
-                           #{id => Name,
+                           #{id => osiris_util:normalise_name(Name),
                              start => {?MODULE, start_link, [Config]},
                              restart => temporary,
                              shutdown => 5000,
                              type => worker}).
 
 stop(#{name := Name, leader_node := Node}) ->
+    %% stop child handles name normalisation
     ?SUP:stop_child(Node, Name).
 
 delete(#{leader_node := Node} = Config) ->
     ?SUP:delete_child(Node, Config).
 
 -spec start_link(Config :: map()) ->
-                    {ok, pid()} | {error, {already_started, pid()}}.
+    {ok, pid()} | {error, {already_started, pid()}}.
 start_link(Config) ->
     Mod = ?MODULE,
     Opts = [{reversed_batch, true}],
@@ -150,12 +151,13 @@ query_replication_state(Pid) when is_pid(Pid) ->
 init(Config) ->
     {ok, undefined, {continue, Config}}.
 
-handle_continue(#{name := Name,
+handle_continue(#{name := Name0,
                   epoch := Epoch,
                   reference := ExtRef,
                   replica_nodes := Replicas} =
                 Config, undefined)
-    when is_list(Name) ->
+  when ?IS_STRING(Name0) ->
+    Name = osiris_util:normalise_name(Name0),
     Dir = osiris_log:directory(Config),
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),

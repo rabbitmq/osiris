@@ -106,10 +106,9 @@ init_per_testcase(TestCase, Config) ->
     ok = extra_init(TestCase),
     {ok, Apps} = application:ensure_all_started(osiris),
     ok = logger:set_primary_config(level, all),
-    % file:make_dir(Dir),
     [{data_dir, Dir},
      {test_case, TestCase},
-     {cluster_name, atom_to_list(TestCase)},
+     {cluster_name, atom_to_binary(TestCase, utf8)},
      {started_apps, Apps}
      | Config].
 
@@ -179,7 +178,8 @@ start_many_clusters(Config) ->
     ok = logger:set_primary_config(level, all),
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    Names = [Name ++ "_" ++ integer_to_list(I) || I <- lists:seq(1, 10)],
+    Names = [unicode:characters_to_binary([Name, <<"_">>, integer_to_binary(I)])
+             || I <- lists:seq(1, 10)],
     %% set a small port range to try to trigger port conflicts
     AllEnv = [{port_range, {6000, 6010}} |
               proplists:delete(port_range,
@@ -195,7 +195,7 @@ start_many_clusters(Config) ->
                           replica_nodes => Replicas
                          },
                 {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-                WriterId = list_to_binary(N),
+                WriterId = N,
                 ok = osiris:write(Leader, WriterId, 42, <<"mah-data">>),
                 receive
                     {osiris_written, _, WriterId, [42]} ->
@@ -768,16 +768,24 @@ cluster_restart_new_leader(Config) ->
     ok.
 
 cluster_delete(Config) ->
-    PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
+    ok = cluster_delete(Config, Name, Name),
+    ok = cluster_delete(Config, Name, binary_to_list(Name)),
+    ok = cluster_delete(Config, binary_to_list(Name), binary_to_list(Name)),
+    ok = cluster_delete(Config, binary_to_list(Name), Name),
+    ok.
+
+cluster_delete(Config, StartName, DeleteName) ->
+    PrivDir = ?config(data_dir, Config),
     PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
     Conf0 =
-        #{name => Name,
+        #{name => StartName,
           epoch => 1,
           leader_node => LeaderNode,
           replica_nodes => Replicas},
-    {ok, #{leader_pid := Leader} = Conf} = osiris:start_cluster(Conf0),
+    {ok, #{leader_pid := Leader,
+           replica_pids := ReplicaPids} = Conf} = osiris:start_cluster(Conf0),
     ok = osiris:write(Leader, undefined, 42, <<"before-restart">>),
     receive
         {osiris_written, _, _WriterId, [42]} ->
@@ -787,7 +795,11 @@ cluster_delete(Config) ->
         exit(osiris_written_timeout)
     end,
 
-    osiris:delete_cluster(Conf),
+    osiris:delete_cluster(Conf#{name => DeleteName}),
+    %% validate pids are gone
+    [begin
+         ?assertEqual(false, erpc:call(node(Pid), erlang,is_process_alive, [Pid]))
+     end || Pid <- [Leader | ReplicaPids]],
     [stop_peer(Ref) || {Ref, _} <- PeerStates],
     ok.
 
@@ -1731,7 +1743,7 @@ start_child_node(NodeNamePrefix, PrivDir) ->
 start_child_node(NodeName, PrivDir, ExtraAppConfig0) ->
     _ = file:make_dir(PrivDir),
     Dir = filename:join(PrivDir, NodeName),
-    ok = file:make_dir(Dir),
+    _ = file:make_dir(Dir),
 
     %% make sure the data dir computed above is passed on to the peers
     ExtraAppConfig1 = proplists:delete(data_dir, ExtraAppConfig0),

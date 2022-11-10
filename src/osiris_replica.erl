@@ -49,11 +49,11 @@
 
 %% holds static or rarely changing fields
 -record(cfg,
-        {name :: string(),
+        {name :: osiris:name(),
          leader_pid :: pid(),
          acceptor_pid :: pid(),
          replica_reader_pid :: pid(),
-         directory :: file:filename(),
+         directory :: file:filename_all(),
          port :: non_neg_integer(),
          transport :: osiris_log:transport(),
          socket :: undefined | gen_tcp:socket() | ssl:sslsocket(),
@@ -99,7 +99,7 @@
 %%% API functions
 %%%===================================================================
 
-start(Node, Config = #{name := Name}) when is_list(Name) ->
+start(Node, Config = #{name := Name}) when ?IS_STRING(Name) ->
     case supervisor:start_child({?SUP, Node},
                                 #{id => Name,
                                   start => {?MODULE, start_link, [Config]},
@@ -158,9 +158,11 @@ await(Server) ->
 init(Config) ->
     {ok, undefined, {continue, Config}}.
 
-handle_continue(#{name := Name,
+handle_continue(#{name := Name0,
                   leader_pid := LeaderPid,
-                  reference := ExtRef} = Config, undefined) ->
+                  reference := ExtRef} = Config, undefined)
+  when ?IS_STRING(Name0) ->
+    Name = osiris_util:normalise_name(Name0),
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
     Node = node(LeaderPid),
