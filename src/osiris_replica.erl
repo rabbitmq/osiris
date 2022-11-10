@@ -39,6 +39,7 @@
 -export([get_port/1, combine_ips_hosts/4]).
 %% gen_server callbacks
 -export([init/1,
+         handle_continue/2,
          handle_call/3,
          handle_cast/2,
          handle_info/2,
@@ -100,13 +101,23 @@
 %%%===================================================================
 
 start(Node, Config = #{name := Name}) when is_list(Name) ->
-    supervisor:start_child({?SUP, Node},
-                           #{id => Name,
-                             start => {?MODULE, start_link, [Config]},
-                             restart => temporary,
-                             shutdown => 5000,
-                             type => worker,
-                             modules => [?MODULE]}).
+    case supervisor:start_child({?SUP, Node},
+                                #{id => Name,
+                                  start => {?MODULE, start_link, [Config]},
+                                  restart => temporary,
+                                  shutdown => 5000,
+                                  type => worker,
+                                  modules => [?MODULE]}) of
+        {ok, Pid} = Res ->
+            %% make a dummy call to block until intialisation is complete
+            _ = await(Pid),
+            Res;
+        {ok, _, Pid} = Res ->
+            _ = await(Pid),
+            Res;
+        Err ->
+            Err
+    end.
 
 stop(Node, #{name := Name}) ->
     ?SUP:stop_child(Node, Name).
@@ -127,6 +138,9 @@ start_link(Conf) ->
 get_port(Server) ->
     gen_server:call(Server, get_port).
 
+await(Server) ->
+    gen_server:call(Server, await, infinity).
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -142,19 +156,21 @@ get_port(Server) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init(#{name := Name,
-       leader_pid := LeaderPid,
-       reference := ExtRef} =
-         Config) ->
+init(Config) ->
+    {ok, undefined, {continue, Config}}.
+
+handle_continue(#{name := Name,
+                  leader_pid := LeaderPid,
+                  reference := ExtRef} = Config, undefined) ->
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
     Node = node(LeaderPid),
 
     case rpc:call(Node, osiris_writer, overview, [LeaderPid]) of
         {error, _} = Err ->
-            {stop, Err};
+            {stop, Err, undefined};
         {badrpc, Reason} ->
-            {error, Reason};
+            {stop, {badrpc, Reason}, undefined};
         {ok, {LeaderRange, LeaderEpochOffs}}  ->
             {ok, {Min, Max}} = application:get_env(port_range),
             Transport = application:get_env(osiris, replication_transport, tcp),
@@ -246,7 +262,7 @@ init(#{name := Name,
                           end,
             counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
             EvtFmt = maps:get(event_formatter, Config, undefined),
-            {ok,
+            {noreply,
              #?MODULE{cfg =
                       #cfg{name = Name,
                            leader_pid = LeaderPid,
@@ -360,6 +376,8 @@ handle_call({update_retention, Retention}, _From,
             #?MODULE{log = Log0} = State) ->
     Log = osiris_log:update_retention(Retention, Log0),
     {reply, ok, State#?MODULE{log = Log}};
+handle_call(await, _From, State) ->
+    {reply, ok, State};
 handle_call(Unknown, _From,
             #?MODULE{cfg = #cfg{name = Name}} = State) ->
     ?INFO_(Name, "unknown command ~W", [Unknown, 10]),
