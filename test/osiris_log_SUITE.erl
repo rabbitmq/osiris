@@ -16,7 +16,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -include("src/osiris.hrl").
--include("src/osiris_peer_shim.hrl").
+% -include("src/osiris_peer_shim.hrl").
 
 %%%===================================================================
 %%% Common Test callbacks
@@ -103,7 +103,7 @@ init_per_testcase(TestCase, Config) ->
     Dir = filename:join(PrivDir, TestCase),
     LeaderDir = filename:join(Dir, "leader"),
     Follower1Dir = filename:join(Dir, "follower1"),
-    ORef = atomics:new(2, [{signed, true}]),
+    ORef = osiris_log_shared:new(),
     [{test_case, TestCase},
      {leader_dir, LeaderDir},
      {follower1_dir, Follower1Dir},
@@ -195,12 +195,11 @@ subbatch(Config) ->
     S1 = osiris_log:write(
              lists:reverse([Batch, <<"simple">>]), S0),
     ?assertEqual(3, osiris_log:next_offset(S1)),
-    OffRef = atomics:new(1, []),
-    atomics:put(OffRef, 1, -1), %% the initial value
+    OffRef = osiris_log_shared:new(),
     {ok, R0} =
         osiris_log:init_offset_reader(0, Conf#{offset_ref => OffRef}),
     {end_of_stream, R1} = osiris_log:read_chunk_parsed(R0),
-    atomics:put(OffRef, 1, 0), %% first chunk index
+    osiris_log_shared:set_committed_chunk_id(OffRef, 0), %% first chunk index
 
     ?assertMatch({[{0, <<"hi">>}, {1, <<"h0">>}, {2, <<"simple">>}], _},
                  osiris_log:read_chunk_parsed(R1)),
@@ -220,12 +219,11 @@ subbatch_compressed(Config) ->
     S1 = osiris_log:write(
              lists:reverse([Batch, <<"simple">>]), S0),
     ?assertEqual(3, osiris_log:next_offset(S1)),
-    OffRef = atomics:new(1, []),
-    atomics:put(OffRef, 1, -1), %% the initial value
+    OffRef = osiris_log_shared:new(),
     {ok, R0} =
         osiris_log:init_offset_reader(0, Conf#{offset_ref => OffRef}),
     {end_of_stream, R1} = osiris_log:read_chunk_parsed(R0),
-    atomics:put(OffRef, 1, 0), %% first chunk index
+    osiris_log_shared:set_committed_chunk_id(OffRef, 0), %% first chunk index
 
     %% compressed sub batches should not be parsed server side
     %% so just returns the batch as is
@@ -301,13 +299,13 @@ read_chunk_parsed_2_multiple_chunks(Config) ->
 read_header(Config) ->
     Conf = ?config(osiris_conf, Config),
     W0 = osiris_log:init(Conf),
-    OffRef = atomics:new(2, []),
+    OffRef = osiris_log_shared:new(),
     {ok, R0} =
         osiris_log:init_offset_reader(first, Conf#{offset_ref => OffRef}),
     {end_of_stream, R1} = osiris_log:read_header(R0),
     W1 = osiris_log:write([<<"hi">>, <<"ho">>], W0),
     _W = osiris_log:write([<<"hum">>], W1),
-    atomics:put(OffRef, 1, 3),
+    osiris_log_shared:set_committed_chunk_id(OffRef, 3),
     {ok, H1, R2} = osiris_log:read_header(R1),
     ?assertMatch(#{chunk_id := 0,
                    epoch := 1,
@@ -345,8 +343,9 @@ write_multi_log(Config) ->
             filename:join(?config(dir, Config), "*.segment")),
     ?assertEqual(2, length(Segments)),
 
-    OffRef = atomics:new(2, []),
-    atomics:put(OffRef, 1, NextOffset), %% takes a single offset tracking data into account
+    OffRef = osiris_log_shared:new(),
+    %% takes a single offset tracking data into account
+    osiris_log_shared:set_committed_chunk_id(OffRef, NextOffset),
     %% ensure all records can be read
     {ok, R0} =
         osiris_log:init_offset_reader(first, Conf#{offset_ref => OffRef}),
@@ -1492,4 +1491,4 @@ make_trailer(Type, K, V) ->
       V:64/unsigned>>.
 
 set_offset_ref(#{offset_ref := Ref}, Value) ->
-    atomics:put(Ref, 1, Value).
+    osiris_log_shared:set_committed_chunk_id(Ref, Value).

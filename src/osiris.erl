@@ -200,7 +200,6 @@ init_reader(Pid, OffsetSpec, {_, _} = CounterSpec, Options)
     when is_pid(Pid) andalso node(Pid) =:= node() ->
     ?DEBUG("osiris: initialising reader. Spec: ~w", [OffsetSpec]),
     {ok, Ctx0} = gen:call(Pid, '$gen_call', get_reader_context),
-    % CntId = {?MODULE, Ref, Tag, Pid},
     Ctx = Ctx0#{counter_spec => CounterSpec,
                 options => Options},
     osiris_log:init_offset_reader(OffsetSpec, Ctx).
@@ -277,9 +276,10 @@ configure_logger(Module) ->
 -spec get_stats(pid()) -> #{committed_chunk_id => integer(),
                             first_chunk_id => integer()}.
 get_stats(Pid)
-    when node(Pid) =:= node() ->
+  when node(Pid) =:= node() ->
     {ok, #{offset_ref := ORef}} = gen:call(Pid, '$gen_call', get_reader_context),
-    #{committed_chunk_id => atomics:get(ORef, 1),
-      first_chunk_id => atomics:get(ORef, 2)};
+    #{committed_chunk_id => osiris_log_shared:committed_chunk_id(ORef),
+      first_chunk_id => osiris_log_shared:first_chunk_id(ORef),
+      last_chunk_id => osiris_log_shared:last_chunk_id(ORef)};
 get_stats(Pid) when is_pid(Pid) ->
     erpc:call(node(Pid), ?MODULE, ?FUNCTION_NAME, [Pid]).

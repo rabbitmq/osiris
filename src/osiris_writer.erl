@@ -160,13 +160,12 @@ handle_continue(#{name := Name,
     Dir = osiris_log:directory(Config),
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
-    ORef = atomics:new(2, [{signed, true}]),
-    atomics:put(ORef, 2, -1),
+    ORef = osiris_log_shared:new(),
     CntName = {?MODULE, ExtRef},
     Log = osiris_log:init(Config#{dir => Dir,
                                   first_offset_fun =>
                                       fun (Fst) ->
-                                              atomics:put(ORef, 2, Fst)
+                                              osiris_log_shared:set_first_chunk_id(ORef, Fst)
                                       end,
                                   counter_spec =>
                                       {CntName, ?ADD_COUNTER_FIELDS}}),
@@ -184,7 +183,7 @@ handle_continue(#{name := Name,
             _ ->
                 -1
         end,
-    atomics:put(ORef, 1, CommittedOffset),
+    ok = osiris_log_shared:set_committed_chunk_id(ORef, CommittedOffset),
     counters:put(CntRef, ?C_COMMITTED_OFFSET, CommittedOffset),
     EvtFmt = maps:get(event_formatter, Config, undefined),
     ?INFO("osiris_writer:init/1: name: ~s last offset: ~b "
@@ -260,7 +259,7 @@ handle_batch(Commands,
             State = case COffs > COffs0 of
                         true ->
                             P = State2#?MODULE.pending_corrs,
-                            atomics:put(ORef, 1, COffs),
+                            ok = osiris_log_shared:set_committed_chunk_id(ORef, COffs),
                             counters:put(Cnt, ?C_COMMITTED_OFFSET, COffs),
                             Pending = notify_writers(P, COffs, Cfg),
                             State2#?MODULE{committed_offset = COffs,

@@ -177,17 +177,14 @@ handle_continue(#{name := Name,
             Self = self(),
             CntName = {?MODULE, ExtRef},
 
-            ORef = atomics:new(2, [{signed, true}]),
-            atomics:put(ORef, 1, -1),
-            atomics:put(ORef, 2, -1),
-
+            ORef = osiris_log_shared:new(),
             Dir = osiris_log:directory(Config),
+            FstOffsFun = fun (Fst) ->
+                                 osiris_log_shared:set_first_chunk_id(ORef, Fst)
+                         end,
             Log = osiris_log:init_acceptor(LeaderRange, LeaderEpochOffs,
                                            Config#{dir => Dir,
-                                                   first_offset_fun =>
-                                                   fun (Fst) ->
-                                                           atomics:put(ORef, 2, Fst)
-                                                   end,
+                                                   first_offset_fun => FstOffsFun,
                                                    counter_spec =>
                                                    {CntName, ?ADD_COUNTER_FIELDS}}),
             CntRef = osiris_log:counters_ref(Log),
@@ -401,7 +398,7 @@ handle_cast({committed_offset, Offs},
         true ->
             %% notify offset listeners
             counters:put(Cnt, ?C_COMMITTED_OFFSET, Offs),
-            ok = atomics:put(ORef, 1, Offs),
+            ok = osiris_log_shared:set_committed_chunk_id(ORef, Offs),
             {noreply,
              notify_offset_listeners(State#?MODULE{committed_offset = Offs})};
         false ->

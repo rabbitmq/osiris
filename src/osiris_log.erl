@@ -1282,7 +1282,7 @@ last_user_chunk_id_in_index(NextPos, IdxFd) ->
 committed_offset(#?MODULE{mode = #read{offset_ref = undefined}}) ->
     undefined;
 committed_offset(#?MODULE{mode = #read{offset_ref = Ref}}) ->
-    atomics:get(Ref, 1).
+    osiris_log_shared:committed_chunk_id(Ref).
 
 -spec get_current_epoch(state()) -> non_neg_integer().
 get_current_epoch(#?MODULE{mode = #write{current_epoch = Epoch}}) ->
@@ -2310,8 +2310,10 @@ find_segment_for_offset(Offset, IdxFiles) ->
 can_read_next_offset(#read{type = offset,
                            next_offset = NextOffset,
                            offset_ref = Ref}) ->
-    atomics:get(Ref, 1) >= NextOffset;
+    osiris_log_shared:committed_chunk_id(Ref) >= NextOffset;
 can_read_next_offset(#read{type = data}) ->
+    %% TODO: only return true if shared last chunk id is greater or equal to
+    %% next offset
     true.
 
 incr_next_offset(Num, #read{next_offset = NextOffset} = Read) ->
@@ -2583,9 +2585,11 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                     {ok, Pos} = file:position(Fd, Pos),
                     {end_of_stream, State};
                 eof ->
-                    FirstOffset = atomics:get(ORef, 2),
+                    FirstOffset = osiris_log_shared:first_chunk_id(ORef),
                     %% open next segment file and start there if it exists
                     NextChId = max(FirstOffset, NextChId0),
+                    %% TODO: replace this check with a last chunk id counter
+                    %% updated by the writer and replicas
                     SegFile = make_file_name(NextChId, "segment"),
                     case SegFile == CurFile of
                         true ->
