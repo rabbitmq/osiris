@@ -372,7 +372,6 @@
 -record(read,
         {type :: data | offset,
          offset_ref :: undefined | atomics:atomics_ref(),
-         last_offset = 0 :: offset(),
          next_offset = 0 :: offset(),
          transport :: transport(),
          chunk_selector :: all | user_data}).
@@ -2317,8 +2316,7 @@ can_read_next_offset(#read{type = data}) ->
     true.
 
 incr_next_offset(Num, #read{next_offset = NextOffset} = Read) ->
-    Read#read{last_offset = NextOffset,
-              next_offset = NextOffset + Num}.
+    Read#read{next_offset = NextOffset + Num}.
 
 make_file_name(N, Suff) ->
     lists:flatten(
