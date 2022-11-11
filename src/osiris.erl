@@ -28,9 +28,6 @@
          configure_logger/1,
          get_stats/1]).
 
-%% holds static or rarely changing fields
--record(cfg, {}).
--record(?MODULE, {cfg :: #cfg{}}).
 
 -type config() ::
     #{name := string(),
@@ -38,8 +35,6 @@
       event_formatter => {module(), atom(), list()},
       retention => [osiris:retention_spec()],
       atom() => term()}.
-
--opaque state() :: #?MODULE{}.
 
 -type mfarg() :: {module(), atom(), list()}.
 -type offset() :: non_neg_integer().
@@ -77,8 +72,7 @@
                             chunk_selector => all | user_data
                            }.
 
--export_type([state/0,
-              config/0,
+-export_type([config/0,
               offset/0,
               epoch/0,
               tail_info/0,
@@ -277,9 +271,9 @@ configure_logger(Module) ->
                             first_chunk_id => integer()}.
 get_stats(Pid)
   when node(Pid) =:= node() ->
-    {ok, #{offset_ref := ORef}} = gen:call(Pid, '$gen_call', get_reader_context),
-    #{committed_chunk_id => osiris_log_shared:committed_chunk_id(ORef),
-      first_chunk_id => osiris_log_shared:first_chunk_id(ORef),
-      last_chunk_id => osiris_log_shared:last_chunk_id(ORef)};
+    {ok, #{shared := Shared}} = gen:call(Pid, '$gen_call', get_reader_context),
+    #{committed_chunk_id => osiris_log_shared:committed_chunk_id(Shared),
+      first_chunk_id => osiris_log_shared:first_chunk_id(Shared),
+      last_chunk_id => osiris_log_shared:last_chunk_id(Shared)};
 get_stats(Pid) when is_pid(Pid) ->
     erpc:call(node(Pid), ?MODULE, ?FUNCTION_NAME, [Pid]).

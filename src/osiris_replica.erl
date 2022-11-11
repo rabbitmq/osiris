@@ -59,7 +59,6 @@
          socket :: undefined | gen_tcp:socket() | ssl:sslsocket(),
          gc_interval :: infinity | non_neg_integer(),
          reference :: term(),
-         offset_ref :: atomics:atomics_ref(),
          event_formatter :: undefined | mfa(),
          counter :: counters:counters_ref(),
          token :: undefined | binary()}).
@@ -177,14 +176,9 @@ handle_continue(#{name := Name,
             Self = self(),
             CntName = {?MODULE, ExtRef},
 
-            ORef = osiris_log_shared:new(),
             Dir = osiris_log:directory(Config),
-            FstOffsFun = fun (Fst) ->
-                                 osiris_log_shared:set_first_chunk_id(ORef, Fst)
-                         end,
             Log = osiris_log:init_acceptor(LeaderRange, LeaderEpochOffs,
                                            Config#{dir => Dir,
-                                                   first_offset_fun => FstOffsFun,
                                                    counter_spec =>
                                                    {CntName, ?ADD_COUNTER_FIELDS}}),
             CntRef = osiris_log:counters_ref(Log),
@@ -269,7 +263,6 @@ handle_continue(#{name := Name,
                            port = Port,
                            gc_interval = GcInterval1,
                            reference = ExtRef,
-                           offset_ref = ORef,
                            event_formatter = EvtFmt,
                            counter = CntRef,
                            token = Token,
@@ -354,18 +347,19 @@ handle_call(get_port, _From,
     {reply, Port, State};
 handle_call(get_reader_context, _From,
             #?MODULE{cfg =
-                         #cfg{offset_ref = ORef,
-                              name = Name,
+                         #cfg{name = Name,
                               directory = Dir,
                               reference = Ref,
                               counter = CntRef},
-                     committed_offset = COffs} =
+                     committed_offset = COffs,
+                     log = Log} =
                 State) ->
+    Shared = osiris_log:get_shared(Log),
     Reply =
         #{dir => Dir,
           name => Name,
           committed_offset => COffs,
-          offset_ref => ORef,
+          shared => Shared,
           reference => Ref,
           readers_counter_fun => fun(Inc) -> counters:add(CntRef, ?C_READERS, Inc) end},
     {reply, Reply, State};
@@ -391,14 +385,15 @@ handle_call(Unknown, _From,
 %% @end
 %%--------------------------------------------------------------------
 handle_cast({committed_offset, Offs},
-            #?MODULE{cfg = #cfg{offset_ref = ORef, counter = Cnt},
+            #?MODULE{cfg = #cfg{counter = Cnt},
+                     log = Log,
                      committed_offset = Last} =
                 State) ->
     case Offs > Last of
         true ->
             %% notify offset listeners
             counters:put(Cnt, ?C_COMMITTED_OFFSET, Offs),
-            ok = osiris_log_shared:set_committed_chunk_id(ORef, Offs),
+            ok = osiris_log:set_committed_chunk_id(Log, Offs),
             {noreply,
              notify_offset_listeners(State#?MODULE{committed_offset = Offs})};
         false ->
@@ -563,6 +558,9 @@ handle_incoming_data(Socket, Bin,
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
+terminate(_Reason, undefined) ->
+    %% if we crash in handle_continue we may end up here
+    ok;
 terminate(Reason, #?MODULE{cfg = #cfg{name = Name,
                                       socket = Sock}, log = Log}) ->
     ?DEBUG_(Name, "terminating with ~w ", [Reason]),

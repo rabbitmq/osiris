@@ -32,9 +32,11 @@
          read_chunk_parsed/1,
          read_chunk_parsed/2,
          committed_offset/1,
+         set_committed_chunk_id/2,
          get_current_epoch/1,
          get_directory/1,
          get_name/1,
+         get_shared/1,
          get_default_max_segment_size_bytes/0,
          counters_ref/1,
          close/1,
@@ -327,7 +329,8 @@
     osiris:config() |
     #{dir := file:filename(),
       epoch => non_neg_integer(),
-      first_offset_fun => fun((integer()) -> ok),
+      % first_offset_fun => fun((integer()) -> ok),
+      shared => atomics:atomics_ref(),
       max_segment_size_bytes => non_neg_integer(),
       %% max number of writer ids to keep around
       tracking_config => osiris_tracking:config(),
@@ -368,10 +371,10 @@
          %% the maximum number of active writer deduplication sessions
          %% that will be included in snapshots written to new segments
          readers_counter_fun = fun(_) -> ok end :: function(),
-         first_offset_fun :: fun ((integer()) -> ok)}).
+         shared :: atomics:atomics_ref()
+         }).
 -record(read,
         {type :: data | offset,
-         offset_ref :: undefined | atomics:atomics_ref(),
          next_offset = 0 :: offset(),
          transport :: transport(),
          chunk_selector :: all | user_data}).
@@ -465,7 +468,7 @@ init(#{dir := Dir,
     %% is initialised to 0 however and will be updated after each retention run.
     counters:put(Cnt, ?C_OFFSET, -1),
     counters:put(Cnt, ?C_SEGMENTS, 0),
-    FirstOffsetFun = maps:get(first_offset_fun, Config, fun (_) -> ok end),
+    Shared = osiris_log_shared:new(),
     Cfg = #cfg{directory = Dir,
                name = Name,
                max_segment_size_bytes = MaxSizeBytes,
@@ -474,7 +477,7 @@ init(#{dir := Dir,
                retention = Retention,
                counter = Cnt,
                counter_id = counter_id(Config),
-               first_offset_fun = FirstOffsetFun},
+               shared = Shared},
     ok = maybe_fix_corrupted_files(Config),
     case first_and_last_seginfos(Config) of
         none ->
@@ -485,7 +488,7 @@ init(#{dir := Dir,
                              _ ->
                                  0
                          end,
-            FirstOffsetFun(NextOffset - 1),
+            osiris_log_shared:set_first_chunk_id(Shared, NextOffset - 1),
             open_new_segment(#?MODULE{cfg = Cfg,
                                       mode =
                                           #write{type = WriterType,
@@ -497,11 +500,10 @@ init(#{dir := Dir,
          #seg_info{file = Filename,
                    index = IdxFilename,
                    size = Size,
-                   last =
-                   #chunk_info{epoch = LastEpoch,
-                               timestamp = LastTs,
-                               id = LastChId,
-                               num = LastNum}}} ->
+                   last = #chunk_info{epoch = LastEpoch,
+                                      timestamp = LastTs,
+                                      id = LastChId,
+                                      num = LastNum}}} ->
             %% assert epoch is same or larger
             %% than last known epoch
             case LastEpoch > Epoch of
@@ -517,7 +519,8 @@ init(#{dir := Dir,
             counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
             counters:put(Cnt, ?C_OFFSET, LastChId + LastNum - 1),
             counters:put(Cnt, ?C_SEGMENTS, NumSegments),
-            FirstOffsetFun(FstChId),
+            osiris_log_shared:set_first_chunk_id(Shared, FstChId),
+            osiris_log_shared:set_last_chunk_id(Shared, LastChId),
             ?DEBUG("~s:~s/~b: ~s next offset ~b first offset ~b",
                    [?MODULE,
                     ?FUNCTION_NAME,
@@ -552,7 +555,7 @@ init(#{dir := Dir,
             %% here too?
             {ok, _} = file:position(SegFd, eof),
             {ok, _} = file:position(IdxFd, eof),
-            FirstOffsetFun(-1),
+            osiris_log_shared:set_first_chunk_id(Shared, -1),
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
@@ -673,12 +676,8 @@ write(Entries, Now, #?MODULE{mode = #write{}} = State)
     when is_integer(Now) ->
     write(Entries, ?CHNK_USER, Now, <<>>, State).
 
--spec write([osiris:data()],
-            chunk_type(),
-            osiris:timestamp(),
-            iodata(),
-            state()) ->
-               state().
+-spec write([osiris:data()], chunk_type(), osiris:timestamp(),
+            iodata(), state()) -> state().
 write([_ | _] = Entries,
       ChType,
       Now,
@@ -688,8 +687,8 @@ write([_ | _] = Entries,
                    #write{current_epoch = Epoch, tail_info = {Next, _}} =
                        _Write0} =
           State0)
-    when is_integer(Now)
-         andalso is_integer(ChType) ->
+    when is_integer(Now) andalso
+         is_integer(ChType) ->
     %% The osiris writer always pass Entries in the reversed order
     %% in order to avoid unnecessary lists rev|trav|ersals
     {ChunkData, NumRecords} =
@@ -985,6 +984,7 @@ check_chunk_has_expected_epoch(ChunkId, Epoch, IdxFiles) ->
 
 init_data_reader_at(ChunkId, FilePos, File,
                     #{dir := Dir, name := Name,
+                      shared := Shared,
                       readers_counter_fun := CountersFun} = Config) ->
     {ok, Fd} = file:open(File, [raw, binary, read]),
     {ok, FilePos} = file:position(Fd, FilePos),
@@ -997,10 +997,10 @@ init_data_reader_at(ChunkId, FilePos, File,
                       counter_id = counter_id(Config),
                       name = Name,
                       readers_counter_fun = CountersFun,
-                      first_offset_fun = fun (_) -> ok end},
+                      shared = Shared
+                     },
              mode =
                  #read{type = data,
-                       offset_ref = maps:get(offset_ref, Config, undefined),
                        next_offset = ChunkId,
                        chunk_selector = all,
                        transport = maps:get(transport, Config, tcp)},
@@ -1209,7 +1209,7 @@ init_offset_reader0(OffsetSpec, #{} = Conf)
 open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                       #{dir := Dir,
                         name := Name,
-                        offset_ref := OffsetRef,
+                        shared := Shared,
                         readers_counter_fun := ReaderCounterFun,
                         options := Options} =
                       Conf) ->
@@ -1222,12 +1222,11 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                              counter_id = counter_id(Conf),
                              name = Name,
                              readers_counter_fun = ReaderCounterFun,
-                             first_offset_fun = fun (_) -> ok end
+                             shared = Shared
                             },
                   mode = #read{type = offset,
                                chunk_selector = maps:get(chunk_selector, Options,
                                                          user_data),
-                               offset_ref = OffsetRef,
                                next_offset = NextChunkId,
                                transport = maps:get(transport, Options, tcp)},
                   fd = Fd}}.
@@ -1277,11 +1276,15 @@ last_user_chunk_id_in_index(NextPos, IdxFd) ->
             Error
     end.
 
--spec committed_offset(state()) -> undefined | offset().
-committed_offset(#?MODULE{mode = #read{offset_ref = undefined}}) ->
-    undefined;
-committed_offset(#?MODULE{mode = #read{offset_ref = Ref}}) ->
+-spec committed_offset(state()) -> integer().
+committed_offset(#?MODULE{cfg = #cfg{shared = Ref}}) ->
     osiris_log_shared:committed_chunk_id(Ref).
+
+-spec set_committed_chunk_id(state(), offset()) -> ok.
+set_committed_chunk_id(#?MODULE{mode = #write{},
+                                cfg = #cfg{shared = Ref}}, ChunkId)
+  when is_integer(ChunkId) ->
+    osiris_log_shared:set_committed_chunk_id(Ref, ChunkId).
 
 -spec get_current_epoch(state()) -> non_neg_integer().
 get_current_epoch(#?MODULE{mode = #write{current_epoch = Epoch}}) ->
@@ -1295,6 +1298,10 @@ get_directory(#?MODULE{cfg = #cfg{directory = Dir}}) ->
 get_name(#?MODULE{cfg = #cfg{name = Name}}) ->
     Name.
 
+-spec get_shared(state()) -> atomics:atomics_ref().
+get_shared(#?MODULE{cfg = #cfg{shared = Shared}}) ->
+    Shared.
+
 -spec get_default_max_segment_size_bytes() -> non_neg_integer().
 get_default_max_segment_size_bytes() ->
     ?DEFAULT_MAX_SEGMENT_SIZE_B.
@@ -1304,8 +1311,8 @@ counters_ref(#?MODULE{cfg = #cfg{counter = C}}) ->
     C.
 
 -spec read_header(state()) ->
-                     {ok, header_map(), state()} | {end_of_stream, state()} |
-                     {error, {invalid_chunk_header, term()}}.
+    {ok, header_map(), state()} | {end_of_stream, state()} |
+    {error, {invalid_chunk_header, term()}}.
 read_header(#?MODULE{cfg = #cfg{}} = State0) ->
     %% reads the next chunk of entries, parsed
     %% NB: this may return records before the requested index,
@@ -2116,7 +2123,8 @@ write_chunk(Chunk,
             Timestamp,
             Epoch,
             NumRecords,
-            #?MODULE{cfg = #cfg{counter = CntRef} = Cfg,
+            #?MODULE{cfg = #cfg{counter = CntRef,
+                                shared = Shared} = Cfg,
                      fd = Fd,
                      index_fd = IdxFd,
                      mode =
@@ -2145,6 +2153,7 @@ write_chunk(Chunk,
                               Epoch:64/unsigned,
                               Cur:32/unsigned,
                               ChType:8/unsigned>>),
+            osiris_log_shared:set_last_chunk_id(Shared, Next),
             %% update counters
             counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
             counters:add(CntRef, ?C_CHUNKS, 1),
@@ -2158,8 +2167,8 @@ write_chunk(Chunk,
     end.
 
 
-maybe_set_first_offset(0, #cfg{first_offset_fun = Fun}) ->
-    Fun(0);
+maybe_set_first_offset(0, #cfg{shared = Ref}) ->
+    osiris_log_shared:set_first_chunk_id(Ref, 0);
 maybe_set_first_offset(_, _Cfg) ->
     ok.
 
@@ -2306,14 +2315,14 @@ find_segment_for_offset(Offset, IdxFiles) ->
             not_found
     end.
 
-can_read_next_offset(#read{type = offset,
-                           next_offset = NextOffset,
-                           offset_ref = Ref}) ->
+can_read_next_chunk_id(#?MODULE{mode = #read{type = offset,
+                                             next_offset = NextOffset},
+                              cfg = #cfg{shared = Ref}}) ->
     osiris_log_shared:committed_chunk_id(Ref) >= NextOffset;
-can_read_next_offset(#read{type = data}) ->
-    %% TODO: only return true if shared last chunk id is greater or equal to
-    %% next offset
-    true.
+can_read_next_chunk_id(#?MODULE{mode = #read{type = data,
+                                             next_offset = NextOffset},
+                              cfg = #cfg{shared = Ref}}) ->
+    osiris_log_shared:last_chunk_id(Ref) >= NextOffset.
 
 incr_next_offset(Num, #read{next_offset = NextOffset} = Read) ->
     Read#read{next_offset = NextOffset + Num}.
@@ -2535,14 +2544,14 @@ recover_tracking(Fd, Trk0) ->
     end.
 
 read_header0(#?MODULE{cfg = #cfg{directory = Dir,
+                                 shared = Shared,
                                  counter = CntRef},
-                      mode = #read{offset_ref = ORef,
-                                   next_offset = NextChId0} = Read0,
+                      mode = #read{next_offset = NextChId0} = Read0,
                       current_file = CurFile,
                       fd = Fd} =
                  State) ->
     %% reads the next header if permitted
-    case can_read_next_offset(Read0) of
+    case can_read_next_chunk_id(State) of
         true ->
             {ok, Pos} = file:position(Fd, cur),
             case file:read(Fd, ?HEADER_SIZE_B) of
@@ -2583,7 +2592,7 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                     {ok, Pos} = file:position(Fd, Pos),
                     {end_of_stream, State};
                 eof ->
-                    FirstOffset = osiris_log_shared:first_chunk_id(ORef),
+                    FirstOffset = osiris_log_shared:first_chunk_id(Shared),
                     %% open next segment file and start there if it exists
                     NextChId = max(FirstOffset, NextChId0),
                     %% TODO: replace this check with a last chunk id counter
@@ -2642,20 +2651,20 @@ trigger_retention_eval(#?MODULE{cfg =
                                     #cfg{directory = Dir,
                                          retention = RetentionSpec,
                                          counter = Cnt,
-                                         first_offset_fun = Fun}} = State) ->
-    ok =
-        osiris_retention:eval(Dir, RetentionSpec,
-                              %% updates first offset and first timestamp
-                              %% after retention has been evaluated
-                              fun ({{FstOff, _}, FstTs, Seg}) when is_integer(FstOff),
-                                                                   is_integer(FstTs) ->
-                                      Fun(FstOff),
-                                      counters:put(Cnt, ?C_FIRST_OFFSET, FstOff),
-                                      counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
-                                      counters:put(Cnt, ?C_SEGMENTS, Seg);
-                                  (_) ->
-                                      ok
-                              end),
+                                         shared = Shared}} = State) ->
+
+    %% updates first offset and first timestamp
+    %% after retention has been evaluated
+    EvalFun = fun ({{FstOff, _}, FstTs, Seg}) when is_integer(FstOff),
+                                                   is_integer(FstTs) ->
+                      osiris_log_shared:set_first_chunk_id(Shared, FstOff),
+                      counters:put(Cnt, ?C_FIRST_OFFSET, FstOff),
+                      counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
+                      counters:put(Cnt, ?C_SEGMENTS, Seg);
+                  (_) ->
+                      ok
+              end,
+    ok = osiris_retention:eval(Dir, RetentionSpec, EvalFun),
     State.
 
 next_location(undefined) ->
