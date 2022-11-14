@@ -28,9 +28,6 @@
          configure_logger/1,
          get_stats/1]).
 
-%% holds static or rarely changing fields
--record(cfg, {}).
--record(?MODULE, {cfg :: #cfg{}}).
 
 -type config() ::
     #{name := string(),
@@ -38,8 +35,6 @@
       event_formatter => {module(), atom(), list()},
       retention => [osiris:retention_spec()],
       atom() => term()}.
-
--opaque state() :: #?MODULE{}.
 
 -type mfarg() :: {module(), atom(), list()}.
 -type offset() :: non_neg_integer().
@@ -77,8 +72,7 @@
                             chunk_selector => all | user_data
                            }.
 
--export_type([state/0,
-              config/0,
+-export_type([config/0,
               offset/0,
               epoch/0,
               tail_info/0,
@@ -200,7 +194,6 @@ init_reader(Pid, OffsetSpec, {_, _} = CounterSpec, Options)
     when is_pid(Pid) andalso node(Pid) =:= node() ->
     ?DEBUG("osiris: initialising reader. Spec: ~w", [OffsetSpec]),
     {ok, Ctx0} = gen:call(Pid, '$gen_call', get_reader_context),
-    % CntId = {?MODULE, Ref, Tag, Pid},
     Ctx = Ctx0#{counter_spec => CounterSpec,
                 options => Options},
     osiris_log:init_offset_reader(OffsetSpec, Ctx).
@@ -277,9 +270,10 @@ configure_logger(Module) ->
 -spec get_stats(pid()) -> #{committed_chunk_id => integer(),
                             first_chunk_id => integer()}.
 get_stats(Pid)
-    when node(Pid) =:= node() ->
-    {ok, #{offset_ref := ORef}} = gen:call(Pid, '$gen_call', get_reader_context),
-    #{committed_chunk_id => atomics:get(ORef, 1),
-      first_chunk_id => atomics:get(ORef, 2)};
+  when node(Pid) =:= node() ->
+    {ok, #{shared := Shared}} = gen:call(Pid, '$gen_call', get_reader_context),
+    #{committed_chunk_id => osiris_log_shared:committed_chunk_id(Shared),
+      first_chunk_id => osiris_log_shared:first_chunk_id(Shared),
+      last_chunk_id => osiris_log_shared:last_chunk_id(Shared)};
 get_stats(Pid) when is_pid(Pid) ->
     erpc:call(node(Pid), ?MODULE, ?FUNCTION_NAME, [Pid]).

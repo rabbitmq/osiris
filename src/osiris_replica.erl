@@ -39,6 +39,7 @@
 -export([get_port/1, combine_ips_hosts/4]).
 %% gen_server callbacks
 -export([init/1,
+         handle_continue/2,
          handle_call/3,
          handle_cast/2,
          handle_info/2,
@@ -58,7 +59,6 @@
          socket :: undefined | gen_tcp:socket() | ssl:sslsocket(),
          gc_interval :: infinity | non_neg_integer(),
          reference :: term(),
-         offset_ref :: atomics:atomics_ref(),
          event_formatter :: undefined | mfa(),
          counter :: counters:counters_ref(),
          token :: undefined | binary()}).
@@ -100,13 +100,23 @@
 %%%===================================================================
 
 start(Node, Config = #{name := Name}) when is_list(Name) ->
-    supervisor:start_child({?SUP, Node},
-                           #{id => Name,
-                             start => {?MODULE, start_link, [Config]},
-                             restart => temporary,
-                             shutdown => 5000,
-                             type => worker,
-                             modules => [?MODULE]}).
+    case supervisor:start_child({?SUP, Node},
+                                #{id => Name,
+                                  start => {?MODULE, start_link, [Config]},
+                                  restart => temporary,
+                                  shutdown => 5000,
+                                  type => worker,
+                                  modules => [?MODULE]}) of
+        {ok, Pid} = Res ->
+            %% make a dummy call to block until intialisation is complete
+            _ = await(Pid),
+            Res;
+        {ok, _, Pid} = Res ->
+            _ = await(Pid),
+            Res;
+        Err ->
+            Err
+    end.
 
 stop(Node, #{name := Name}) ->
     ?SUP:stop_child(Node, Name).
@@ -127,6 +137,9 @@ start_link(Conf) ->
 get_port(Server) ->
     gen_server:call(Server, get_port).
 
+await(Server) ->
+    gen_server:call(Server, await, infinity).
+
 %%%===================================================================
 %%% gen_server callbacks
 %%%===================================================================
@@ -142,36 +155,30 @@ get_port(Server) ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init(#{name := Name,
-       leader_pid := LeaderPid,
-       reference := ExtRef} =
-         Config) ->
+init(Config) ->
+    {ok, undefined, {continue, Config}}.
+
+handle_continue(#{name := Name,
+                  leader_pid := LeaderPid,
+                  reference := ExtRef} = Config, undefined) ->
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
     Node = node(LeaderPid),
 
     case rpc:call(Node, osiris_writer, overview, [LeaderPid]) of
         {error, _} = Err ->
-            {stop, Err};
+            {stop, Err, undefined};
         {badrpc, Reason} ->
-            {error, Reason};
+            {stop, {badrpc, Reason}, undefined};
         {ok, {LeaderRange, LeaderEpochOffs}}  ->
             {ok, {Min, Max}} = application:get_env(port_range),
             Transport = application:get_env(osiris, replication_transport, tcp),
             Self = self(),
             CntName = {?MODULE, ExtRef},
 
-            ORef = atomics:new(2, [{signed, true}]),
-            atomics:put(ORef, 1, -1),
-            atomics:put(ORef, 2, -1),
-
             Dir = osiris_log:directory(Config),
             Log = osiris_log:init_acceptor(LeaderRange, LeaderEpochOffs,
                                            Config#{dir => Dir,
-                                                   first_offset_fun =>
-                                                   fun (Fst) ->
-                                                           atomics:put(ORef, 2, Fst)
-                                                   end,
                                                    counter_spec =>
                                                    {CntName, ?ADD_COUNTER_FIELDS}}),
             CntRef = osiris_log:counters_ref(Log),
@@ -246,7 +253,7 @@ init(#{name := Name,
                           end,
             counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
             EvtFmt = maps:get(event_formatter, Config, undefined),
-            {ok,
+            {noreply,
              #?MODULE{cfg =
                       #cfg{name = Name,
                            leader_pid = LeaderPid,
@@ -256,7 +263,6 @@ init(#{name := Name,
                            port = Port,
                            gc_interval = GcInterval1,
                            reference = ExtRef,
-                           offset_ref = ORef,
                            event_formatter = EvtFmt,
                            counter = CntRef,
                            token = Token,
@@ -341,18 +347,19 @@ handle_call(get_port, _From,
     {reply, Port, State};
 handle_call(get_reader_context, _From,
             #?MODULE{cfg =
-                         #cfg{offset_ref = ORef,
-                              name = Name,
+                         #cfg{name = Name,
                               directory = Dir,
                               reference = Ref,
                               counter = CntRef},
-                     committed_offset = COffs} =
+                     committed_offset = COffs,
+                     log = Log} =
                 State) ->
+    Shared = osiris_log:get_shared(Log),
     Reply =
         #{dir => Dir,
           name => Name,
           committed_offset => COffs,
-          offset_ref => ORef,
+          shared => Shared,
           reference => Ref,
           readers_counter_fun => fun(Inc) -> counters:add(CntRef, ?C_READERS, Inc) end},
     {reply, Reply, State};
@@ -360,6 +367,8 @@ handle_call({update_retention, Retention}, _From,
             #?MODULE{log = Log0} = State) ->
     Log = osiris_log:update_retention(Retention, Log0),
     {reply, ok, State#?MODULE{log = Log}};
+handle_call(await, _From, State) ->
+    {reply, ok, State};
 handle_call(Unknown, _From,
             #?MODULE{cfg = #cfg{name = Name}} = State) ->
     ?INFO_(Name, "unknown command ~W", [Unknown, 10]),
@@ -376,14 +385,15 @@ handle_call(Unknown, _From,
 %% @end
 %%--------------------------------------------------------------------
 handle_cast({committed_offset, Offs},
-            #?MODULE{cfg = #cfg{offset_ref = ORef, counter = Cnt},
+            #?MODULE{cfg = #cfg{counter = Cnt},
+                     log = Log,
                      committed_offset = Last} =
                 State) ->
     case Offs > Last of
         true ->
             %% notify offset listeners
             counters:put(Cnt, ?C_COMMITTED_OFFSET, Offs),
-            ok = atomics:put(ORef, 1, Offs),
+            ok = osiris_log:set_committed_chunk_id(Log, Offs),
             {noreply,
              notify_offset_listeners(State#?MODULE{committed_offset = Offs})};
         false ->
@@ -548,6 +558,9 @@ handle_incoming_data(Socket, Bin,
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
+terminate(_Reason, undefined) ->
+    %% if we crash in handle_continue we may end up here
+    ok;
 terminate(Reason, #?MODULE{cfg = #cfg{name = Name,
                                       socket = Sock}, log = Log}) ->
     ?DEBUG_(Name, "terminating with ~w ", [Reason]),

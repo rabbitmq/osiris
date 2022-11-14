@@ -16,7 +16,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 -include("src/osiris.hrl").
--include("src/osiris_peer_shim.hrl").
+% -include("src/osiris_peer_shim.hrl").
 
 %%%===================================================================
 %%% Common Test callbacks
@@ -103,7 +103,7 @@ init_per_testcase(TestCase, Config) ->
     Dir = filename:join(PrivDir, TestCase),
     LeaderDir = filename:join(Dir, "leader"),
     Follower1Dir = filename:join(Dir, "follower1"),
-    ORef = atomics:new(2, [{signed, true}]),
+    ORef = osiris_log_shared:new(),
     [{test_case, TestCase},
      {leader_dir, LeaderDir},
      {follower1_dir, Follower1Dir},
@@ -112,7 +112,7 @@ init_per_testcase(TestCase, Config) ->
         name => atom_to_list(TestCase),
         epoch => 1,
         readers_counter_fun => fun(_) -> ok end,
-        offset_ref => ORef,
+        shared => ORef,
         options => #{}}},
      {dir, Dir}
      | Config].
@@ -195,12 +195,11 @@ subbatch(Config) ->
     S1 = osiris_log:write(
              lists:reverse([Batch, <<"simple">>]), S0),
     ?assertEqual(3, osiris_log:next_offset(S1)),
-    OffRef = atomics:new(1, []),
-    atomics:put(OffRef, 1, -1), %% the initial value
+    OffRef = osiris_log_shared:new(),
     {ok, R0} =
-        osiris_log:init_offset_reader(0, Conf#{offset_ref => OffRef}),
+        osiris_log:init_offset_reader(0, Conf#{shared => OffRef}),
     {end_of_stream, R1} = osiris_log:read_chunk_parsed(R0),
-    atomics:put(OffRef, 1, 0), %% first chunk index
+    osiris_log_shared:set_committed_chunk_id(OffRef, 0), %% first chunk index
 
     ?assertMatch({[{0, <<"hi">>}, {1, <<"h0">>}, {2, <<"simple">>}], _},
                  osiris_log:read_chunk_parsed(R1)),
@@ -220,12 +219,11 @@ subbatch_compressed(Config) ->
     S1 = osiris_log:write(
              lists:reverse([Batch, <<"simple">>]), S0),
     ?assertEqual(3, osiris_log:next_offset(S1)),
-    OffRef = atomics:new(1, []),
-    atomics:put(OffRef, 1, -1), %% the initial value
+    OffRef = osiris_log_shared:new(),
     {ok, R0} =
-        osiris_log:init_offset_reader(0, Conf#{offset_ref => OffRef}),
+        osiris_log:init_offset_reader(0, Conf#{shared => OffRef}),
     {end_of_stream, R1} = osiris_log:read_chunk_parsed(R0),
-    atomics:put(OffRef, 1, 0), %% first chunk index
+    osiris_log_shared:set_committed_chunk_id(OffRef, 0), %% first chunk index
 
     %% compressed sub batches should not be parsed server side
     %% so just returns the batch as is
@@ -239,10 +237,9 @@ subbatch_compressed(Config) ->
 read_chunk_parsed(Config) ->
     Conf = ?config(osiris_conf, Config),
     S0 = osiris_log:init(Conf),
-    {ok, R0} = osiris_log:init_data_reader({0, empty}, Conf),
-    ct:pal("before"),
+    RConf = Conf#{shared => osiris_log:get_shared(S0)},
+    {ok, R0} = osiris_log:init_data_reader({0, empty}, RConf),
     {end_of_stream, R1} = osiris_log:read_chunk_parsed(R0),
-    ct:pal("empty"),
     _S1 = osiris_log:write([<<"hi">>], S0),
     ?assertMatch({[{0, <<"hi">>}], _}, osiris_log:read_chunk_parsed(R1)),
     ok.
@@ -250,7 +247,8 @@ read_chunk_parsed(Config) ->
 read_chunk_parsed_2(Config) ->
     Conf = ?config(osiris_conf, Config),
     S0 = osiris_log:init(Conf),
-    {ok, R0} = osiris_log:init_data_reader({0, empty}, Conf),
+    RConf = Conf#{shared => osiris_log:get_shared(S0)},
+    {ok, R0} = osiris_log:init_data_reader({0, empty}, RConf),
     {end_of_stream, R1} = osiris_log:read_chunk_parsed(R0, with_header),
     _S1 = osiris_log:write([<<"hi">>], S0),
     {ok,
@@ -266,14 +264,15 @@ read_chunk_parsed_multiple_chunks(Config) ->
     %% osiris_writer passes entries in reversed order
     S1 = osiris_log:write(
              lists:reverse(Entries), S0),
-    _S2 = osiris_log:write([<<"hi-again">>], S1),
-    {ok, R0} = osiris_log:init_data_reader({0, empty}, Conf),
+    S2 = osiris_log:write([<<"hi-again">>], S1),
+    RConf = Conf#{shared => osiris_log:get_shared(S2)},
+    {ok, R0} = osiris_log:init_data_reader({0, empty}, RConf),
     {[{0, <<"hi">>}, {1, <<"hi-there">>}], R1} =
         osiris_log:read_chunk_parsed(R0),
     ?assertMatch({[{2, <<"hi-again">>}], _},
                  osiris_log:read_chunk_parsed(R1)),
     %% open another reader at a later index
-    {ok, R2} = osiris_log:init_data_reader({2, {1, 0, 0}}, Conf),
+    {ok, R2} = osiris_log:init_data_reader({2, {1, 0, 0}}, RConf),
     ?assertMatch({[{2, <<"hi-again">>}], _},
                  osiris_log:read_chunk_parsed(R2)),
     ok.
@@ -285,15 +284,16 @@ read_chunk_parsed_2_multiple_chunks(Config) ->
     %% osiris_writer passes entries in reversed order
     S1 = osiris_log:write(
              lists:reverse(Entries), S0),
-    _S2 = osiris_log:write([<<"hi-again">>], S1),
-    {ok, R0} = osiris_log:init_data_reader({0, empty}, Conf),
+    S2 = osiris_log:write([<<"hi-again">>], S1),
+    RConf = Conf#{shared => osiris_log:get_shared(S2)},
+    {ok, R0} = osiris_log:init_data_reader({0, empty}, RConf),
     {ok, #{num_records := 2},
      [{0, <<"hi">>}, {1, <<"hi-there">>}], R1} =
         osiris_log:read_chunk_parsed(R0, with_header),
     ?assertMatch({ok, #{num_records := 1}, [{2, <<"hi-again">>}], _},
                  osiris_log:read_chunk_parsed(R1, with_header)),
     %% open another reader at a later index
-    {ok, R2} = osiris_log:init_data_reader({2, {1, 0, 0}}, Conf),
+    {ok, R2} = osiris_log:init_data_reader({2, {1, 0, 0}}, RConf),
     ?assertMatch({ok, #{num_records := 1}, [{2, <<"hi-again">>}], _},
                  osiris_log:read_chunk_parsed(R2, with_header)),
     ok.
@@ -301,13 +301,13 @@ read_chunk_parsed_2_multiple_chunks(Config) ->
 read_header(Config) ->
     Conf = ?config(osiris_conf, Config),
     W0 = osiris_log:init(Conf),
-    OffRef = atomics:new(2, []),
+    OffRef = osiris_log_shared:new(),
     {ok, R0} =
-        osiris_log:init_offset_reader(first, Conf#{offset_ref => OffRef}),
+        osiris_log:init_offset_reader(first, Conf#{shared => OffRef}),
     {end_of_stream, R1} = osiris_log:read_header(R0),
     W1 = osiris_log:write([<<"hi">>, <<"ho">>], W0),
     _W = osiris_log:write([<<"hum">>], W1),
-    atomics:put(OffRef, 1, 3),
+    osiris_log_shared:set_committed_chunk_id(OffRef, 3),
     {ok, H1, R2} = osiris_log:read_header(R1),
     ?assertMatch(#{chunk_id := 0,
                    epoch := 1,
@@ -345,11 +345,12 @@ write_multi_log(Config) ->
             filename:join(?config(dir, Config), "*.segment")),
     ?assertEqual(2, length(Segments)),
 
-    OffRef = atomics:new(2, []),
-    atomics:put(OffRef, 1, NextOffset), %% takes a single offset tracking data into account
+    OffRef = osiris_log_shared:new(),
+    %% takes a single offset tracking data into account
+    osiris_log_shared:set_committed_chunk_id(OffRef, NextOffset),
     %% ensure all records can be read
     {ok, R0} =
-        osiris_log:init_offset_reader(first, Conf#{offset_ref => OffRef}),
+        osiris_log:init_offset_reader(first, Conf#{shared => OffRef}),
 
     R1 = lists:foldl(fun(_, Acc0) ->
                         {Records = [_ | _], Acc} =
@@ -429,7 +430,7 @@ init_offset_reader(Config, Mode) ->
         [{1, [<<"one">>]}, {2, [<<"two">>]}, {3, [<<"three">>, <<"four">>]}],
     LDir = ?config(leader_dir, Config),
     Conf = ?config(osiris_conf, Config),
-    set_offset_ref(Conf, 3),
+    set_shared(Conf, 3),
     LLog0 = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(LLog0),
     RConf = Conf#{dir => LDir, mode => Mode},
@@ -491,7 +492,7 @@ init_offset_reader_last_chunk_is_not_user_chunk(Config) ->
 
     Conf = ?config(osiris_conf, Config),
     RConf = Conf#{dir => LDir},
-    set_offset_ref(RConf, 4),
+    set_shared(RConf, 4),
     % Test that 'last' returns last user chunk
     {ok, L1} = osiris_log:init_offset_reader(last, RConf),
     ?assertEqual(1, osiris_log:next_offset(L1)),
@@ -511,7 +512,7 @@ init_offset_reader_no_user_chunk_in_last_segment(Config) ->
     Conf0 = ?config(osiris_conf, Config),
     Conf = Conf0#{max_segment_size_bytes => 120},
     S0 = seed_log(Conf, [{1, [<<"one">>]}], Config),
-    set_offset_ref(Conf, 2),
+    set_shared(Conf, 2),
     S1 = osiris_log:write([<<"1st tracking delta chunk">>],
                           ?CHNK_TRK_DELTA,
                           ?LINE,
@@ -571,7 +572,7 @@ init_offset_reader_timestamp_empty(Config) ->
     % application:set_env(osiris, max_segment_size_chunks, 1),
     Conf = Conf0#{max_segment_size_chunks => 1},
     LLog0 = seed_log(LDir, EpochChunks, Config),
-    set_offset_ref(Conf, 3),
+    set_shared(Conf, 3),
     osiris_log:close(LLog0),
     RConf = Conf#{dir => LDir},
 
@@ -591,7 +592,7 @@ init_offset_reader_timestamp(Config) ->
     Conf0 = ?config(osiris_conf, Config),
     Conf = Conf0#{max_segment_size_chunks => 1},
     LLog0 = seed_log(LDir, EpochChunks, Config),
-    set_offset_ref(Conf, 3),
+    set_shared(Conf, 3),
     osiris_log:close(LLog0),
     RConf = Conf#{dir => LDir},
 
@@ -633,7 +634,7 @@ init_offset_reader_timestamp_multi_segment(Config) ->
     Conf = Conf0#{max_segment_size_chunks => 1},
     LLog0 = seed_log(LDir, EpochChunks, Config),
 
-    set_offset_ref(Conf, 3),
+    set_shared(Conf, 3),
     osiris_log:close(LLog0),
     application:unset_env(osiris, max_segment_size_chunks),
     RConf = Conf#{dir => LDir},
@@ -669,7 +670,7 @@ init_offset_reader_truncated(Config) ->
     Conf = ?config(osiris_conf, Config),
     LDir = ?config(leader_dir, Config),
     LLog0 = seed_log(LDir, EpochChunks, Config),
-    set_offset_ref(Conf, 1000),
+    set_shared(Conf, 1000),
     RConf = Conf#{dir => LDir},
     osiris_log:close(LLog0),
 
@@ -714,7 +715,8 @@ init_data_reader_next(Config) ->
     _LLog0 = seed_log(LDir, [{1, ["one"]}], Config),
     %% seed is up to date
     FLog0 = seed_log(FDir, [{1, ["one"]}], Config),
-    RRConf = Conf#{dir => LDir},
+    RRConf = Conf#{dir => LDir,
+                   shared => osiris_log:get_shared(FLog0)},
     %% the next offset, i.e. offset 0
     {ok, _RLog0} =
         osiris_log:init_data_reader(
@@ -727,7 +729,8 @@ init_data_reader_empty_log(Config) ->
     LLog0 = seed_log(LDir, [], Config),
     %% an empty log
     FLog0 = seed_log(?config(follower1_dir, Config), [], Config),
-    RRConf = Conf#{dir => ?config(leader_dir, Config)},
+    RRConf = Conf#{dir => ?config(leader_dir, Config),
+                   shared => osiris_log:get_shared(FLog0)},
     %% the next offset, i.e. offset 0
     {ok, RLog0} =
         osiris_log:init_data_reader(
@@ -757,7 +760,8 @@ init_data_reader_truncated(Config) ->
     Conf = ?config(osiris_conf, Config),
     LDir = ?config(leader_dir, Config),
     LLog0 = seed_log(LDir, EpochChunks, Config),
-    RConf = Conf#{dir => LDir},
+    RConf = Conf#{dir => LDir,
+                  shared => osiris_log:get_shared(LLog0)},
     osiris_log:close(LLog0),
 
     %% "Truncate" log by deleting first segment
@@ -900,9 +904,11 @@ accept_chunk(Config) ->
 
     F0 = osiris_log:init(FConf),
 
+    RConf = LConf#{shared => osiris_log:get_shared(L2)},
+
     {ok, R0} =
         osiris_log:init_data_reader(
-            osiris_log:tail_info(F0), LConf),
+            osiris_log:tail_info(F0), RConf),
     {Chunk1, R1} = read_chunk(R0),
     % ct:pal("Chunk1 ~w", [Chunk1]),
     F1 = osiris_log:accept_chunk(Chunk1, F0),
@@ -941,9 +947,11 @@ accept_chunk_truncates_tail(Config) ->
     {Range, EOffs} = osiris_log:overview(LDir),
     ALog0 =
         osiris_log:init_acceptor(Range, EOffs, Conf#{dir => FDir, epoch => 2}),
+
+    RConf = Conf#{dir => LDir,
+                  shared => osiris_log:get_shared(FLog0)},
     {ok, RLog0} =
-        osiris_log:init_data_reader(
-            osiris_log:tail_info(ALog0), Conf#{dir => LDir}),
+        osiris_log:init_data_reader(osiris_log:tail_info(ALog0), RConf),
     {ok, {_, _, _, Hd, Ch, Tr}, _RLog} = osiris_log:read_chunk(RLog0),
     ALog = osiris_log:accept_chunk([Hd, Ch, Tr], ALog0),
     osiris_log:close(ALog),
@@ -1093,7 +1101,7 @@ init_corrupted_log(Config) ->
     Conf0 = ?config(osiris_conf, Config),
     Conf = Conf0#{dir => LDir},
     _ = osiris_log:init(Conf),
-    set_offset_ref(Conf, 2),
+    set_shared(Conf, 2),
 
     % after osiris_log:init, the sizes of the index and segment files
     % should be as they were before they got corrrupted
@@ -1146,7 +1154,7 @@ init_only_one_corrupted_segment(Config) ->
     Conf0 = ?config(osiris_conf, Config),
     Conf = Conf0#{dir => LDir},
     _ = osiris_log:init(Conf),
-    set_offset_ref(Conf, 1000),
+    set_shared(Conf, 1000),
 
     % there should be one segment, with nothing but headers
     % and its name should be the same as it was before
@@ -1195,7 +1203,7 @@ init_empty_last_files(Config) ->
     Conf0 = ?config(osiris_conf, Config),
     Conf = Conf0#{dir => LDir},
     _ = osiris_log:init(Conf),
-    set_offset_ref(Conf, 2),
+    set_shared(Conf, 2),
 
     % the last segment and index files should no longer exist
     RecoveredIdxFiles =
@@ -1491,5 +1499,5 @@ make_trailer(Type, K, V) ->
       K/binary,
       V:64/unsigned>>.
 
-set_offset_ref(#{offset_ref := Ref}, Value) ->
-    atomics:put(Ref, 1, Value).
+set_shared(#{shared := Ref}, Value) ->
+    osiris_log_shared:set_committed_chunk_id(Ref, Value).

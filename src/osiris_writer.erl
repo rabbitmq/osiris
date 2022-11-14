@@ -49,7 +49,6 @@
 -record(cfg,
         {name :: string(),
          reference :: term(),
-         offset_ref :: atomics:atomics_ref(),
          replicas = [] :: [node()],
          directory :: file:filename(),
          counter :: counters:counters_ref(),
@@ -160,14 +159,8 @@ handle_continue(#{name := Name,
     Dir = osiris_log:directory(Config),
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
-    ORef = atomics:new(2, [{signed, true}]),
-    atomics:put(ORef, 2, -1),
     CntName = {?MODULE, ExtRef},
     Log = osiris_log:init(Config#{dir => Dir,
-                                  first_offset_fun =>
-                                      fun (Fst) ->
-                                              atomics:put(ORef, 2, Fst)
-                                      end,
                                   counter_spec =>
                                       {CntName, ?ADD_COUNTER_FIELDS}}),
     Trk = osiris_log:recover_tracking(Log),
@@ -184,7 +177,7 @@ handle_continue(#{name := Name,
             _ ->
                 -1
         end,
-    atomics:put(ORef, 1, CommittedOffset),
+    ok = osiris_log:set_committed_chunk_id(Log, CommittedOffset),
     counters:put(CntRef, ?C_COMMITTED_OFFSET, CommittedOffset),
     EvtFmt = maps:get(event_formatter, Config, undefined),
     ?INFO("osiris_writer:init/1: name: ~s last offset: ~b "
@@ -197,7 +190,6 @@ handle_continue(#{name := Name,
                        %% if not provided use the name
                        reference = ExtRef,
                        event_formatter = EvtFmt,
-                       offset_ref = ORef,
                        replicas = Replicas,
                        directory = Dir,
                        counter = CntRef},
@@ -207,7 +199,7 @@ handle_continue(#{name := Name,
               tracking = Trk}}.
 
 handle_batch(Commands,
-             #?MODULE{cfg = #cfg{counter = Cnt, offset_ref = ORef} = Cfg,
+             #?MODULE{cfg = #cfg{counter = Cnt} = Cfg,
                       duplicates = Dupes0,
                       committed_offset = COffs0,
                       tracking = Trk0} =
@@ -260,7 +252,7 @@ handle_batch(Commands,
             State = case COffs > COffs0 of
                         true ->
                             P = State2#?MODULE.pending_corrs,
-                            atomics:put(ORef, 1, COffs),
+                            ok = osiris_log:set_committed_chunk_id(Log, COffs),
                             counters:put(Cnt, ?C_COMMITTED_OFFSET, COffs),
                             Pending = notify_writers(P, COffs, Cfg),
                             State2#?MODULE{committed_offset = COffs,
@@ -434,11 +426,11 @@ handle_command({cast, {ack, ReplicaNode, {Offset, _} = OffsetTs}},
     {State, Records, Replies, Corrs, Trk, Dupes};
 handle_command({call, From, get_reader_context},
                {#?MODULE{cfg =
-                             #cfg{offset_ref = ORef,
-                                  reference = Ref,
+                             #cfg{reference = Ref,
                                   name = Name,
                                   directory = Dir,
                                   counter = CntRef},
+                         log = Log,
                          committed_offset = COffs} =
                     State,
                 Records,
@@ -446,12 +438,13 @@ handle_command({call, From, get_reader_context},
                 Corrs,
                 Trk,
                 Dupes}) ->
+    Shared = osiris_log:get_shared(Log),
     Reply =
         {reply, From,
          #{dir => Dir,
            name => Name,
            committed_offset => max(0, COffs),
-           offset_ref => ORef,
+           shared => Shared,
            reference => Ref,
            readers_counter_fun => fun(Inc) -> counters:add(CntRef, ?C_READERS, Inc) end
           }},
