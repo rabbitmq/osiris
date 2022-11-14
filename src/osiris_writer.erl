@@ -261,7 +261,8 @@ handle_batch(Commands,
                         false ->
                             State2#?MODULE{duplicates = RemDupes}
                     end,
-            {ok, [garbage_collect | Replies],
+            % {ok, [garbage_collect | Replies],
+            {ok, Replies,
              notify_offset_listeners(notify_data_listeners(State))};
         {stop, normal} ->
             {stop, normal}

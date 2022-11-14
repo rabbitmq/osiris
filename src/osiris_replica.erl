@@ -241,8 +241,8 @@ handle_continue(#{name := Name,
             RRPid = osiris_replica_reader:start(Node, ReplicaReaderConf),
             true = link(RRPid),
             GcInterval0 = application:get_env(osiris,
-                                             replica_forced_gc_default_interval,
-                                             4999),
+                                              replica_forced_gc_default_interval,
+                                              infinity),
 
             GcInterval1 = case is_integer(GcInterval0) of
                               true ->
