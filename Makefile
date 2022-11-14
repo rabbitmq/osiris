@@ -7,8 +7,7 @@ define PROJECT_ENV
 	{data_dir, "/tmp/osiris"},
 	{port_range, {6000, 6500}},
 	{max_segment_size_chunks, 256000},
-	{replication_transport, tcp},
-	{replica_forced_gc_default_interval, 4999}
+	{replication_transport, tcp}
 ]
 endef
 
