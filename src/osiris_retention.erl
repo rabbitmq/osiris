@@ -65,10 +65,11 @@ handle_call(_Request, _From, State) ->
 %% @spec handle_cast(Msg, State) -> {noreply, State} |
 %%                                  {noreply, State, Timeout} |
 %%                                  {stop, Reason, State}
-handle_cast({eval, Name, Dir, Specs, Fun}, State) ->
+handle_cast({eval, _Name, Dir, Specs, Fun} = Eval, State) ->
+    ct:pal("EVAL ~p", [Eval]),
     Result = osiris_log:evaluate_retention(Dir, Specs),
     _ = Fun(Result),
-    {noreply, schedule(osiris_util:normalise_name(Name), Specs, Result, State)}.
+    {noreply, schedule(Eval, Result, State)}.
 
 %% @spec handle_info(Info, State) -> {noreply, State} |
 %%                                   {noreply, State, Timeout} |
@@ -87,6 +88,26 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-schedule(_Name, _Specs, _Result, State) ->
-    State.
+schedule({eval, Name, _Dir, Specs, _Fun} = Eval,
+         {_, _, NumSegmentRemaining},
+         #state{scheduled = Scheduled0} = State) ->
+    %% we need to check the scheduled map even if the current specs do not
+    %% include max_age as the retention config could have changed
+    Scheduled = case maps:take(Name, Scheduled0) of
+                    {OldRef, Scheduled1} ->
+                        _ = erlang:cancel_timer(OldRef),
+                        Scheduled1;
+                    error ->
+                        Scheduled0
+                end,
+    case lists:any(fun ({T, _}) -> T == max_age end, Specs) andalso
+         NumSegmentRemaining > 1 of
+        true ->
+            EvalInterval = application:get_env(osiris, retention_eval_interval,
+                                               ?DEFAULT_SHEDULED_EVAL_TIME),
+            Ref = erlang:send_after(EvalInterval, self(), {'$gen_cast', Eval}),
+            State#state{scheduled = Scheduled#{Name => Ref}};
+        false ->
+            State#state{scheduled = Scheduled}
+    end.
 

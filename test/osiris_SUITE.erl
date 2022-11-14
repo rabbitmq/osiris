@@ -53,6 +53,8 @@ all_tests() ->
      replica_unknown_command,
      diverged_replica,
      retention,
+     retention_max_age_eventually,
+     retention_max_age_update_retention,
      retention_add_replica_after,
      retention_overtakes_offset_reader,
      update_retention,
@@ -1033,6 +1035,7 @@ retention(Config) ->
     Num = 150000,
     Name = ?config(cluster_name, Config),
     SegSize = 50000 * 1000,
+    %% silly low setting
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -1048,6 +1051,58 @@ retention(Config) ->
     Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
     %% one file only
     [_] = filelib:wildcard(Wc),
+    osiris:stop_cluster(Conf1),
+    ok.
+
+retention_max_age_eventually(Config) ->
+    DataDir = ?config(data_dir, Config),
+    Num = 150000,
+    Name = ?config(cluster_name, Config),
+    SegSize = 50000 * 1000,
+    application:set_env(osiris, retention_eval_interval, 5000),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          retention => [{max_age, 5000}],
+          max_segment_size_bytes => SegSize,
+          replica_nodes => []},
+    {ok, #{leader_pid := Leader, replica_pids := []} = Conf1} =
+        osiris:start_cluster(Conf0),
+    timer:sleep(100),
+    write_n(Leader, Num, 0, 1000 * 8, #{}),
+    Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
+    %% one file only
+    await_condition(fun () ->
+                            length(filelib:wildcard(Wc)) == 1
+                    end, 1000, 20),
+    osiris:stop_cluster(Conf1),
+    ok.
+
+retention_max_age_update_retention(Config) ->
+    %% ensure a retention update cancels the current scheduled
+    %% retention evaluation
+    DataDir = ?config(data_dir, Config),
+    Num = 150000,
+    Name = ?config(cluster_name, Config),
+    SegSize = 50000 * 1000,
+    application:set_env(osiris, retention_eval_interval, 5000),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          retention => [{max_age, 5000}],
+          max_segment_size_bytes => SegSize,
+          replica_nodes => []},
+    {ok, #{leader_pid := Leader, replica_pids := []} = Conf1} =
+        osiris:start_cluster(Conf0),
+    timer:sleep(100),
+    write_n(Leader, Num, 0, 1000 * 8, #{}),
+    Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
+    ok = osiris:update_retention(Leader, [{max_bytes, SegSize * 10}]),
+    timer:sleep(10000),
+    %% one file only
+    ?assertNot(length(filelib:wildcard(Wc)) == 1),
     osiris:stop_cluster(Conf1),
     ok.
 
@@ -1959,5 +2014,20 @@ node_setup(DataDir) ->
 simple(Bin) ->
     S = byte_size(Bin),
     <<0:1, S:31, Bin/binary>>.
+
+await_condition(_CondFun, _Sleep, 0) ->
+    exit(await_condition_attempts_exceeded);
+await_condition(CondFun, Sleep, Attempt) ->
+    timer:sleep(Sleep),
+    try CondFun() of
+        true ->
+            ok;
+        false ->
+            await_condition(CondFun, Sleep, Attempt-1)
+    catch
+        _:Err ->
+            ct:pal("~s err ~p", [?FUNCTION_NAME, Err]),
+            await_condition(CondFun, Sleep, Attempt-1)
+    end.
 
 
