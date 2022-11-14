@@ -38,7 +38,7 @@ start_link() ->
 eval(_Name, _Dir, [], _Fun) ->
     ok;
 eval(Name, Dir, Specs, Fun) ->
-    gen_server:cast(?MODULE, {eval, Name, Dir, Specs, Fun}).
+    gen_server:cast(?MODULE, {eval, self(), Name, Dir, Specs, Fun}).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -65,11 +65,18 @@ handle_call(_Request, _From, State) ->
 %% @spec handle_cast(Msg, State) -> {noreply, State} |
 %%                                  {noreply, State, Timeout} |
 %%                                  {stop, Reason, State}
-handle_cast({eval, _Name, Dir, Specs, Fun} = Eval, State) ->
-    ct:pal("EVAL ~p", [Eval]),
-    Result = osiris_log:evaluate_retention(Dir, Specs),
-    _ = Fun(Result),
-    {noreply, schedule(Eval, Result, State)}.
+handle_cast({eval, Pid, _Name, Dir, Specs, Fun} = Eval, State) ->
+    %% only do retention evaluation for stream processes that are
+    %% alive as the callback Fun passed in would update a shared atomic
+    %% value and this atomic is new per process incarnation
+    case is_process_alive(Pid) of
+        true ->
+            Result = osiris_log:evaluate_retention(Dir, Specs),
+            _ = Fun(Result),
+            {noreply, schedule(Eval, Result, State)};
+        false ->
+            {noreply, State}
+    end.
 
 %% @spec handle_info(Info, State) -> {noreply, State} |
 %%                                   {noreply, State, Timeout} |
@@ -88,7 +95,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-schedule({eval, Name, _Dir, Specs, _Fun} = Eval,
+schedule({eval, _Pid, Name, _Dir, Specs, _Fun} = Eval,
          {_, _, NumSegmentRemaining},
          #state{scheduled = Scheduled0} = State) ->
     %% we need to check the scheduled map even if the current specs do not

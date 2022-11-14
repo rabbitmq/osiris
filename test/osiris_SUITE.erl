@@ -55,6 +55,7 @@ all_tests() ->
      retention,
      retention_max_age_eventually,
      retention_max_age_update_retention,
+     retention_max_age_noproc,
      retention_add_replica_after,
      retention_overtakes_offset_reader,
      update_retention,
@@ -1104,6 +1105,33 @@ retention_max_age_update_retention(Config) ->
     %% one file only
     ?assertNot(length(filelib:wildcard(Wc)) == 1),
     osiris:stop_cluster(Conf1),
+    ok.
+
+retention_max_age_noproc(Config) ->
+    %% test scheduled retention eval when process is shut down
+    %% we should not eval in this case
+    DataDir = ?config(data_dir, Config),
+    Num = 150000,
+    Name = ?config(cluster_name, Config),
+    SegSize = 50000 * 1000,
+    application:set_env(osiris, retention_eval_interval, 5000),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          retention => [{max_age, 5000}],
+          max_segment_size_bytes => SegSize,
+          replica_nodes => []},
+    {ok, #{leader_pid := Leader, replica_pids := []} = Conf1} =
+        osiris:start_cluster(Conf0),
+    timer:sleep(100),
+    write_n(Leader, Num, 0, 1000 * 8, #{}),
+    Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
+    timer:sleep(1000),
+    %% stop cluster before scheduled retention triggers
+    osiris:stop_cluster(Conf1),
+    timer:sleep(6000),
+    ?assertNot(length(filelib:wildcard(Wc)) == 1),
     ok.
 
 retention_add_replica_after(Config) ->
