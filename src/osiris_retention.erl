@@ -20,7 +20,7 @@
          terminate/2,
          code_change/3]).
 
--define(DEFAULT_SHEDULED_EVAL_TIME, 1000 * 60 * 60). %% 1HR
+-define(DEFAULT_SCHEDULED_EVAL_TIME, 1000 * 60 * 60). %% 1HR
 
 -record(state, {scheduled = #{} :: #{osiris:name() => timer:tref()}}).
 
@@ -111,7 +111,7 @@ schedule({eval, _Pid, Name, _Dir, Specs, _Fun} = Eval,
          NumSegmentRemaining > 1 of
         true ->
             EvalInterval = application:get_env(osiris, retention_eval_interval,
-                                               ?DEFAULT_SHEDULED_EVAL_TIME),
+                                               ?DEFAULT_SCHEDULED_EVAL_TIME),
             Ref = erlang:send_after(EvalInterval, self(), {'$gen_cast', Eval}),
             State#state{scheduled = Scheduled#{Name => Ref}};
         false ->
