@@ -31,7 +31,7 @@
 
 -record(state,
         {log :: osiris_log:state(),
-         name :: string(),
+         name :: osiris:name(),
          transport :: osiris_log:transport(),
          socket :: gen_tcp:socket() | ssl:sslsocket(),
          replica_pid :: pid(),
@@ -183,7 +183,6 @@ init(#{hosts := Hosts,
                                                        leader_monitor_ref = MRef,
                                                        counter = CntRef,
                                                        counter_id = CntId}),
-                ?DEBUG("sent committed offset information to the leader at ~p", [LeaderPid]),
                 {ok, State}
             catch
                 exit:{noproc, _} ->

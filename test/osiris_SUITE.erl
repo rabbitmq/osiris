@@ -53,6 +53,9 @@ all_tests() ->
      replica_unknown_command,
      diverged_replica,
      retention,
+     retention_max_age_eventually,
+     retention_max_age_update_retention,
+     retention_max_age_noproc,
      retention_add_replica_after,
      retention_overtakes_offset_reader,
      update_retention,
@@ -106,10 +109,9 @@ init_per_testcase(TestCase, Config) ->
     ok = extra_init(TestCase),
     {ok, Apps} = application:ensure_all_started(osiris),
     ok = logger:set_primary_config(level, all),
-    % file:make_dir(Dir),
     [{data_dir, Dir},
      {test_case, TestCase},
-     {cluster_name, atom_to_list(TestCase)},
+     {cluster_name, atom_to_binary(TestCase, utf8)},
      {started_apps, Apps}
      | Config].
 
@@ -179,7 +181,8 @@ start_many_clusters(Config) ->
     ok = logger:set_primary_config(level, all),
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
-    Names = [Name ++ "_" ++ integer_to_list(I) || I <- lists:seq(1, 10)],
+    Names = [unicode:characters_to_binary([Name, <<"_">>, integer_to_binary(I)])
+             || I <- lists:seq(1, 10)],
     %% set a small port range to try to trigger port conflicts
     AllEnv = [{port_range, {6000, 6010}} |
               proplists:delete(port_range,
@@ -195,7 +198,7 @@ start_many_clusters(Config) ->
                           replica_nodes => Replicas
                          },
                 {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-                WriterId = list_to_binary(N),
+                WriterId = N,
                 ok = osiris:write(Leader, WriterId, 42, <<"mah-data">>),
                 receive
                     {osiris_written, _, WriterId, [42]} ->
@@ -768,16 +771,24 @@ cluster_restart_new_leader(Config) ->
     ok.
 
 cluster_delete(Config) ->
-    PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
+    ok = cluster_delete(Config, Name, Name),
+    ok = cluster_delete(Config, Name, binary_to_list(Name)),
+    ok = cluster_delete(Config, binary_to_list(Name), binary_to_list(Name)),
+    ok = cluster_delete(Config, binary_to_list(Name), Name),
+    ok.
+
+cluster_delete(Config, StartName, DeleteName) ->
+    PrivDir = ?config(data_dir, Config),
     PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
     Conf0 =
-        #{name => Name,
+        #{name => StartName,
           epoch => 1,
           leader_node => LeaderNode,
           replica_nodes => Replicas},
-    {ok, #{leader_pid := Leader} = Conf} = osiris:start_cluster(Conf0),
+    {ok, #{leader_pid := Leader,
+           replica_pids := ReplicaPids} = Conf} = osiris:start_cluster(Conf0),
     ok = osiris:write(Leader, undefined, 42, <<"before-restart">>),
     receive
         {osiris_written, _, _WriterId, [42]} ->
@@ -787,7 +798,11 @@ cluster_delete(Config) ->
         exit(osiris_written_timeout)
     end,
 
-    osiris:delete_cluster(Conf),
+    osiris:delete_cluster(Conf#{name => DeleteName}),
+    %% validate pids are gone
+    [begin
+         ?assertEqual(false, erpc:call(node(Pid), erlang,is_process_alive, [Pid]))
+     end || Pid <- [Leader | ReplicaPids]],
     [stop_peer(Ref) || {Ref, _} <- PeerStates],
     ok.
 
@@ -1021,6 +1036,7 @@ retention(Config) ->
     Num = 150000,
     Name = ?config(cluster_name, Config),
     SegSize = 50000 * 1000,
+    %% silly low setting
     Conf0 =
         #{name => Name,
           epoch => 1,
@@ -1037,6 +1053,85 @@ retention(Config) ->
     %% one file only
     [_] = filelib:wildcard(Wc),
     osiris:stop_cluster(Conf1),
+    ok.
+
+retention_max_age_eventually(Config) ->
+    DataDir = ?config(data_dir, Config),
+    Num = 150000,
+    Name = ?config(cluster_name, Config),
+    SegSize = 50000 * 1000,
+    application:set_env(osiris, retention_eval_interval, 5000),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          retention => [{max_age, 5000}],
+          max_segment_size_bytes => SegSize,
+          replica_nodes => []},
+    {ok, #{leader_pid := Leader, replica_pids := []} = Conf1} =
+        osiris:start_cluster(Conf0),
+    timer:sleep(100),
+    write_n(Leader, Num, 0, 1000 * 8, #{}),
+    Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
+    %% one file only
+    await_condition(fun () ->
+                            length(filelib:wildcard(Wc)) == 1
+                    end, 1000, 20),
+    osiris:stop_cluster(Conf1),
+    ok.
+
+retention_max_age_update_retention(Config) ->
+    %% ensure a retention update cancels the current scheduled
+    %% retention evaluation
+    DataDir = ?config(data_dir, Config),
+    Num = 150000,
+    Name = ?config(cluster_name, Config),
+    SegSize = 50000 * 1000,
+    application:set_env(osiris, retention_eval_interval, 5000),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          retention => [{max_age, 5000}],
+          max_segment_size_bytes => SegSize,
+          replica_nodes => []},
+    {ok, #{leader_pid := Leader, replica_pids := []} = Conf1} =
+        osiris:start_cluster(Conf0),
+    timer:sleep(100),
+    write_n(Leader, Num, 0, 1000 * 8, #{}),
+    Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
+    ok = osiris:update_retention(Leader, [{max_bytes, SegSize * 10}]),
+    timer:sleep(10000),
+    %% one file only
+    ?assertNot(length(filelib:wildcard(Wc)) == 1),
+    osiris:stop_cluster(Conf1),
+    ok.
+
+retention_max_age_noproc(Config) ->
+    %% test scheduled retention eval when process is shut down
+    %% we should not eval in this case
+    DataDir = ?config(data_dir, Config),
+    Num = 150000,
+    Name = ?config(cluster_name, Config),
+    SegSize = 50000 * 1000,
+    application:set_env(osiris, retention_eval_interval, 5000),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          retention => [{max_age, 5000}],
+          max_segment_size_bytes => SegSize,
+          replica_nodes => []},
+    {ok, #{leader_pid := Leader, replica_pids := []} = Conf1} =
+        osiris:start_cluster(Conf0),
+    timer:sleep(100),
+    write_n(Leader, Num, 0, 1000 * 8, #{}),
+    Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
+    timer:sleep(1000),
+    %% stop cluster before scheduled retention triggers
+    osiris:stop_cluster(Conf1),
+    timer:sleep(6000),
+    ?assertNot(length(filelib:wildcard(Wc)) == 1),
     ok.
 
 retention_add_replica_after(Config) ->
@@ -1731,7 +1826,7 @@ start_child_node(NodeNamePrefix, PrivDir) ->
 start_child_node(NodeName, PrivDir, ExtraAppConfig0) ->
     _ = file:make_dir(PrivDir),
     Dir = filename:join(PrivDir, NodeName),
-    ok = file:make_dir(Dir),
+    _ = file:make_dir(Dir),
 
     %% make sure the data dir computed above is passed on to the peers
     ExtraAppConfig1 = proplists:delete(data_dir, ExtraAppConfig0),
@@ -1947,5 +2042,20 @@ node_setup(DataDir) ->
 simple(Bin) ->
     S = byte_size(Bin),
     <<0:1, S:31, Bin/binary>>.
+
+await_condition(_CondFun, _Sleep, 0) ->
+    exit(await_condition_attempts_exceeded);
+await_condition(CondFun, Sleep, Attempt) ->
+    timer:sleep(Sleep),
+    try CondFun() of
+        true ->
+            ok;
+        false ->
+            await_condition(CondFun, Sleep, Attempt-1)
+    catch
+        _:Err ->
+            ct:pal("~s err ~p", [?FUNCTION_NAME, Err]),
+            await_condition(CondFun, Sleep, Attempt-1)
+    end.
 
 
