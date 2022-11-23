@@ -2652,6 +2652,8 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
             {end_of_stream, State}
     end.
 
+trigger_retention_eval(#?MODULE{cfg = #cfg{retention = []}} = State) ->
+    State;
 trigger_retention_eval(#?MODULE{cfg =
                                     #cfg{name = Name,
                                          directory = Dir,
