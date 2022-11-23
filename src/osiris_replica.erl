@@ -85,11 +85,13 @@
 -define(C_FORCED_GCS, ?C_NUM_LOG_FIELDS + 2).
 -define(C_PACKETS, ?C_NUM_LOG_FIELDS + 3).
 -define(C_READERS, ?C_NUM_LOG_FIELDS + 4).
+-define(C_EPOCH, ?C_NUM_LOG_FIELDS + 5).
 -define(ADD_COUNTER_FIELDS,
         [{committed_offset, ?C_COMMITTED_OFFSET, counter, "Last committed offset"},
          {forced_gcs, ?C_FORCED_GCS, counter, "Number of garbage collection runs"},
          {packets, ?C_PACKETS, counter, "Number of packets"},
-         {readers, ?C_READERS, counter, "Number of readers"}]).
+         {readers, ?C_READERS, counter, "Number of readers"},
+         {epoch, ?C_EPOCH, counter, "Current epoch"}]).
 
 -define(DEFAULT_ONE_TIME_TOKEN_TIMEOUT, 30000).
 -define(TOKEN_SIZE, 32).
@@ -159,6 +161,7 @@ init(Config) ->
     {ok, undefined, {continue, Config}}.
 
 handle_continue(#{name := Name0,
+                  epoch := Epoch,
                   leader_pid := LeaderPid,
                   reference := ExtRef} = Config, undefined)
   when ?IS_STRING(Name0) ->
@@ -194,8 +197,8 @@ handle_continue(#{name := Name0,
                     %% re-discover the committed offset
                     osiris_writer:ack(LeaderPid, {LastChId, LastTs})
             end,
-            ?INFO_(Name, "next offset ~b, tail info ~w",
-                   [NextOffset, TailInfo]),
+            ?INFO_(Name, "osiris replicas starting in epoch ~b, next offset ~b, tail info ~w",
+                   [Epoch, NextOffset, TailInfo]),
 
             %% HostName: append the HostName to the Ip(s) list: in some cases
             %% like NAT or redirect the local ip addresses are not enough.
@@ -254,6 +257,7 @@ handle_continue(#{name := Name0,
                                   infinity
                           end,
             counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
+            counters:put(CntRef, ?C_EPOCH, Epoch),
             EvtFmt = maps:get(event_formatter, Config, undefined),
             {noreply,
              #?MODULE{cfg =

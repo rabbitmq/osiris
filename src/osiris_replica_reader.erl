@@ -152,12 +152,12 @@ init(#{hosts := Hosts,
        connection_token := Token}) ->
     process_flag(trap_exit, true),
 
-    ?DEBUG("trying to connect to replica at ~p", [Hosts]),
+    ?DEBUG("~s: trying to connect to replica at ~p", [Name, Hosts]),
 
     case maybe_connect(Transport, Hosts, Port, connect_options())
     of
         {ok, Sock, Host} ->
-            ?DEBUG("successfully connected to host ~p", [Host]),
+            ?DEBUG("~s: successfully connected to host ~p", [Name, Host]),
             CntId = {?MODULE, ExtRef, Host, Port},
             CntSpec = {CntId, ?COUNTER_FIELDS},
             Config = #{counter_spec => CntSpec, transport => Transport},
@@ -166,7 +166,7 @@ init(#{hosts := Hosts,
                 {ok, Log} =
                     osiris_writer:init_data_reader(LeaderPid, TailInfo, Config),
                 CntRef = osiris_log:counters_ref(Log),
-                ?INFO("starting osiris replica reader ~s at offset ~b",
+                ?INFO("~s: starting osiris replica reader at offset ~b",
                       [Name, osiris_log:next_offset(Log)]),
 
                 ok = send(Transport, Sock, Token),
@@ -341,7 +341,7 @@ do_sendfile(#state{socket = Sock, log = Log0} = State0) ->
         {ok, Log} ->
             do_sendfile(State#state{log = Log});
         {error, _Err} ->
-            ?DEBUG("osiris_relica_reader: sendfile err ~w", [_Err]),
+            ?DEBUG("osiris_replica_reader: sendfile err ~w", [_Err]),
             State;
         {end_of_stream, Log} ->
             State#state{log = Log}
