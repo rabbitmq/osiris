@@ -34,10 +34,12 @@
 
 -define(C_COMMITTED_OFFSET, ?C_NUM_LOG_FIELDS + 1).
 -define(C_READERS, ?C_NUM_LOG_FIELDS + 2).
+-define(C_EPOCH, ?C_NUM_LOG_FIELDS + 3).
 -define(ADD_COUNTER_FIELDS,
         [
          {committed_offset, ?C_COMMITTED_OFFSET, counter, "Last committed offset"},
-         {readers, ?C_READERS, counter, "Number of readers"}
+         {readers, ?C_READERS, counter, "Number of readers"},
+         {epoch, ?C_EPOCH, counter, "Current epoch"}
         ]
        ).
 
@@ -181,6 +183,7 @@ handle_continue(#{name := Name0,
         end,
     ok = osiris_log:set_committed_chunk_id(Log, CommittedOffset),
     counters:put(CntRef, ?C_COMMITTED_OFFSET, CommittedOffset),
+    counters:put(CntRef, ?C_EPOCH, Epoch),
     EvtFmt = maps:get(event_formatter, Config, undefined),
     ?INFO("osiris_writer:init/1: name: ~s last offset: ~b "
           "committed chunk id: ~b epoch: ~b",

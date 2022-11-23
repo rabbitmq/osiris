@@ -353,6 +353,7 @@ single_node_reader_counters(Config) ->
     {ok, Log0} = osiris:init_reader(Leader, next, {offset_reader_1, []}),
     Overview = osiris_counters:overview(),
     ?assertEqual(1, maps:get(readers, maps:get({'osiris_writer', Name}, Overview))),
+    ?assertEqual(1, maps:get(epoch, maps:get({'osiris_writer', Name}, Overview))),
     ?assert(maps:is_key(offset_reader_1, Overview)),
     {ok, Log1} = osiris_writer:init_data_reader(Leader, {0, empty}, #{counter_spec => {data_reader_1, []}}),
     Overview1 = osiris_counters:overview(),
@@ -693,31 +694,48 @@ cluster_restart(Config) ->
 cluster_restart_large(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
+    Keys = [first_offset, offset],
     PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2, s3]],
     [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
     Conf0 =
-        #{name => Name,
-          epoch => 1,
-          replica_nodes => Replicas,
-          max_segment_size_bytes => 100 * 1000,
-          leader_node => LeaderNode},
+    #{name => Name,
+      epoch => 1,
+      replica_nodes => Replicas,
+      max_segment_size_bytes => 100 * 1000,
+      leader_node => LeaderNode},
     {ok, #{leader_pid := Leader} = Conf} = osiris:start_cluster(Conf0),
     write_n(Leader, 255, 0, 1000000, #{}),
-    CountersPre = erpc:call(LeaderNode, osiris_counters, overview, []),
+    CountersPre = erpc:call(LeaderNode, osiris_counters, overview,
+                            [{osiris_writer, Name}]),
 
+    %% wait for replica key counters to match writer
+    await_condition(fun () ->
+                            RC = erpc:call(hd(Replicas), osiris_counters, overview,
+                                           [{osiris_replica, Name}]),
+                            maps:with(Keys, CountersPre) == maps:with(Keys, RC)
+                    end, 1000, 20),
+    Replica1CountersPre = erpc:call(hd(Replicas), osiris_counters, overview,
+                                    [{osiris_replica, Name}]),
+
+    ?assertMatch(#{epoch := 1}, CountersPre),
+    ?assertMatch(#{epoch := 1}, Replica1CountersPre),
     osiris:stop_cluster(Conf),
     {ok, #{leader_pid := _Leader1}} =
         osiris:start_cluster(Conf0#{epoch => 2}),
     %% give leader some time to discover the committed offset
     timer:sleep(1000),
-    CountersPost = erpc:call(LeaderNode, osiris_counters, overview, []),
-    %% assert key countesr are recovered
-    ct:pal("Counters ~p", [CountersPost]),
-    Keys = [first_offset, offset],
-    ?assertEqual(
-            maps:with(Keys, CountersPre),
-            maps:with(Keys, CountersPost)
-           ),
+    CountersPost = erpc:call(LeaderNode, osiris_counters, overview,
+                             [{osiris_writer, Name}]),
+    Replica1CountersPost = erpc:call(hd(Replicas), osiris_counters, overview,
+                                     [{osiris_replica, Name}]),
+    %% assert key counters are recovered
+    ct:pal("Counters ~n~p", [CountersPost]),
+    ?assertMatch(#{epoch := 2}, CountersPost),
+    ?assertMatch(#{epoch := 2}, Replica1CountersPost),
+    ?assertEqual(maps:with(Keys, CountersPre),
+                 maps:with(Keys, CountersPost)),
+    ?assertEqual(maps:with(Keys, Replica1CountersPre),
+                 maps:with(Keys, Replica1CountersPost)),
 
     [stop_peer(Ref) || {Ref, _} <- PeerStates],
     ok.
