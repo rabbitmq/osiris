@@ -53,6 +53,7 @@
 
 % maximum size of a segment in bytes
 -define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
+% -define(MIN_SEGMENT_SIZE_B, 4_000_000).
 % maximum number of chunks per segment
 -define(DEFAULT_MAX_SEGMENT_SIZE_C, 256_000).
 -define(INDEX_RECORD_SIZE_B, 29).
@@ -442,8 +443,8 @@ init(#{dir := Dir,
        epoch := Epoch} = Config,
      WriterType) ->
     %% scan directory for segments if in write mode
-    MaxSizeBytes =
-        maps:get(max_segment_size_bytes, Config, ?DEFAULT_MAX_SEGMENT_SIZE_B),
+    MaxSizeBytes = maps:get(max_segment_size_bytes, Config,
+                            ?DEFAULT_MAX_SEGMENT_SIZE_B),
     MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks,
                                         ?DEFAULT_MAX_SEGMENT_SIZE_C),
     Retention = maps:get(retention, Config, []),
@@ -479,20 +480,21 @@ init(#{dir := Dir,
                counter_id = counter_id(Config),
                shared = Shared},
     ok = maybe_fix_corrupted_files(Config),
+    DefaultNextOffset = case Config of
+                            #{initial_offset := IO}
+                              when WriterType == acceptor ->
+                                IO;
+                            _ ->
+                                0
+                        end,
     case first_and_last_seginfos(Config) of
         none ->
-            NextOffset = case Config of
-                             #{initial_offset := IO}
-                               when WriterType == acceptor ->
-                                 IO;
-                             _ ->
-                                 0
-                         end,
-            osiris_log_shared:set_first_chunk_id(Shared, NextOffset - 1),
+            osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
             open_new_segment(#?MODULE{cfg = Cfg,
                                       mode =
                                           #write{type = WriterType,
-                                                 tail_info = {NextOffset, empty},
+                                                 tail_info = {DefaultNextOffset,
+                                                              empty},
                                                  current_epoch = Epoch}});
         {NumSegments,
          #seg_info{first = #chunk_info{id = FstChId,
@@ -555,11 +557,11 @@ init(#{dir := Dir,
             %% here too?
             {ok, _} = file:position(SegFd, eof),
             {ok, _} = file:position(IdxFd, eof),
-            osiris_log_shared:set_first_chunk_id(Shared, -1),
+            osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
-                                tail_info = {0, empty},
+                                tail_info = {DefaultNextOffset, empty},
                                 current_epoch = Epoch},
                      current_file = filename:basename(Filename),
                      fd = SegFd,
