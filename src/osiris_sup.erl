@@ -22,6 +22,10 @@ init([]) ->
           intensity => 5,
           period => 5},
     %% todo put under own sup
+    Ets =
+        #{id => osiris_ets,
+          type => worker,
+          start => {osiris_ets, start_link, []}},
     Retention =
         #{id => osiris_retention,
           type => worker,
@@ -34,4 +38,4 @@ init([]) ->
         #{id => osiris_replica_reader_sup,
           type => supervisor,
           start => {osiris_replica_reader_sup, start_link, []}},
-    {ok, {SupFlags, [Retention, ServerSup, ReplicaReader]}}.
+    {ok, {SupFlags, [Ets, Retention, ServerSup, ReplicaReader]}}.
