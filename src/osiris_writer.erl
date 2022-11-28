@@ -288,6 +288,7 @@ terminate(Reason,
                    cfg = #cfg{name = Name}}) ->
     ?INFO("osiris_writer:terminate/2: name ~s reason: ~w",
           [Name, Reason]),
+    _ = ets:delete(osiris_reader_context_cache, self()),
     ok = osiris_log:close(Log),
     [osiris_replica_reader:stop(Pid) || {Pid, _} <- Listeners],
     ok.
