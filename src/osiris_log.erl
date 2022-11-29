@@ -849,16 +849,19 @@ truncate_to(_Name, _Range, [], IdxFiles) ->
     [];
 truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
     case find_segment_for_offset(ChId, IdxFiles) of
-        not_found ->
+        Result when Result == not_found orelse
+                    element(1, Result) == end_of_log ->
+            %% both not_found and end_of_log needs to be treated as not found
+            %% as they are...
             case build_seg_info(lists:last(IdxFiles)) of
                 {ok, #seg_info{last = #chunk_info{epoch = E,
                                                   id = LastChId,
                                                   num = Num}}}
-                when ChId > LastChId + Num ->
+                when ChId > LastChId ->
                     %% the last available local chunk id is smaller than the
-                    %% sources last chunk id but is in the same epoch
+                    %% source's last chunk id but is in the same epoch
                     %% check if there is any overlap
-                    LastOffsLocal = LastChId + Num,
+                    LastOffsLocal = LastChId + Num - 1,
                     FstOffsetRemote = case RemoteRange of
                                           empty -> 0;
                                           {F, _} -> F
@@ -880,8 +883,6 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
                     %% TODO: what to do if error is returned from
                     %% build_seg_info/1?
             end;
-        {end_of_log, _Info} ->
-            IdxFiles;
         {found, #seg_info{file = File, index = IdxFile}} ->
             ?DEBUG("osiris_log: ~s on node ~s truncating to chunk "
                    "id ~b in epoch ~b",
@@ -1999,10 +2000,10 @@ last_epoch_offsets([IdxFile]) ->
 last_epoch_offsets([FstIdxFile | _]  = IdxFiles) ->
     F = fun() ->
                 {ok, FstFd} = open(FstIdxFile, [read, raw, binary]),
-		%% on linux this disables read-ahead so should only
-		%% bring a single block into memory
-		%% having the first block of index files in page cache
-		%% should generally be a good thing
+                %% on linux this disables read-ahead so should only
+                %% bring a single block into memory
+                %% having the first block of index files in page cache
+                %% should generally be a good thing
                 _ = file:advise(FstFd, 0, 0, random),
                 {ok, <<FstO:64/unsigned,
                        _FstTimestamp:64/signed,
