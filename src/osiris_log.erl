@@ -1505,18 +1505,21 @@ send_file(Sock,
                 true ->
                     %% this avoids any data sent in the Callback to be dispatched
                     %% in it's own TCP frame
-                    ok = setopts(Transport, Sock, [{nopush, true}]),
-                    _ = Callback(Header, ToSend),
-                    case sendfile(Transport, Fd, Sock, Pos, ToSend) of
+                    case setopts(Transport, Sock, [{nopush, true}]) of
                         ok ->
-                            ok = setopts(Transport, Sock, [{nopush, false}]),
-                            {ok, _} = file:position(Fd, NextFilePos),
-                            {ok, State};
-                        Err ->
-                            %% reset the position to the start of the current
-                            %% chunk so that subsequent reads won't error
-                            {ok, _} = file:position(Fd, Pos),
-                            Err
+                            _ = Callback(Header, ToSend),
+                            case sendfile(Transport, Fd, Sock, Pos, ToSend) of
+                                ok ->
+                                    ok = setopts(Transport, Sock, [{nopush, false}]),
+                                    {ok, _} = file:position(Fd, NextFilePos),
+                                    {ok, State};
+                                Err ->
+                                    %% reset the position to the start of the current
+                                    %% chunk so that subsequent reads won't error
+                                    {ok, _} = file:position(Fd, Pos),
+                                    Err
+                            end;
+                        Err -> Err
                     end;
                 false ->
                     {ok, _} = file:position(Fd, NextFilePos),
@@ -2189,9 +2192,9 @@ max_segment_size_reached(
     CurrentSizeChunks >= MaxSizeChunks.
 
 setopts(tcp, Sock, Opts) ->
-    ok = inet:setopts(Sock, Opts);
+    inet:setopts(Sock, Opts);
 setopts(ssl, Sock, Opts) ->
-    ok = ssl:setopts(Sock, Opts).
+    ssl:setopts(Sock, Opts).
 
 sendfile(_Transport, _Fd, _Sock, _Pos, 0) ->
     ok;
