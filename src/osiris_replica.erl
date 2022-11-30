@@ -197,7 +197,7 @@ handle_continue(#{name := Name0,
                     %% re-discover the committed offset
                     osiris_writer:ack(LeaderPid, {LastChId, LastTs})
             end,
-            ?INFO_(Name, "osiris replicas starting in epoch ~b, next offset ~b, tail info ~w",
+            ?INFO_(Name, "osiris replica starting in epoch ~b, next offset ~b, tail info ~w",
                    [Epoch, NextOffset, TailInfo]),
 
             %% HostName: append the HostName to the Ip(s) list: in some cases
@@ -246,8 +246,8 @@ handle_continue(#{name := Name0,
             RRPid = osiris_replica_reader:start(Node, ReplicaReaderConf),
             true = link(RRPid),
             GcInterval0 = application:get_env(osiris,
-                                             replica_forced_gc_default_interval,
-                                             4999),
+                                              replica_forced_gc_default_interval,
+                                              4999),
 
             GcInterval1 = case is_integer(GcInterval0) of
                               true ->
@@ -258,6 +258,11 @@ handle_continue(#{name := Name0,
                           end,
             counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
             counters:put(CntRef, ?C_EPOCH, Epoch),
+            Shared = osiris_log:get_shared(Log),
+            osiris_util:cache_reader_context(self(), Dir, Name, Shared, ExtRef,
+                                             fun(Inc) ->
+                                                     counters:add(CntRef, ?C_READERS, Inc)
+                                             end),
             EvtFmt = maps:get(event_formatter, Config, undefined),
             {noreply,
              #?MODULE{cfg =
@@ -570,6 +575,7 @@ terminate(_Reason, undefined) ->
 terminate(Reason, #?MODULE{cfg = #cfg{name = Name,
                                       socket = Sock}, log = Log}) ->
     ?DEBUG_(Name, "terminating with ~w ", [Reason]),
+    _ = ets:delete(osiris_reader_context_cache, self()),
     ok = osiris_log:close(Log),
     ok = gen_tcp:close(Sock),
     ok.

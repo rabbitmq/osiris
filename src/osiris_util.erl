@@ -18,7 +18,9 @@
          get_replication_configuration_from_tls_dist/1,
          get_replication_configuration_from_tls_dist/2,
          partition_parallel/3,
-         normalise_name/1
+         normalise_name/1,
+         get_reader_context/1,
+         cache_reader_context/6
         ]).
 
 %% For testing
@@ -267,3 +269,27 @@ normalise_name(Name) when is_binary(Name) ->
     Name;
 normalise_name(Name) when is_list(Name) ->
     list_to_binary(Name).
+
+get_reader_context(Pid)
+  when is_pid(Pid) andalso node(Pid) == node() ->
+    case ets:lookup(osiris_reader_context_cache, Pid) of
+        [] ->
+            {ok, Ctx0} = gen:call(Pid, '$gen_call', get_reader_context),
+            Ctx0;
+        [{_Pid, Dir, Name, Shared, Ref, ReadersCountersFun}] ->
+            #{dir => Dir,
+              name => Name,
+              shared => Shared,
+              reference => Ref,
+              readers_counter_fun => ReadersCountersFun}
+    end.
+
+cache_reader_context(Pid, Dir, Name, Shared, Ref, ReadersCounterFun)
+  when is_pid(Pid) andalso
+       ?IS_STRING(Dir) andalso
+       is_function(ReadersCounterFun) ->
+    true = ets:insert(osiris_reader_context_cache,
+                      {Pid, Dir, Name, Shared, Ref, ReadersCounterFun}),
+    ok.
+
+

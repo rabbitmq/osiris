@@ -97,7 +97,7 @@ start_link(Config) ->
 overview(Pid) when node(Pid) == node() ->
     case erlang:is_process_alive(Pid) of
         true ->
-            #{dir := Dir} = gen_batch_server:call(Pid, get_reader_context),
+            #{dir := Dir} = osiris_util:get_reader_context(Pid),
             {ok, osiris_log:overview(Dir)};
         false ->
             {error, no_process}
@@ -105,9 +105,14 @@ overview(Pid) when node(Pid) == node() ->
 
 init_data_reader(Pid, TailInfo, Config)
   when node(Pid) == node() ->
-    Ctx0 = gen_batch_server:call(Pid, get_reader_context),
-    Ctx = maps:merge(Ctx0, Config),
-    osiris_log:init_data_reader(TailInfo, Ctx).
+    case erlang:is_process_alive(Pid) of
+        true ->
+            Ctx0 = osiris_util:get_reader_context(Pid),
+            Ctx = maps:merge(Ctx0, Config),
+            osiris_log:init_data_reader(TailInfo, Ctx);
+        false ->
+            {error, no_process}
+    end.
 
 register_data_listener(Pid, Offset) ->
     ok =
@@ -188,6 +193,11 @@ handle_continue(#{name := Name0,
     ?INFO("osiris_writer:init/1: name: ~s last offset: ~b "
           "committed chunk id: ~b epoch: ~b",
           [Name, LastOffs, CommittedOffset, Epoch]),
+    Shared = osiris_log:get_shared(Log),
+    osiris_util:cache_reader_context(self(), Dir, Name, Shared, ExtRef,
+                                     fun(Inc) ->
+                                             counters:add(CntRef, ?C_READERS, Inc)
+                                     end),
     {ok,
      #?MODULE{cfg =
                   #cfg{name = Name,
@@ -278,6 +288,7 @@ terminate(Reason,
                    cfg = #cfg{name = Name}}) ->
     ?INFO("osiris_writer:terminate/2: name ~s reason: ~w",
           [Name, Reason]),
+    _ = ets:delete(osiris_reader_context_cache, self()),
     ok = osiris_log:close(Log),
     [osiris_replica_reader:stop(Pid) || {Pid, _} <- Listeners],
     ok.

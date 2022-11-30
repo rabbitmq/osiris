@@ -65,6 +65,7 @@ all_tests() ->
      % truncate,
      % truncate_multi_segment,
      accept_chunk,
+     init_acceptor_truncates_tail,
      accept_chunk_truncates_tail,
      accept_chunk_does_not_truncate_tail_in_same_epoch,
      accept_chunk_in_other_epoch,
@@ -857,7 +858,6 @@ init_epoch_offsets_multi_segment(Config) ->
          || _ <- lists:seq(1, 20)],
     LDir = ?config(leader_dir, Config),
     osiris_log:close(seed_log(LDir, EpochChunks, Config)),
-    ct:pal("~p", [osiris_log:overview(LDir)]),
     EOffs = [{1, 650}],
     Range = {0, 650},
     Log0 =
@@ -876,7 +876,6 @@ init_epoch_offsets_multi_segment2(Config) ->
         ++ [{2, [Data || _ <- lists:seq(1, 50)]} || _ <- lists:seq(1, 5)],
     LDir = ?config(leader_dir, Config),
     osiris_log:close(seed_log(LDir, EpochChunks, Config)),
-    ct:pal("~p", [osiris_log:overview(LDir)]),
     EOffs = [{3, 750}, {1, 650}],
     Range = {0, 750},
     Log0 =
@@ -910,7 +909,6 @@ accept_chunk(Config) ->
         osiris_log:init_data_reader(
             osiris_log:tail_info(F0), RConf),
     {Chunk1, R1} = read_chunk(R0),
-    % ct:pal("Chunk1 ~w", [Chunk1]),
     F1 = osiris_log:accept_chunk(Chunk1, F0),
     {Chunk2, R2} = read_chunk(R1),
     F2 = osiris_log:accept_chunk(Chunk2, F1),
@@ -926,19 +924,47 @@ read_chunk(S0) ->
     {ok, {_, _, _, Hd, Ch, Tr}, S1} = osiris_log:read_chunk(S0),
     {[Hd, Ch, Tr], S1}.
 
-accept_chunk_truncates_tail(Config) ->
+init_acceptor_truncates_tail(Config) ->
     ok = logger:set_primary_config(level, all),
     EpochChunks =
-        [{1, [<<"one">>]}, {2, [<<"two">>]}, {3, [<<"three">>, <<"four">>]}],
+        [{1, [<<"one">>]},   % 0
+         {1, [<<"two">>]},   % 1
+         {1, [<<"three">>]}, % 2
+         {1, [<<"four">>]}   % 3
+        ],
     Conf = ?config(osiris_conf, Config),
     LDir = ?config(leader_dir, Config),
     LLog = seed_log(LDir, EpochChunks, Config),
     LTail = osiris_log:tail_info(LLog),
-    ?assertMatch({4, {3, 2, _}}, LTail), %% {NextOffs, {LastEpoch, LastChunkOffset}}
+    ?assertMatch({4, {1, 3, _}}, LTail), %% {NextOffs, {LastEpoch, LastChunkId, Ts}}
+    ok = osiris_log:close(LLog),
+    EOffs = [{2, 4}, {1, 2}],
+    ALog0 =
+        osiris_log:init_acceptor({0, 5}, EOffs, Conf#{dir => LDir, epoch => 2}),
+    % ?assertMatch({3, {1, 2, _}}, osiris_log:tail_info(ALog0)), %% {NextOffs, {LastEpoch, LastChunkId, Ts}}
+    {3, {1, 2, _}} = osiris_log:tail_info(ALog0), %% {NextOffs, {LastEpoch, LastChunkId, Ts}}
+
+
+    ok.
+
+accept_chunk_truncates_tail(Config) ->
+    ok = logger:set_primary_config(level, all),
+    EpochChunks =
+        [{1, [<<"one">>]}, % 0
+         {2, [<<"two">>]}, % 1
+         {3, [<<"three">>, <<"four">>]}, % 2
+         {3, [<<"five">>]} % 4
+        ],
+    Conf = ?config(osiris_conf, Config),
+    LDir = ?config(leader_dir, Config),
+    LLog = seed_log(LDir, EpochChunks, Config),
+    LTail = osiris_log:tail_info(LLog),
+    ?assertMatch({5, {3, 4, _}}, LTail), %% {NextOffs, {LastEpoch, LastChunkId, Ts}}
     ok = osiris_log:close(LLog),
 
     FollowerEpochChunks =
-        [{1, [<<"one">>]}, {2, [<<"two">>]},
+        [{1, [<<"one">>]}, %% 0
+         {2, [<<"two">>]}, %% 1
          {2, [<<"three">>]}], %% should be truncated next accept
     FDir = ?config(follower1_dir, Config),
     FLog0 = seed_log(FDir, FollowerEpochChunks, Config),
@@ -947,16 +973,26 @@ accept_chunk_truncates_tail(Config) ->
     {Range, EOffs} = osiris_log:overview(LDir),
     ALog0 =
         osiris_log:init_acceptor(Range, EOffs, Conf#{dir => FDir, epoch => 2}),
-
+    LShared = osiris_log:get_shared(LLog),
+    osiris_log_shared:set_committed_chunk_id(LShared, 4),
     RConf = Conf#{dir => LDir,
-                  shared => osiris_log:get_shared(FLog0)},
+                  shared => LShared},
     {ok, RLog0} =
         osiris_log:init_data_reader(osiris_log:tail_info(ALog0), RConf),
-    {ok, {_, _, _, Hd, Ch, Tr}, _RLog} = osiris_log:read_chunk(RLog0),
-    ALog = osiris_log:accept_chunk([Hd, Ch, Tr], ALog0),
+    {ok, {_, _, _, Hd, Ch, Tr}, RLog1} = osiris_log:read_chunk(RLog0),
+    ALog1 = osiris_log:accept_chunk([Hd, Ch, Tr], ALog0),
+    {ok, {_, _, _, Hd2, Ch2, Tr2}, _RLog} = osiris_log:read_chunk(RLog1),
+    ALog = osiris_log:accept_chunk([Hd2, Ch2, Tr2], ALog1),
+
     osiris_log:close(ALog),
     % validate equal
     ?assertMatch({Range, EOffs}, osiris_log:overview(FDir)),
+
+    {ok, V0} = osiris_log:init_data_reader({0, empty}, RConf#{dir => FDir}),
+    {[{0, <<"one">>}], V1} = osiris_log:read_chunk_parsed(V0),
+    {[{1, <<"two">>}], V2} = osiris_log:read_chunk_parsed(V1),
+    {[{2, <<"three">>}, {3, <<"four">>}], V3} = osiris_log:read_chunk_parsed(V2),
+    {[{4, <<"five">>}], _V} = osiris_log:read_chunk_parsed(V3),
     ok.
 
 accept_chunk_does_not_truncate_tail_in_same_epoch(Config) ->
@@ -1475,15 +1511,18 @@ seed_log(Conf, Log, EpochChunks, _Config, Trk) ->
                 {Trk, Log}, EpochChunks).
 
 write_chunk(Conf, Epoch, Now, Records, Trk0, Log0) ->
+    %% the osiris_writer pass records in reverse order to avoid
+    %% unnecessary reversals.
+    %% We, however, need to reverse here not to make the tests look weird
     {Log1, Trk1} = osiris_log:evaluate_tracking_snapshot(Log0, Trk0),
     case osiris_log:get_current_epoch(Log1) of
         Epoch ->
-            {Trk1, osiris_log:write(Records, Now, Log1)};
+            {Trk1, osiris_log:write(lists:reverse(Records), Now, Log1)};
         _ ->
             %% need to re-init as new epoch
             osiris_log:close(Log1),
             Log = osiris_log:init(Conf#{epoch => Epoch}),
-            {Trk1, osiris_log:write(Records, Log)}
+            {Trk1, osiris_log:write(lists:reverse(Records), Log)}
     end.
 
 now_ms() ->
