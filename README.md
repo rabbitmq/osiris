@@ -1,5 +1,3 @@
-![Erlang CI](https://github.com/rabbitmq/osiris/workflows/Erlang%20CI/badge.svg)
-
 # Osiris
 
 Osiris is a foundation of the log-based streaming subsystem for RabbitMQ.
@@ -7,6 +5,10 @@ Osiris is a foundation of the log-based streaming subsystem for RabbitMQ.
 ## Project Maturity
 
 Stable, shipped in RabbitMQ 3.9.
+
+## Build Status
+
+[![Erlang CI](https://github.com/rabbitmq/osiris/actions/workflows/erlang.yml/badge.svg)](https://github.com/rabbitmq/osiris/actions/workflows/erlang.yml)
 
 ## Documentation
 
