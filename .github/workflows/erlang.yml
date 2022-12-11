@@ -2,9 +2,11 @@ name: Erlang CI
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - main
   pull_request:
-    branches: [ main ]
+    branches:
+      - main
 
 jobs:
 
@@ -14,8 +16,8 @@ jobs:
       fail-fast: false
       matrix:
         erlang_version:
-        - "23.3"
-        - "24.1"
+        - "24.3"
+        - "25.1"
     steps:
     - name: CHECKOUT
       uses: actions/checkout@v2
