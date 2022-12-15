@@ -139,7 +139,7 @@ replication_over_tls_configuration(InitArgs, FileConsultFun, LogFun) ->
                 {error, Error} ->
                     LogFun(warn,
                            "Error while reading TLS "
-                           ++ "distributon option file ~s: ~p",
+                           ++ "distributon option file ~ts: ~p",
                            [OptFile, Error]),
                     LogFun(warn,
                            "Stream replication over TLS will NOT be enabled",
@@ -148,7 +148,7 @@ replication_over_tls_configuration(InitArgs, FileConsultFun, LogFun) ->
                 R ->
                     LogFun(warn,
                            "Unexpected result while reading TLS distributon "
-                           "option file ~s: ~p",
+                           "option file ~ts: ~p",
                            [OptFile, R]),
                     LogFun(warn,
                            "Stream replication over TLS will NOT be enabled",

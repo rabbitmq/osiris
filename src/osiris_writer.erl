@@ -190,7 +190,7 @@ handle_continue(#{name := Name0,
     counters:put(CntRef, ?C_COMMITTED_OFFSET, CommittedOffset),
     counters:put(CntRef, ?C_EPOCH, Epoch),
     EvtFmt = maps:get(event_formatter, Config, undefined),
-    ?INFO("osiris_writer:init/1: name: ~s last offset: ~b "
+    ?INFO("osiris_writer:init/1: name: ~ts last offset: ~b "
           "committed chunk id: ~b epoch: ~b",
           [Name, LastOffs, CommittedOffset, Epoch]),
     Shared = osiris_log:get_shared(Log),
@@ -286,7 +286,7 @@ terminate(Reason,
           #?MODULE{log = Log,
                    data_listeners = Listeners,
                    cfg = #cfg{name = Name}}) ->
-    ?INFO("osiris_writer:terminate/2: name ~s reason: ~w",
+    ?INFO("osiris_writer:terminate/2: name ~ts reason: ~w",
           [Name, Reason]),
     _ = ets:delete(osiris_reader_context_cache, self()),
     ok = osiris_log:close(Log),

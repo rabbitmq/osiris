@@ -12,19 +12,19 @@
 -include("osiris.hrl").
 
 -define(INFO_(Name, Str, Args),
-             ?INFO("~s [~s:~s/~b] " Str,
+             ?INFO("~ts [~s:~s/~b] " Str,
                   [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
 
 -define(WARN_(Name, Str, Args),
-             ?WARN("~s [~s:~s/~b] " Str,
+             ?WARN("~ts [~s:~s/~b] " Str,
                   [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
 
 -define(ERROR_(Name, Str, Args),
-             ?ERROR("~s [~s:~s/~b] " Str,
+             ?ERROR("~ts [~s:~s/~b] " Str,
                   [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
 
 -define(DEBUG_(Name, Str, Args),
-             ?DEBUG("~s [~s:~s/~b] " Str,
+             ?DEBUG("~ts [~s:~s/~b] " Str,
                   [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
 %% osiris replica, starts TCP listener ("server side" of the link),
 %% spawns remote reader, TCP listener replicates and
@@ -486,7 +486,7 @@ handle_info({ssl_closed, Socket},
     {stop, normal, State};
 handle_info({tcp_error, Socket, Error},
             #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
-    ?DEBUG_(Name, "osiris_replica: ~s Socket error ~p. Exiting...",
+    ?DEBUG_(Name, "osiris_replica: ~ts Socket error ~p. Exiting...",
            [Error]),
     {stop, {tcp_error, Error}, State};
 handle_info({ssl_error, Socket, Error},

@@ -121,7 +121,7 @@ extra_init(cluster_write_replication_tls) ->
     TlsGenCmd = "make -C " ++ TlsGenDir ++ " CN=$(hostname -s) CLIENT_ALT_NAME=$(hostname -s) SERVER_ALT_NAME=$(hostname -s)",
     TlsGenBasicOutput = os:cmd(TlsGenCmd),
     Hostname = string:trim(os:cmd("hostname -s"), both, "\n"),
-    ct:pal(?LOW_IMPORTANCE, "~s: ~s", [TlsGenCmd, TlsGenBasicOutput]),
+    ct:pal(?LOW_IMPORTANCE, "~ts: ~ts", [TlsGenCmd, TlsGenBasicOutput]),
     TlsConfDir = TlsGenDir ++ "/result/",
     application:set_env(osiris, replication_transport, ssl),
     application:set_env(osiris, replication_server_ssl_options, [
@@ -205,7 +205,7 @@ start_many_clusters(Config) ->
                     {osiris_written, _, WriterId, [42]} ->
                         true
                 after 2000 ->
-                          ct:pal("~s reached written timeout", [N]),
+                          ct:pal("~ts reached written timeout", [N]),
                           flush(),
                           false
                 end
@@ -1070,7 +1070,9 @@ retention(Config) ->
     timer:sleep(1000),
     Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
     %% one file only
+    ct:pal("PRE WILD"),
     [_] = wildcard(Wc),
+    ct:pal("POST WILD"),
     osiris:stop_cluster(Conf1),
     ok.
 
@@ -1201,7 +1203,7 @@ retention_add_replica_after(Config) ->
 
 check_last_entry(Pid, Entry) when is_pid(Pid) ->
     Self = self(),
-    ct:pal("checking last entry for node ~s ~w", [node(Pid), Pid]),
+    ct:pal("checking last entry for node ~ts ~w", [node(Pid), Pid]),
     X = spawn(node(Pid),
                fun () ->
                        {ok, Log0} = osiris:init_reader(Pid, last, {test, []}),
@@ -1864,7 +1866,7 @@ start_child_node(NodeName, PrivDir, ExtraAppConfig0) ->
                 {FinalNodeName0, FinalNodeName0}
         end,
     %% ct:pal("started child node ~w~n", [FinalNodeName]),
-    ct:pal("node ~s will use data dir at ~s", [FinalNodeName, Dir]),
+    ct:pal("node ~s will use data dir at ~ts", [FinalNodeName, Dir]),
     ok = erpc:call(FinalNodeName, ?MODULE, node_setup, [Dir]),
     %% ct:pal("performed node setup on child node ~w", [FinalNodeName]),
     ok = erpc:call(FinalNodeName, osiris, configure_logger, [logger]),
@@ -2080,5 +2082,5 @@ await_condition(CondFun, Sleep, Attempt) ->
 wildcard(Wc) when is_list(Wc) ->
     filelib:wildcard(Wc);
 wildcard(Wc) ->
-    wildcard(binary_to_list(Wc)).
+    wildcard(unicode:characters_to_list(Wc)).
 
