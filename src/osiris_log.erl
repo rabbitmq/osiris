@@ -1903,7 +1903,7 @@ update_retention(Retention,
 evaluate_retention(Dir, Specs) when is_list(Dir) ->
     % convert to binary for faster operations later
     % mostly in segment_from_index_file/1
-    evaluate_retention(list_to_binary(Dir), Specs);
+    evaluate_retention(filename:join(Dir, <<"">>), Specs);
 evaluate_retention(Dir, Specs) when is_binary(Dir) ->
 
     {Time, Result} = timer:tc(
@@ -2784,7 +2784,6 @@ close_fd(Fd) ->
 
 -ifdef(TEST).
 
-% -include_lib("eunit/include/eunit.hrl").
 
 part_test() ->
     [<<"ABCD">>] = part(4, [<<"ABCDEF">>]),
