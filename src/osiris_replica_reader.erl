@@ -152,12 +152,12 @@ init(#{hosts := Hosts,
        connection_token := Token}) ->
     process_flag(trap_exit, true),
 
-    ?DEBUG("~s: trying to connect to replica at ~p", [Name, Hosts]),
+    ?DEBUG("~ts: trying to connect to replica at ~p", [Name, Hosts]),
 
     case maybe_connect(Transport, Hosts, Port, connect_options())
     of
         {ok, Sock, Host} ->
-            ?DEBUG("~s: successfully connected to host ~p", [Name, Host]),
+            ?DEBUG("~ts: successfully connected to host ~p", [Name, Host]),
             CntId = {?MODULE, ExtRef, Host, Port},
             CntSpec = {CntId, ?COUNTER_FIELDS},
             Config = #{counter_spec => CntSpec, transport => Transport},
@@ -166,7 +166,7 @@ init(#{hosts := Hosts,
                 {ok, Log} =
                     osiris_writer:init_data_reader(LeaderPid, TailInfo, Config),
                 CntRef = osiris_log:counters_ref(Log),
-                ?INFO("~s: starting osiris replica reader at offset ~b",
+                ?INFO("~ts: starting osiris replica reader at offset ~b",
                       [Name, osiris_log:next_offset(Log)]),
 
                 ok = send(Transport, Sock, Token),
@@ -267,7 +267,7 @@ handle_info({'DOWN', Ref, _, _, Info},
                    leader_monitor_ref = Ref} =
                 State) ->
     %% leader is down, exit
-    ?ERROR("osiris_replica_reader: '~s' detected leader down "
+    ?ERROR("osiris_replica_reader: '~ts' detected leader down "
            "with ~W - exiting...",
            [Name, Info, 10]),
     %% this should be enough to make the replica shut down
@@ -275,23 +275,23 @@ handle_info({'DOWN', Ref, _, _, Info},
     {stop, Info, State};
 handle_info({tcp_closed, Socket},
             #state{name = Name, socket = Socket} = State) ->
-    ?DEBUG("osiris_replica_reader: '~s' Socket closed. Exiting...",
+    ?DEBUG("osiris_replica_reader: '~ts' Socket closed. Exiting...",
            [Name]),
     {stop, normal, State};
 handle_info({ssl_closed, Socket},
             #state{name = Name, socket = Socket} = State) ->
-    ?DEBUG("osiris_replica_reader: '~s' TLS socket closed. Exiting...",
+    ?DEBUG("osiris_replica_reader: '~ts' TLS socket closed. Exiting...",
            [Name]),
     {stop, normal, State};
 handle_info({tcp_error, Socket, Error},
             #state{name = Name, socket = Socket} = State) ->
-    ?DEBUG("osiris_replica_reader: '~s' Socket error ~p. "
+    ?DEBUG("osiris_replica_reader: '~ts' Socket error ~p. "
            "Exiting...",
            [Name, Error]),
     {stop, {tcp_error, Error}, State};
 handle_info({ssl_error, Socket, Error},
             #state{name = Name, socket = Socket} = State) ->
-    ?DEBUG("osiris_replica_reader: '~s' TLS socket error ~p. "
+    ?DEBUG("osiris_replica_reader: '~ts' TLS socket error ~p. "
            "Exiting...",
            [Name, Error]),
     {stop, {ssl_error, Error}, State};
@@ -301,7 +301,7 @@ handle_info({'EXIT', Ref, Info}, State) ->
            [Ref, Info]),
     {stop, normal, State};
 handle_info(Info, #state{name = Name} = State) ->
-    ?DEBUG("osiris_replica_reader: '~s' unhandled message ~W",
+    ?DEBUG("osiris_replica_reader: '~ts' unhandled message ~W",
            [Name, Info, 10]),
     {noreply, State}.
 

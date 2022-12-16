@@ -90,7 +90,7 @@
     {error, term()} |
     {error, term(), config()}.
 start_cluster(Config00 = #{name := Name}) ->
-    ?DEBUG("osiris: starting new cluster ~s", [Name]),
+    ?DEBUG("osiris: starting new cluster ~ts", [Name]),
     true = osiris_util:validate_base64uri(Name),
     %% ensure reference is set
     Config0 = maps:merge(#{reference => Name}, Config00),
@@ -254,7 +254,7 @@ start_replicas(Config, [Node | Nodes], ReplicaPids) ->
                 start_replicas(Config, Nodes, [Pid | ReplicaPids]);
             {error, Reason} ->
                 Name = maps:get(name, Config, undefined),
-                error_logger:info_msg("osiris:start_replicas for ~s failed to start replica "
+                error_logger:info_msg("osiris:start_replicas for ~ts failed to start replica "
                                       "on ~w, reason: ~w",
                                       [Name, Node, Reason]),
                 %% coordinator might try to start this replica in the future

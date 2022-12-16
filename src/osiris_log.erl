@@ -448,9 +448,9 @@ init(#{dir := Dir,
     MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks,
                                         ?DEFAULT_MAX_SEGMENT_SIZE_C),
     Retention = maps:get(retention, Config, []),
-    ?INFO("Stream: ~s will use ~s for osiris log data directory",
+    ?INFO("Stream: ~ts will use ~ts for osiris log data directory",
           [Name, Dir]),
-    ?DEBUG("osiris_log:init/1 stream ~s max_segment_size_bytes: ~b,
+    ?DEBUG("osiris_log:init/1 stream ~ts max_segment_size_bytes: ~b,
            max_segment_size_chunks ~b, retention ~w",
           [Name, MaxSizeBytes, MaxSizeChunks, Retention]),
     ok = filelib:ensure_dir(Dir),
@@ -523,7 +523,7 @@ init(#{dir := Dir,
             counters:put(Cnt, ?C_SEGMENTS, NumSegments),
             osiris_log_shared:set_first_chunk_id(Shared, FstChId),
             osiris_log_shared:set_last_chunk_id(Shared, LastChId),
-            ?DEBUG("~s:~s/~b: ~s next offset ~b first offset ~b",
+            ?DEBUG("~s:~s/~b: ~ts next offset ~b first offset ~b",
                    [?MODULE,
                     ?FUNCTION_NAME,
                     ?FUNCTION_ARITY,
@@ -799,7 +799,7 @@ init_acceptor(Range, EpochOffsets0,
 
     %% then truncate to
     IdxFiles = sorted_index_files(Dir),
-    ?DEBUG("~s: ~s ~s from epoch offsets: ~w range ~w",
+    ?DEBUG("~s: ~s ~ts from epoch offsets: ~w range ~w",
            [?MODULE, ?FUNCTION_NAME, Name, EpochOffsets, Range]),
     RemIdxFiles = truncate_to(Name, Range, EpochOffsets, IdxFiles),
     %% after truncation we can do normal init
@@ -835,7 +835,7 @@ chunk_id_index_scan0(Fd, ChunkId) ->
 
 delete_segment_from_index(Index) ->
     File = segment_from_index_file(Index),
-    ?DEBUG("osiris_log: deleting segment ~s", [File]),
+    ?DEBUG("osiris_log: deleting segment ~ts", [File]),
     ok = prim_file:delete(Index),
     ok = prim_file:delete(File),
     ok.
@@ -884,7 +884,7 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
                     %% build_seg_info/1?
             end;
         {found, #seg_info{file = File, index = IdxFile}} ->
-            ?DEBUG("osiris_log: ~s on node ~s truncating to chunk "
+            ?DEBUG("osiris_log: ~ts on node ~ts truncating to chunk "
                    "id ~b in epoch ~b",
                    [Name, node(), ChId, E]),
             %% this is the inclusive case
@@ -937,7 +937,7 @@ init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir,
                                             name := Name} = Config) ->
     IdxFiles = sorted_index_files(Dir),
     Range = offset_range_from_idx_files(IdxFiles),
-    ?DEBUG("osiris_segment:init_data_reader/2 ~s at ~b prev "
+    ?DEBUG("osiris_segment:init_data_reader/2 ~ts at ~b prev "
            "~w local range: ~w",
            [Name, StartChunkId, PrevEOT, Range]),
     %% Invariant:  there is always at least one segment left on disk
@@ -1258,7 +1258,7 @@ last_user_chunk_id0([IdxFile | Rest]) ->
         {ok, Id, Pos} ->
             {Id, Pos, IdxFile};
         {error, Reason} ->
-            ?DEBUG("Could not find user chunk in index file ~s (~p)", [IdxFile, Reason]),
+            ?DEBUG("Could not find user chunk in index file ~ts (~p)", [IdxFile, Reason]),
             last_user_chunk_id0(Rest)
     end.
 
@@ -1564,7 +1564,7 @@ delete_directory(#{name := Name} = Config) when is_map(Config) ->
     delete_directory(Name);
 delete_directory(Name) when ?IS_STRING(Name) ->
     Dir = directory(Name),
-    ?DEBUG("osiris_log: deleting directory ~s", [Dir]),
+    ?DEBUG("osiris_log: deleting directory ~ts", [Dir]),
     case file:list_dir(Dir) of
         {ok, Files} ->
             [ok =
@@ -1688,7 +1688,7 @@ first_and_last_seginfos0([FstIdxFile | Rem] = IdxFiles) ->
                 {ok, LastSegInfo} ->
                     {length(Rem) + 1, FstSegInfo, LastSegInfo};
                 {error, Err} ->
-                    ?ERROR("~s: failed to build seg_info from file ~s, error: ~w",
+                    ?ERROR("~s: failed to build seg_info from file ~ts, error: ~w",
                            [?MODULE, LastIdxFile, Err]),
                     error(Err)
             end;
@@ -1804,7 +1804,7 @@ build_segment_info(SegFile, LastChunkPos, IdxFile) ->
                    _Reserved:32>>} ->
                     Size = LastChunkPos + LastSize + LastTSize + ?HEADER_SIZE_B,
                     {ok, Eof} = file:position(Fd, eof),
-                    ?DEBUG_IF("~s: segment ~s has trailing data ~w ~w",
+                    ?DEBUG_IF("~s: segment ~ts has trailing data ~w ~w",
                               [?MODULE, filename:basename(SegFile),
                                Size, Eof], Size =/= Eof),
                     _ = file:close(Fd),
@@ -1903,7 +1903,7 @@ update_retention(Retention,
 evaluate_retention(Dir, Specs) when is_list(Dir) ->
     % convert to binary for faster operations later
     % mostly in segment_from_index_file/1
-    evaluate_retention(list_to_binary(Dir), Specs);
+    evaluate_retention(unicode:characters_to_binary(Dir), Specs);
 evaluate_retention(Dir, Specs) when is_binary(Dir) ->
 
     {Time, Result} = timer:tc(
@@ -2354,7 +2354,7 @@ open_new_segment(#?MODULE{cfg = #cfg{name = Name,
     _ = close_fd(OldIdxFd),
     Filename = make_file_name(NextOffset, "segment"),
     IdxFilename = make_file_name(NextOffset, "index"),
-    ?DEBUG("~s: ~s ~s: ~s", [?MODULE, ?FUNCTION_NAME, Name, Filename]),
+    ?DEBUG("~s: ~s ~ts: ~ts", [?MODULE, ?FUNCTION_NAME, Name, Filename]),
     {ok, IdxFd} =
         file:open(
             filename:join(Dir, IdxFilename), ?FILE_OPTS_WRITE),
@@ -2784,7 +2784,6 @@ close_fd(Fd) ->
 
 -ifdef(TEST).
 
-% -include_lib("eunit/include/eunit.hrl").
 
 part_test() ->
     [<<"ABCD">>] = part(4, [<<"ABCDEF">>]),

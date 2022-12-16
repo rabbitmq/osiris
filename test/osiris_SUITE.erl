@@ -102,7 +102,8 @@ end_per_group(_Group, _Config) ->
 
 init_per_testcase(TestCase, Config) ->
     PrivDir = ?config(priv_dir, Config),
-    Dir = filename:join(PrivDir, TestCase),
+    TestCaseBin = atom_to_binary(TestCase, utf8),
+    Dir = filename:join(PrivDir, TestCaseBin),
     _ = application:stop(osiris),
     _ = application:load(osiris),
     application:set_env(osiris, data_dir, Dir),
@@ -111,7 +112,7 @@ init_per_testcase(TestCase, Config) ->
     ok = logger:set_primary_config(level, all),
     [{data_dir, Dir},
      {test_case, TestCase},
-     {cluster_name, atom_to_binary(TestCase, utf8)},
+     {cluster_name, TestCaseBin},
      {started_apps, Apps}
      | Config].
 
@@ -120,7 +121,7 @@ extra_init(cluster_write_replication_tls) ->
     TlsGenCmd = "make -C " ++ TlsGenDir ++ " CN=$(hostname -s) CLIENT_ALT_NAME=$(hostname -s) SERVER_ALT_NAME=$(hostname -s)",
     TlsGenBasicOutput = os:cmd(TlsGenCmd),
     Hostname = string:trim(os:cmd("hostname -s"), both, "\n"),
-    ct:pal(?LOW_IMPORTANCE, "~s: ~s", [TlsGenCmd, TlsGenBasicOutput]),
+    ct:pal(?LOW_IMPORTANCE, "~ts: ~ts", [TlsGenCmd, TlsGenBasicOutput]),
     TlsConfDir = TlsGenDir ++ "/result/",
     application:set_env(osiris, replication_transport, ssl),
     application:set_env(osiris, replication_server_ssl_options, [
@@ -204,7 +205,7 @@ start_many_clusters(Config) ->
                     {osiris_written, _, WriterId, [42]} ->
                         true
                 after 2000 ->
-                          ct:pal("~s reached written timeout", [N]),
+                          ct:pal("~ts reached written timeout", [N]),
                           flush(),
                           false
                 end
@@ -1069,7 +1070,9 @@ retention(Config) ->
     timer:sleep(1000),
     Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
     %% one file only
-    [_] = filelib:wildcard(Wc),
+    ct:pal("PRE WILD"),
+    [_] = wildcard(Wc),
+    ct:pal("POST WILD"),
     osiris:stop_cluster(Conf1),
     ok.
 
@@ -1093,7 +1096,7 @@ retention_max_age_eventually(Config) ->
     Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
     %% one file only
     await_condition(fun () ->
-                            length(filelib:wildcard(Wc)) == 1
+                            length(wildcard(Wc)) == 1
                     end, 1000, 20),
     osiris:stop_cluster(Conf1),
     ok.
@@ -1121,7 +1124,7 @@ retention_max_age_update_retention(Config) ->
     ok = osiris:update_retention(Leader, [{max_bytes, SegSize * 10}]),
     timer:sleep(10000),
     %% one file only
-    ?assertNot(length(filelib:wildcard(Wc)) == 1),
+    ?assertNot(length(wildcard(Wc)) == 1),
     osiris:stop_cluster(Conf1),
     ok.
 
@@ -1149,7 +1152,7 @@ retention_max_age_noproc(Config) ->
     %% stop cluster before scheduled retention triggers
     osiris:stop_cluster(Conf1),
     timer:sleep(6000),
-    ?assertNot(length(filelib:wildcard(Wc)) == 1),
+    ?assertNot(length(wildcard(Wc)) == 1),
     ok.
 
 retention_add_replica_after(Config) ->
@@ -1200,7 +1203,7 @@ retention_add_replica_after(Config) ->
 
 check_last_entry(Pid, Entry) when is_pid(Pid) ->
     Self = self(),
-    ct:pal("checking last entry for node ~s ~w", [node(Pid), Pid]),
+    ct:pal("checking last entry for node ~ts ~w", [node(Pid), Pid]),
     X = spawn(node(Pid),
                fun () ->
                        {ok, Log0} = osiris:init_reader(Pid, last, {test, []}),
@@ -1295,10 +1298,10 @@ update_retention(Config) ->
     write_n(Leader, Num, 0, 1000 * 8, #{}),
     %% a retention update should trigger a retention evaluation
     Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
-    FilesPre = filelib:wildcard(Wc),
+    FilesPre = wildcard(Wc),
     ok = osiris:update_retention(Leader, [{max_bytes, SegSize}]),
     timer:sleep(1000),
-    Files = filelib:wildcard(Wc),
+    Files = wildcard(Wc),
     ?assert(length(Files) < length(FilesPre)),
     %% assert on num segs
     ok.
@@ -1332,7 +1335,7 @@ update_retention_replica(Config) ->
     Fun = fun(Pid) ->
              Node = hd(string:split(atom_to_list(node(Pid)), "@")),
              Wc = filename:join([DataDir, Node, ?FUNCTION_NAME, "*.segment"]),
-             Files = filelib:wildcard(Wc),
+             Files = wildcard(Wc),
              length(Files)
           end,
     ?assertEqual(1, erpc:call(node(R1), erlang, apply, [Fun, [R1]])),
@@ -1752,7 +1755,7 @@ empty_last_segment(Config) ->
     osiris:stop_cluster(Conf1),
     Wc = filename:join([DataDir, ?FUNCTION_NAME, "*.segment"]),
     %% one file only
-    [LastSeg | _] = lists:reverse(lists:sort(filelib:wildcard(Wc))),
+    [LastSeg | _] = lists:reverse(lists:sort(wildcard(Wc))),
 
     {ok, Fd} = file:open(LastSeg, [raw, binary, read, write]),
     ok = file:truncate(Fd),
@@ -1863,7 +1866,7 @@ start_child_node(NodeName, PrivDir, ExtraAppConfig0) ->
                 {FinalNodeName0, FinalNodeName0}
         end,
     %% ct:pal("started child node ~w~n", [FinalNodeName]),
-    ct:pal("node ~s will use data dir at ~s", [FinalNodeName, Dir]),
+    ct:pal("node ~s will use data dir at ~ts", [FinalNodeName, Dir]),
     ok = erpc:call(FinalNodeName, ?MODULE, node_setup, [Dir]),
     %% ct:pal("performed node setup on child node ~w", [FinalNodeName]),
     ok = erpc:call(FinalNodeName, osiris, configure_logger, [logger]),
@@ -2076,4 +2079,8 @@ await_condition(CondFun, Sleep, Attempt) ->
             await_condition(CondFun, Sleep, Attempt-1)
     end.
 
+wildcard(Wc) when is_list(Wc) ->
+    filelib:wildcard(Wc);
+wildcard(Wc) ->
+    wildcard(unicode:characters_to_list(Wc)).
 
