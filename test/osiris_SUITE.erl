@@ -644,33 +644,32 @@ cluster_restart(Config) ->
         exit(osiris_written_timeout)
     end,
 
-    timer:sleep(1),
-    RangesBeforeRecovery =
-    [begin
-         #{committed_chunk_id := E,
-           first_chunk_id := S} = osiris:get_stats(P),
-         {S, E}
-     end || P <- [Leader, Replica1, Replica2]],
-
-    ?assertEqual([{0,0}, {0,0}, {0,0}], RangesBeforeRecovery),
+    await_condition(
+      fun () ->
+              [{0,0}, {0,0}, {0,0}] ==
+                  [begin
+                       #{committed_chunk_id := E,
+                         first_chunk_id := S} = osiris:get_stats(P),
+                       {S, E}
+                   end || P <- [Leader, Replica1, Replica2]]
+      end, 100, 20),
 
     osiris:stop_cluster(Conf),
     {ok, #{leader_pid := Leader1,
            replica_pids := [ReplicaPid1, ReplicaPid2]}} =
         osiris:start_cluster(Conf0#{epoch => 2}),
-    %% give leader some time to discover the committed offset
-    timer:sleep(1000),
 
     %% get all log ranges after recovery for each member and validate they are all
     %% the same
-    RangesAfterRecovery =
-    [begin
-         #{committed_chunk_id := E,
-           first_chunk_id := S} = osiris:get_stats(P),
-         {S, E}
-     end || P <- [Leader1, ReplicaPid1, ReplicaPid2]],
-    ?assertEqual([{0,0}, {0,0}, {0,0}], RangesAfterRecovery),
-    ct:pal("~p ~p", [RangesBeforeRecovery, RangesAfterRecovery]),
+    await_condition(
+      fun () ->
+              [{0,0}, {0,0}, {0,0}] ==
+                  [begin
+                       #{committed_chunk_id := E,
+                         first_chunk_id := S} = osiris:get_stats(P),
+                       {S, E}
+                   end || P <- [Leader1, ReplicaPid1, ReplicaPid2]]
+      end, 100, 20),
     ok = validate_log_offset_reader(Leader1, [{0, <<"before-restart">>}]),
     ok = validate_log_offset_reader(ReplicaPid1, [{0, <<"before-restart">>}]),
     ok = validate_log_offset_reader(ReplicaPid2, [{0, <<"before-restart">>}]),

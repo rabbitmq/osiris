@@ -378,18 +378,14 @@
         {type :: data | offset,
          next_offset = 0 :: offset(),
          transport :: transport(),
-         chunk_selector :: all | user_data}).
+         chunk_selector :: all | user_data,
+         position = 0 :: non_neg_integer()}).
 -record(write,
         {type = writer :: writer | acceptor,
          segment_size = {?LOG_HEADER_SIZE, 0} :: {non_neg_integer(), non_neg_integer()},
          current_epoch :: non_neg_integer(),
          tail_info = {0, empty} :: osiris:tail_info()
         }).
-% -record(segment,
-%         {
-%          current_file :: undefined | file:filename(),
-%          index_fd :: undefined | file:io_device(),
-%          fd :: undefined | file:io_device()}).
 -record(?MODULE,
         {cfg :: #cfg{},
          mode :: #read{} | #write{},
@@ -823,7 +819,7 @@ chunk_id_index_scan0(Fd, ChunkId) ->
            Epoch:64/unsigned,
            FilePos:32/unsigned,
            _ChType:8/unsigned>>} ->
-	    {ok, IdxPos} = file:position(Fd, cur),
+            {ok, IdxPos} = file:position(Fd, cur),
             ok = file:close(Fd),
             {ChunkId, Epoch, FilePos, IdxPos - ?INDEX_RECORD_SIZE_B};
         {ok, _} ->
@@ -991,7 +987,6 @@ init_data_reader_at(ChunkId, FilePos, File,
                       shared := Shared,
                       readers_counter_fun := CountersFun} = Config) ->
     {ok, Fd} = file:open(File, [raw, binary, read]),
-    {ok, FilePos} = file:position(Fd, FilePos),
     Cnt = make_counter(Config),
     counters:put(Cnt, ?C_OFFSET, ChunkId - 1),
     CountersFun(1),
@@ -1007,6 +1002,7 @@ init_data_reader_at(ChunkId, FilePos, File,
                  #read{type = data,
                        next_offset = ChunkId,
                        chunk_selector = all,
+                       position = FilePos,
                        transport = maps:get(transport, Config, tcp)},
              fd = Fd}.
 
@@ -1218,7 +1214,6 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                         options := Options} =
                       Conf) ->
     {ok, Fd} = open(SegmentFile, [raw, binary, read]),
-    {ok, FilePos} = file:position(Fd, FilePos),
     Cnt = make_counter(Conf),
     ReaderCounterFun(1),
     {ok, #?MODULE{cfg = #cfg{directory = Dir,
@@ -1229,6 +1224,7 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                              shared = Shared
                             },
                   mode = #read{type = offset,
+                               position = FilePos,
                                chunk_selector = maps:get(chunk_selector, Options,
                                                          user_data),
                                next_offset = NextChunkId,
@@ -1327,13 +1323,15 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
         {ok,
          #{num_records := NumRecords,
            data_size := DataSize,
+           position := Pos,
            trailer_size := TrailerSize} =
              Header,
-         #?MODULE{mode = #read{} = Read, fd = Fd} = State} ->
+         #?MODULE{mode = #read{next_offset = ChId} = Read} = State} ->
             %% skip data portion
-            {ok, _} = file:position(Fd, {cur, DataSize + TrailerSize}),
+            NextPos = Pos + ?HEADER_SIZE_B + DataSize + TrailerSize,
             {ok, Header,
-             State#?MODULE{mode = incr_next_offset(NumRecords, Read)}};
+             State#?MODULE{mode = Read#read{next_offset = ChId + NumRecords,
+                                            position = NextPos}}};
         {end_of_stream, _} = EOF ->
             EOF;
         {error, _} = Err ->
@@ -1364,13 +1362,22 @@ read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
            num_records := NumRecords,
            header_data := HeaderData,
            data_size := DataSize,
+           position := Pos,
            trailer_size := TrailerSize},
          #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State} ->
-            {ok, BlobData} = file:read(Fd, DataSize),
-            {ok, TrailerData} = file:read(Fd, TrailerSize),
+            {ok, BlobData} = file:pread(Fd, Pos + ?HEADER_SIZE_B, DataSize),
+            TrailerData = case TrailerSize > 0 of
+                              true ->
+                                  file:pread(Fd, Pos + ?HEADER_SIZE_B + DataSize,
+                                             TrailerSize);
+                              false ->
+                                  <<>>
+                          end,
             validate_crc(ChId, Crc, BlobData),
+            NextPos = Pos + ?HEADER_SIZE_B + DataSize + TrailerSize,
             {ok, {ChType, ChId, Epoch, HeaderData, BlobData, TrailerData},
-             State#?MODULE{mode = incr_next_offset(NumRecords, Read)}};
+             State#?MODULE{mode = Read#read{next_offset = ChId + NumRecords,
+                                            position = NextPos}}};
         Other ->
             Other
     end.
@@ -1400,12 +1407,14 @@ read_chunk_parsed(#?MODULE{mode = #read{type = RType,
            crc := Crc,
            num_records := NumRecords,
            data_size := DataSize,
+           position := Pos,
            trailer_size := TrailerSize} = Header,
          #?MODULE{fd = Fd, mode = #read{next_offset = _ChId} = Read} = State1} ->
-            {ok, Data} = file:read(Fd, DataSize),
-            {ok, _TrailerData} = file:read(Fd, TrailerSize),
+            {ok, Data} = file:pread(Fd, Pos + ?HEADER_SIZE_B, DataSize),
             validate_crc(ChId, Crc, Data),
-            State = State1#?MODULE{mode = incr_next_offset(NumRecords, Read)},
+            NextPos = Pos + ?HEADER_SIZE_B + DataSize + TrailerSize,
+            State = State1#?MODULE{mode = Read#read{next_offset = ChId + NumRecords,
+                                                    position = NextPos}},
             case needs_handling(RType, Selector, ChType) of
                 true when HeaderOrNot == no_header ->
                     %% parse data into records
@@ -1456,7 +1465,6 @@ is_valid_chunk_on_disk(SegFile, Pos) ->
             false
     end.
 
-
 -spec send_file(gen_tcp:socket(), state()) ->
                    {ok, state()} |
                    {error, term()} |
@@ -1466,23 +1474,23 @@ send_file(Sock, State) ->
 
 -spec send_file(gen_tcp:socket(), state(),
                 fun((header_map(), non_neg_integer()) -> term())) ->
-                   {ok, state()} |
-                   {error, term()} |
-                   {end_of_stream, state()}.
+    {ok, state()} |
+    {error, term()} |
+    {end_of_stream, state()}.
 send_file(Sock,
-          #?MODULE{cfg = #cfg{}, mode = #read{type = RType,
-                                              chunk_selector = Selector,
-                                              transport = Transport}} = State0,
+          #?MODULE{mode = #read{type = RType,
+                                chunk_selector = Selector,
+                                transport = Transport}} = State0,
           Callback) ->
     case read_header0(State0) of
-        {ok,
-         #{type := ChType,
-           chunk_id := ChId,
-           num_records := NumRecords,
-           data_size := DataSize,
-           trailer_size := TrailerSize,
-           position := Pos} = Header,
-         #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State1} ->
+        {ok, #{type := ChType,
+               chunk_id := ChId,
+               num_records := NumRecords,
+               data_size := DataSize,
+               trailer_size := TrailerSize,
+               position := Pos} = Header,
+         #?MODULE{fd = Fd,
+                  mode = #read{next_offset = ChId} = Read0} = State1} ->
             %% read header
             %% used to write frame headers to socket
             %% and return the number of bytes to sendfile
@@ -1490,39 +1498,31 @@ send_file(Sock,
             %% or just header and entry data
             ToSend = case RType of
                          offset ->
-                             select_chunk_to_send(Selector, ChType, DataSize, TrailerSize);
+                             select_amount_to_send(Selector, ChType,
+                                                   DataSize, TrailerSize);
                          data ->
                              DataSize + TrailerSize + ?HEADER_SIZE_B
                      end,
 
-            %% sendfile doesn't increment the file descriptor position
-            %% so we have to do this manually
             NextFilePos = Pos + DataSize + TrailerSize + ?HEADER_SIZE_B,
-            State = State1#?MODULE{mode = incr_next_offset(NumRecords, Read)},
+            Read = Read0#read{next_offset = ChId + NumRecords,
+                              position = NextFilePos},
             %% only sendfile if either the reader is a data reader
             %% or the chunk is a user type (for offset readers)
             case needs_handling(RType, Selector, ChType) of
                 true ->
-                    %% this avoids any data sent in the Callback to be dispatched
-                    %% in it's own TCP frame
-                    case setopts(Transport, Sock, [{nopush, true}]) of
+                    _ = Callback(Header, ToSend),
+                    case sendfile(Transport, Fd, Sock, Pos, ToSend) of
                         ok ->
-                            _ = Callback(Header, ToSend),
-                            case sendfile(Transport, Fd, Sock, Pos, ToSend) of
-                                ok ->
-                                    ok = setopts(Transport, Sock, [{nopush, false}]),
-                                    {ok, _} = file:position(Fd, NextFilePos),
-                                    {ok, State};
-                                Err ->
-                                    %% reset the position to the start of the current
-                                    %% chunk so that subsequent reads won't error
-                                    {ok, _} = file:position(Fd, Pos),
-                                    Err
-                            end;
-                        Err -> Err
+                            State = State1#?MODULE{mode = Read},
+                            {ok, State};
+                        Err ->
+                            %% reset the position to the start of the current
+                            %% chunk so that subsequent reads won't error
+                            Err
                     end;
                 false ->
-                    {ok, _} = file:position(Fd, NextFilePos),
+                    State = State1#?MODULE{mode = Read},
                     %% skip chunk and recurse
                     send_file(Sock, State, Callback)
             end;
@@ -1531,9 +1531,9 @@ send_file(Sock,
     end.
 
 %% There could be many more selectors in the future
-select_chunk_to_send(user_data, ?CHNK_USER, DataSize, _TrailerSize) ->
+select_amount_to_send(user_data, ?CHNK_USER, DataSize, _TrailerSize) ->
     DataSize + ?HEADER_SIZE_B;
-select_chunk_to_send(_, _, DataSize, TrailerSize) ->
+select_amount_to_send(_, _, DataSize, TrailerSize) ->
     DataSize + TrailerSize + ?HEADER_SIZE_B.
 
 needs_handling(data, _, _) ->
@@ -1580,20 +1580,18 @@ delete_directory(Name) when ?IS_STRING(Name) ->
 
 header_info(Fd, Pos) ->
     {ok, Pos} = file:position(Fd, Pos),
-    {ok,
-     <<?MAGIC:4/unsigned,
-       ?VERSION:4/unsigned,
-       ChType:8/unsigned,
-       _NumEntries:16/unsigned,
-       Num:32/unsigned,
-       _Timestamp:64/signed,
-       Epoch:64/unsigned,
-       Offset:64/unsigned,
-       _Crc:32/integer,
-       Size:32/unsigned,
-       TSize:32/unsigned,
-       _Reserved:32>>} =
-        file:read(Fd, ?HEADER_SIZE_B),
+    {ok, <<?MAGIC:4/unsigned,
+           ?VERSION:4/unsigned,
+           ChType:8/unsigned,
+           _NumEntries:16/unsigned,
+           Num:32/unsigned,
+           _Timestamp:64/signed,
+           Epoch:64/unsigned,
+           Offset:64/unsigned,
+           _Crc:32/integer,
+           Size:32/unsigned,
+           TSize:32/unsigned,
+           _Reserved:32>>} = file:read(Fd, ?HEADER_SIZE_B),
     {ChType, Offset, Epoch, Num, Size, TSize}.
 
 parse_records(_Offs, <<>>, Acc) ->
@@ -2191,11 +2189,6 @@ max_segment_size_reached(
     CurrentSizeBytes >= MaxSizeBytes orelse
     CurrentSizeChunks >= MaxSizeChunks.
 
-setopts(tcp, Sock, Opts) ->
-    inet:setopts(Sock, Opts);
-setopts(ssl, Sock, Opts) ->
-    ssl:setopts(Sock, Opts).
-
 sendfile(_Transport, _Fd, _Sock, _Pos, 0) ->
     ok;
 sendfile(tcp = Transport, Fd, Sock, Pos, ToSend) ->
@@ -2334,9 +2327,6 @@ can_read_next_chunk_id(#?MODULE{mode = #read{type = data,
                                              next_offset = NextOffset},
                               cfg = #cfg{shared = Ref}}) ->
     osiris_log_shared:last_chunk_id(Ref) >= NextOffset.
-
-incr_next_offset(Num, #read{next_offset = NextOffset} = Read) ->
-    Read#read{next_offset = NextOffset + Num}.
 
 make_file_name(N, Suff) ->
     lists:flatten(
@@ -2557,15 +2547,15 @@ recover_tracking(Fd, Trk0) ->
 read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                                  shared = Shared,
                                  counter = CntRef},
-                      mode = #read{next_offset = NextChId0} = Read0,
+                      mode = #read{next_offset = NextChId0,
+                                   position = Pos} = Read0,
                       current_file = CurFile,
                       fd = Fd} =
-                 State) ->
+             State) ->
     %% reads the next header if permitted
     case can_read_next_chunk_id(State) of
         true ->
-            {ok, Pos} = file:position(Fd, cur),
-            case file:read(Fd, ?HEADER_SIZE_B) of
+            case file:pread(Fd, Pos, ?HEADER_SIZE_B) of
                 {ok,
                  <<?MAGIC:4/unsigned,
                    ?VERSION:4/unsigned,
@@ -2578,8 +2568,7 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                    Crc:32/integer,
                    DataSize:32/unsigned,
                    TrailerSize:32/unsigned,
-                   _Reserved:32>> =
-                     HeaderData} ->
+                   _Reserved:32>> = HeaderData} ->
                     counters:put(CntRef, ?C_OFFSET, NextChId0 + NumRecords),
                     counters:add(CntRef, ?C_CHUNKS, 1),
                     {ok,
@@ -2600,7 +2589,6 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                     %% this can happen when a replica reader reads ahead
                     %% optimistically
                     %% set the position back and and return end of stream
-                    {ok, Pos} = file:position(Fd, Pos),
                     {end_of_stream, State};
                 eof ->
                     FirstOffset = osiris_log_shared:first_chunk_id(Shared),
@@ -2616,19 +2604,16 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                             %% log but would cause an infinite loop if it does
                             {end_of_stream, State};
                         false ->
-                            case file:open(
-                                     filename:join(Dir, SegFile),
-                                     [raw, binary, read])
-                            of
+                            case file:open(filename:join(Dir, SegFile),
+                                           [raw, binary, read]) of
                                 {ok, Fd2} ->
                                     ok = file:close(Fd),
-                                    {ok, _} =
-                                        file:position(Fd2, ?LOG_HEADER_SIZE),
-                                    Read = Read0#read{next_offset = NextChId},
-                                    read_header0(State#?MODULE{current_file =
-                                                                   SegFile,
-                                                               fd = Fd2,
-                                                               mode = Read});
+                                    Read = Read0#read{next_offset = NextChId,
+                                                      position = ?LOG_HEADER_SIZE},
+                                    read_header0(
+                                      State#?MODULE{current_file = SegFile,
+                                                    fd = Fd2,
+                                                    mode = Read});
                                 {error, enoent} ->
                                     {end_of_stream, State}
                             end
@@ -2648,10 +2633,8 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                    _Reserved:32>>} ->
                     %% TODO: we may need to return the new state here if
                     %% we've crossed segments
-                    {ok, Pos} = file:position(Fd, Pos),
                     {error, {unexpected_chunk_id, UnexpectedChId, NextChId0}};
                 Invalid ->
-                    _ = file:position(Fd, Pos),
                     {error, {invalid_chunk_header, Invalid}}
             end;
         false ->
