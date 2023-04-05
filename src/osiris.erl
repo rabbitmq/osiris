@@ -9,7 +9,8 @@
 
 -include("osiris.hrl").
 
--export([write/4,
+-export([write/2,
+         write/4,
          write_tracking/3,
          read_tracking/1,
          read_tracking/2,
@@ -122,6 +123,10 @@ start_writer(Config) ->
 
 start_replica(Replica, Config) ->
     osiris_replica:start(Replica, Config).
+
+-spec write(Pid :: pid(), Data :: data()) -> ok.
+write(Pid, Data) ->
+    osiris_writer:write(Pid, Data).
 
 -spec write(Pid :: pid(),
             WriterId :: binary() | undefined,

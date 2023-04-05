@@ -31,6 +31,7 @@ all() ->
 
 all_tests() ->
     [single_node_write,
+     single_node_uncorrelated_write,
      cluster_write_replication_plain,
      cluster_write_replication_tls,
      start_many_clusters,
@@ -175,6 +176,29 @@ single_node_write(Config) ->
         exit(osiris_written_timeout)
     end,
     ?assertEqual(42, osiris:fetch_writer_seq(Leader, Wid)),
+    ok.
+
+single_node_uncorrelated_write(Config) ->
+    Name = ?config(cluster_name, Config),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          replica_nodes => [],
+          tracking_max_writers => 255,
+          dir => ?config(priv_dir, Config)},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    ok = osiris:write(Leader, <<"mah-data">>),
+    %% check no notification is sent
+    receive
+        Msg ->
+            ct:fail("unexpected message ~p", [Msg])
+    after 500 ->
+              ok
+    end,
+    {ok, Log0} = osiris:init_reader(Leader, {abs, 0}, {test, []}),
+    {[{0, <<"mah-data">>}], Log} = osiris_log:read_chunk_parsed(Log0),
+    osiris_log:close(Log),
     ok.
 
 start_many_clusters(Config) ->

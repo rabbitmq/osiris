@@ -18,6 +18,7 @@
          init_data_reader/3,
          register_data_listener/2,
          ack/2,
+         write/2,
          write/5,
          write_tracking/3,
          read_tracking/3,
@@ -123,12 +124,16 @@ ack(LeaderPid, {Offset, _} = OffsetTs)
   when is_integer(Offset) andalso Offset >= 0 ->
     gen_batch_server:cast(LeaderPid, {ack, node(), OffsetTs}).
 
+-spec write(Pid :: pid(), Data :: osiris:data()) -> ok.
+write(Pid, Data)
+    when is_pid(Pid) ->
+    gen_batch_server:cast(Pid, {write, Data}).
+
 -spec write(Pid :: pid(),
             Sender :: pid(),
             WriterId :: binary() | undefined,
             CorrOrSeq :: non_neg_integer() | term(),
-            Data :: osiris:data()) ->
-               ok.
+            Data :: osiris:data()) -> ok.
 write(Pid, Sender, WriterId, Corr, Data)
     when is_pid(Pid) andalso is_pid(Sender) ->
     gen_batch_server:cast(Pid, {write, Sender, WriterId, Corr, Data}).
@@ -379,6 +384,9 @@ handle_command({cast, {write, Pid, WriterId, Corr, R}},
              Trk,
              [{ChId, Pid, WriterId, Corr} | Dupes]}
     end;
+handle_command({cast, {write, R}},
+               {#?MODULE{} = State, Records, Replies, Corrs0, Trk, Dupes}) ->
+    {State, [R | Records], Replies, Corrs0, Trk, Dupes};
 handle_command({cast, {write_tracking, TrackingId, TrackingType, TrackingData}},
                {#?MODULE{log = Log} = State, Records, Replies, Corrs, Trk0, Dupes}) ->
     ChunkId = osiris_log:next_offset(Log),
