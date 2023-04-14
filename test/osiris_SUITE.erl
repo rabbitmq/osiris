@@ -138,8 +138,7 @@ extra_init(cluster_write_replication_tls) ->
         {certfile, TlsConfDir ++ "client_" ++ Hostname ++ "_certificate.pem"},
         {keyfile, TlsConfDir ++ "client_" ++ Hostname ++ "_key.pem"},
         {secure_renegotiate, true},
-        {verify,verify_peer},
-        {fail_if_no_peer_cert, true}
+        {verify,verify_peer}
     ]),
     ok;
 extra_init(_) ->
@@ -1916,7 +1915,6 @@ start_child_node(NodeName, PrivDir, ExtraAppConfig0) ->
         end
     end || K <- AllKeys],
 
-    ok = erpc:call(FinalNodeName, logger, set_primary_config, [level, all]),
     _ = [ erpc:call(FinalNodeName, application, ensure_all_started, [App])
           || App <- AppsToStart],
     Result.
@@ -2066,14 +2064,14 @@ node_setup(DataDir) ->
     LogFile = filename:join([DataDir, "osiris.log"]),
     SaslFile = filename:join([DataDir, "osiris_sasl.log"]),
     _ = logger:set_primary_config(level, debug),
-    Config = #{config => #{type => {file, LogFile}}, level => debug},
-    _ = logger:add_handler(ra_handler, logger_std_h, Config),
+    Config = #{config => #{file => to_string(LogFile)}},
+    ok = logger:add_handler(osiris_handler, logger_std_h, Config),
 
     _ = application:load(kernel),
     application:set_env(kernel, prevent_overlapping_partitions, false),
 
     _ = application:load(sasl),
-    application:set_env(sasl, sasl_error_logger, {file, SaslFile}),
+    application:set_env(sasl, sasl_error_logger, {file, to_string(SaslFile)}),
     _ = application:stop(sasl),
     _ = application:start(sasl),
     _ = error_logger:tty(false),
@@ -2082,6 +2080,9 @@ node_setup(DataDir) ->
     application:set_env(osiris, data_dir, DataDir),
 
     ok.
+
+to_string(B) when is_binary(B) ->
+    binary_to_list(B).
 
 simple(Bin) ->
     S = byte_size(Bin),
