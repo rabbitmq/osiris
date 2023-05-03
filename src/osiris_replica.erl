@@ -303,6 +303,7 @@ open_listener(Transport, {Min, Max} = Range, Attempts) ->
         {ok, LSock} ->
             {Port, LSock};
         {error, eaddrinuse} ->
+            timer:sleep(Attempts),
             open_listener(Transport, Range, Attempts + 1);
         E ->
             throw({stop, E})
@@ -723,8 +724,12 @@ listener_opts() ->
     RcvBuf = application:get_env(osiris, replica_recbuf, ?DEF_REC_BUF),
     Buffer = application:get_env(osiris, replica_buffer, RcvBuf * 2),
     KeepAlive = application:get_env(osiris, replica_keepalive, false),
+    ReuseAddr = application:get_env(osiris, replica_reuseaddr, true),
+    Linger = application:get_env(osiris, replica_linger, true),
+    LingerTimeout = application:get_env(osiris, replica_linger_timeout, 0),
     [binary,
-     {reuseaddr, true},
+     {reuseaddr, ReuseAddr},
+     {linger, {Linger, LingerTimeout}},
      {backlog, 0},
      {packet, raw},
      {active, false},
