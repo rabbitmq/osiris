@@ -53,3 +53,5 @@
 -define(CHNK_TRK_SNAPSHOT, 2).
 
 -define(SUP, osiris_server_sup).
+
+-define(DEFAULT_FILTER_SIZE, 16).

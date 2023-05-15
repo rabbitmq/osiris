@@ -65,13 +65,18 @@
 -type retention_spec() ::
     {max_bytes, non_neg_integer()} | {max_age, milliseconds()}.
 -type writer_id() :: binary().
--type data() :: iodata() | {batch,
-                            NumRecords :: non_neg_integer(),
-                            compression_type(),
-                            UncompressedDataSize :: non_neg_integer(),
-                            iodata()}.
+-type batch() :: {batch, NumRecords :: non_neg_integer(),
+                  compression_type(),
+                  UncompressedDataSize :: non_neg_integer(),
+                  iodata()}.
+-type filter_value() :: binary().
+-type data() :: iodata() |
+                batch() |
+                {filter_value(), iodata() | batch()}.
+
 -type reader_options() :: #{transport => tcp | ssl,
-                            chunk_selector => all | user_data
+                            chunk_selector => all | user_data,
+                            filter_spec => osiris_bloom:filter_spec()
                            }.
 
 -export_type([name/0,
@@ -193,11 +198,11 @@ init_reader(Pid, OffsetSpec, CounterSpec) ->
     init_reader(Pid, OffsetSpec, CounterSpec, #{transport => tcp,
                                                 chunk_selector => user_data}).
 
--spec init_reader(pid(), offset_spec(), osiris_log:counter_spec(), reader_options()) ->
-                     {ok, osiris_log:state()} |
-                     {error,
-                      {offset_out_of_range, empty | {offset(), offset()}}} |
-                     {error, {invalid_last_offset_epoch, offset(), offset()}}.
+-spec init_reader(pid(), offset_spec(), osiris_log:counter_spec(),
+                  reader_options()) ->
+    {ok, osiris_log:state()} |
+    {error, {offset_out_of_range, empty | {offset(), offset()}}} |
+    {error, {invalid_last_offset_epoch, offset(), offset()}}.
 init_reader(Pid, OffsetSpec, {_, _} = CounterSpec, Options)
     when is_pid(Pid) andalso node(Pid) =:= node() ->
     ?DEBUG("osiris: initialising reader. Spec: ~w", [OffsetSpec]),

@@ -32,6 +32,8 @@ all_tests() ->
      init_recover_with_writers,
      init_with_lower_epoch,
      write_batch,
+     write_batch_with_filter,
+     write_batch_with_filters_variable_size,
      subbatch,
      subbatch_compressed,
      read_chunk_parsed,
@@ -185,6 +187,67 @@ write_batch(Config) ->
     S1 = osiris_log:write([<<"hi">>], S0),
     ?assertEqual(1, osiris_log:next_offset(S1)),
     ok.
+
+write_batch_with_filter(Config) ->
+    Conf0 = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf0#{filter_size => 32}),
+    ?assertEqual(0, osiris_log:next_offset(S0)),
+    %% write an entry with a filter value and an entry without a filter value
+    S1 = osiris_log:write([<<"ho">>, {<<"banana">>, <<"hi">>}], S0),
+    %% then write a chunk without any filtred entries at all
+    S2 = osiris_log:write([<<"hum">>], S1),
+    ?assertEqual(3, osiris_log:next_offset(S2)),
+
+    Shared = osiris_log:get_shared(S0),
+    Conf = Conf0#{shared => Shared},
+    osiris_log_shared:set_committed_chunk_id(Shared, 2), %% second chunk index
+    %% no filter should read the chunk
+    {ok, R0} = osiris_log:init_offset_reader(0, Conf),
+    ?assertMatch({[{0, <<"hi">>}, {1, <<"ho">>}], _R1},
+                 osiris_log:read_chunk_parsed(R0)),
+    %% matching filter should read the chunk
+    {ok, F0} = osiris_log:init_offset_reader(0, add_filter(<<"banana">>, Conf)),
+    ?assertMatch({[{0, <<"hi">>}, _], _F1}, osiris_log:read_chunk_parsed(F0)),
+    %% non-matching filter should not typically read the chunk
+    {ok, M0} = osiris_log:init_offset_reader(0, add_filter(<<"apple">>, Conf)),
+    ?assertMatch({end_of_stream, _M1}, osiris_log:read_chunk_parsed(M0)),
+
+    %% interested in unfiltered entries also
+    {ok, E0} = osiris_log:init_offset_reader(0, add_filter(<<"apple">>, true, Conf)),
+    {[{0, <<"hi">>}, _], E1} = osiris_log:read_chunk_parsed(E0),
+    ?assertMatch({[{2, <<"hum">>}], _E2}, osiris_log:read_chunk_parsed(E1)),
+    ok.
+
+write_batch_with_filters_variable_size(Config) ->
+    Conf0 = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf0#{filter_size => 32}),
+    ?assertEqual(0, osiris_log:next_offset(S0)),
+    %% write an entry with a filter value and an entry without a filter value
+    S1 = osiris_log:write([{<<"apple">>, <<"ho">>},
+                           {<<"banana">>, <<"hi">>}], S0),
+    _ = osiris_log:close(S1),
+    S2 = osiris_log:init(Conf0#{filter_size => 255}),
+    %% then write a chunk without any filtred entries at all
+    S3 = osiris_log:write([{<<"apple">>, <<"ho">>},
+                           {<<"banana">>, <<"hi">>}], S2),
+    ?assertEqual(4, osiris_log:next_offset(S3)),
+
+    Shared = osiris_log:get_shared(S0),
+    Conf = Conf0#{shared => Shared},
+    osiris_log_shared:set_committed_chunk_id(Shared, 2), %% second chunk index
+    {ok, F0} = osiris_log:init_offset_reader(0, add_filter(<<"banana">>, Conf)),
+    {[{0, <<"hi">>}, _], F1} = osiris_log:read_chunk_parsed(F0),
+    {[{2, <<"hi">>}, _], F2} = osiris_log:read_chunk_parsed(F1),
+    osiris_log:close(F2),
+    ok.
+
+add_filter(Filter, #{options := Opts} = Conf) ->
+    add_filter(Filter, false, #{options := Opts} = Conf).
+
+add_filter(Filter, MatchUnfiltered, #{options := Opts} = Conf) ->
+    Conf#{options => Opts#{filter_spec => #{filters => [Filter],
+                                            match_unfiltered => MatchUnfiltered}}}.
+
 
 subbatch(Config) ->
     Conf = ?config(osiris_conf, Config),
@@ -713,9 +776,9 @@ init_data_reader_next(Config) ->
     Conf = ?config(osiris_conf, Config),
     LDir = ?config(leader_dir, Config),
     FDir = ?config(follower1_dir, Config),
-    _LLog0 = seed_log(LDir, [{1, ["one"]}], Config),
+    _LLog0 = seed_log(LDir, [{1, [<<"one">>]}], Config),
     %% seed is up to date
-    FLog0 = seed_log(FDir, [{1, ["one"]}], Config),
+    FLog0 = seed_log(FDir, [{1, [<<"one">>]}], Config),
     RRConf = Conf#{dir => LDir,
                    shared => osiris_log:get_shared(FLog0)},
     %% the next offset, i.e. offset 0
