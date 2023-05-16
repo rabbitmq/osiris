@@ -1,5 +1,4 @@
-build --experimental_enable_bzlmod
-build --registry=https://raw.githubusercontent.com/rabbitmq/bazel-central-registry/dev/
+build --enable_bzlmod
 
 build --incompatible_strict_action_env
 build --local_test_jobs=1
@@ -7,10 +6,10 @@ build --local_test_jobs=1
 build --flag_alias=erlang_home=@rules_erlang//:erlang_home
 build --flag_alias=erlang_version=@rules_erlang//:erlang_version
 
-build --extra_toolchains="@erlang_config//24:toolchain"
-build --extra_toolchains="@erlang_config//24:toolchain2"
-build --extra_toolchains="@erlang_config//25:toolchain"
-build --extra_toolchains="@erlang_config//25:toolchain2"
+build --extra_toolchains="@erlang_config//24:toolchain_major"
+build --extra_toolchains="@erlang_config//24:toolchain_major_minor"
+build --extra_toolchains="@erlang_config//25:toolchain_major"
+build --extra_toolchains="@erlang_config//25:toolchain_major_minor"
 
 build:buildbuddy --bes_results_url=https://app.buildbuddy.io/invocation/
 build:buildbuddy --bes_backend=grpcs://remote.buildbuddy.io
