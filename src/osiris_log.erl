@@ -417,7 +417,8 @@
 -export_type([state/0,
               range/0,
               config/0,
-              counter_spec/0]).
+              counter_spec/0,
+              transport/0]).
 
 -spec directory(osiris:config() | list()) -> file:filename_all().
 directory(#{name := Name, dir := Dir}) ->
