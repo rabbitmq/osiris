@@ -1,11 +1,14 @@
 load("@rules_erlang//:erlang_app.bzl", "erlang_app", "test_erlang_app")
 load("@rules_erlang//:xref2.bzl", "xref")
 load("@rules_erlang//:dialyze.bzl", "DEFAULT_PLT_APPS", "dialyze", "plt")
-load("@rules_erlang//:ct.bzl", "ct_suite")
+load("@rules_erlang//:eunit2.bzl", "eunit")
+load("@rules_erlang//:ct.bzl", "assert_suites2", "ct_suite")
 
 NAME = "osiris"
 
 VERSION = "1.5.1"
+
+DESCRIPTION = "New project"
 
 APP_ENV = """[
 	{data_dir, "/tmp/osiris"},
@@ -32,6 +35,7 @@ erlang_app(
     app_env = APP_ENV,
     app_name = NAME,
     app_version = VERSION,
+    app_description = DESCRIPTION,
     extra_apps = EXTRA_APPS,
     runtime_deps = RUNTIME_DEPS,
     deps = DEPS,
@@ -41,6 +45,7 @@ test_erlang_app(
     app_env = APP_ENV,
     app_name = NAME,
     app_version = VERSION,
+    app_description = DESCRIPTION,
     extra_apps = EXTRA_APPS,
     runtime_deps = RUNTIME_DEPS,
     deps = DEPS,
@@ -49,9 +54,19 @@ test_erlang_app(
 xref()
 
 plt(
-    name = "base_plt",
-    apps = DEFAULT_PLT_APPS + EXTRA_APPS,
-    deps = DEPS + RUNTIME_DEPS,
+    name = "deps_plt",
+    apps = DEFAULT_PLT_APPS + [
+        "compiler",
+        "crypto",
+        "tools",
+        "runtime_tools",
+        "mnesia",
+        "public_key",
+        "asn1",
+        "ssl",
+        "inets",
+    ],
+    for_target = ":erlang_app",
 )
 
 dialyze(
@@ -60,7 +75,19 @@ dialyze(
         "-Werror_handling",
         "-Wunmatched_returns",
     ],
-    plt = ":base_plt",
+    plt = ":deps_plt",
+)
+
+eunit(
+    name = "eunit",
+    deps = [
+        "@eunit_formatters//:erlang_app",
+    ],
+    eunit_opts = [
+        "no_tty",
+        "{report, {eunit_progress, [colored, profile]}}",
+    ],
+    target = ":test_erlang_app",
 )
 
 [ct_suite(
@@ -79,3 +106,5 @@ ct_suite(
         "DEPS_DIR": "$TEST_SRCDIR/$TEST_WORKSPACE/external",
     },
 )
+
+assert_suites2()
