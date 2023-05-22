@@ -17,15 +17,13 @@ dep_gen_batch_server = hex 0.8.8
 dep_seshat = hex 0.4.0
 DEPS = gen_batch_server seshat
 
-# TEST_DEPS=eunit_formatters looking_glass
+dep_looking_glass = git https://github.com/rabbitmq/looking-glass.git master
 dep_tls_gen = git https://github.com/rabbitmq/tls-gen.git main
+# TEST_DEPS=looking_glass
 TEST_DEPS=eunit_formatters tls_gen
 
-dep_looking_glass = git https://github.com/rabbitmq/looking-glass.git master
-# PLT_APPS += eunit syntax_tools erts kernel stdlib common_test inets ssh ssl meck looking_glass gen_batch_server inet_tcp_proxy
-
-DIALYZER_OPTS += --src -r test -Wunmatched_returns -Werror_handling
-PLT_APPS += seshat ssl eunit common_test
+DIALYZER_OPTS += -Wunmatched_returns -Werror_handling
+PLT_APPS += compiler tools runtime_tools mnesia public_key asn1 ssl inets
 EUNIT_OPTS = no_tty, {report, {eunit_progress, [colored, profile]}}
 include $(if $(ERLANG_MK_FILENAME),$(ERLANG_MK_FILENAME),erlang.mk)
 

@@ -57,7 +57,6 @@ plt(
     name = "deps_plt",
     apps = DEFAULT_PLT_APPS + [
         "compiler",
-        "crypto",
         "tools",
         "runtime_tools",
         "mnesia",
