@@ -32,20 +32,20 @@ RUNTIME_DEPS = [
 ]
 
 erlang_app(
+    app_description = DESCRIPTION,
     app_env = APP_ENV,
     app_name = NAME,
     app_version = VERSION,
-    app_description = DESCRIPTION,
     extra_apps = EXTRA_APPS,
     runtime_deps = RUNTIME_DEPS,
     deps = DEPS,
 )
 
 test_erlang_app(
+    app_description = DESCRIPTION,
     app_env = APP_ENV,
     app_name = NAME,
     app_version = VERSION,
-    app_description = DESCRIPTION,
     extra_apps = EXTRA_APPS,
     runtime_deps = RUNTIME_DEPS,
     deps = DEPS,
@@ -53,41 +53,75 @@ test_erlang_app(
 
 xref()
 
+PLT_APPS = DEFAULT_PLT_APPS + [
+    "compiler",
+    "crypto",
+    "tools",
+    "runtime_tools",
+    "mnesia",
+    "public_key",
+    "asn1",
+    "ssl",
+    "inets",
+]
+
 plt(
     name = "deps_plt",
-    apps = DEFAULT_PLT_APPS + [
-        "compiler",
-        "crypto",
-        "tools",
-        "runtime_tools",
-        "mnesia",
-        "public_key",
-        "asn1",
-        "ssl",
-        "inets",
-    ],
+    apps = PLT_APPS,
     for_target = ":erlang_app",
 )
 
 dialyze(
+    name = "dialyze",
     size = "small",
     dialyzer_opts = [
         "-Werror_handling",
         "-Wunmatched_returns",
     ],
     plt = ":deps_plt",
+    target = ":erlang_app",
+)
+
+plt(
+    name = "test_deps_plt",
+    apps = PLT_APPS + [
+        "eunit",
+        "common_test",
+        "debugger",
+        "xmerl",
+        "ftp",
+        "ssh",
+        "snmp",
+        "wx",
+        "syntax_tools",
+    ],
+    for_target = ":test_erlang_app",
+)
+
+dialyze(
+    name = "dialyze_tests",
+    size = "small",
+    beam = [
+        f.replace("test/", "").replace(".erl", "_beam_files")
+        for f in glob(["test/*_SUITE.erl"])
+    ],
+    dialyzer_opts = [
+        "-Werror_handling",
+        "-Wunmatched_returns",
+    ],
+    plt = ":test_deps_plt",
 )
 
 eunit(
     name = "eunit",
-    deps = [
-        "@eunit_formatters//:erlang_app",
-    ],
     eunit_opts = [
         "no_tty",
         "{report, {eunit_progress, [colored, profile]}}",
     ],
     target = ":test_erlang_app",
+    deps = [
+        "@eunit_formatters//:erlang_app",
+    ],
 )
 
 [ct_suite(
