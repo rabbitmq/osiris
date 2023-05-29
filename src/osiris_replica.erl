@@ -578,7 +578,11 @@ terminate(Reason, #?MODULE{cfg = #cfg{name = Name,
     ?DEBUG_(Name, "terminating with ~w ", [Reason]),
     _ = ets:delete(osiris_reader_context_cache, self()),
     ok = osiris_log:close(Log),
-    ok = gen_tcp:close(Sock),
+    case Sock of
+        undefined -> ok;
+        _ ->
+            ok = gen_tcp:close(Sock)
+    end,
     ok.
 
 %%--------------------------------------------------------------------
