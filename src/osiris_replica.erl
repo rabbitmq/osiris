@@ -625,13 +625,14 @@ parse_chunk(<<?MAGIC:4/unsigned,
               _Crc:32/integer,
               Size:32/unsigned,
               TSize:32/unsigned,
-              _Reserved:32,
+              FSize:8/unsigned,
+              _Reserved:24,
+              _Filter:FSize/binary,
               _Data:Size/binary,
               _TData:TSize/binary,
-              Rem/binary>> =
-                All,
+              Rem/binary>> = All,
             undefined, Acc) ->
-    TotalSize = Size + TSize + ?HEADER_SIZE_B,
+    TotalSize = ?HEADER_SIZE_B + FSize + Size + TSize,
     <<Chunk:TotalSize/binary, _/binary>> = All,
     parse_chunk(Rem, undefined, [{{FirstOffset, Timestamp}, Chunk} | Acc]);
 parse_chunk(Bin, undefined, Acc)
@@ -648,11 +649,11 @@ parse_chunk(<<?MAGIC:4/unsigned,
               _Crc:32/integer,
               Size:32/unsigned,
               TSize:32/unsigned,
-              _Reserved:32,
-              Partial/binary>> =
-                All,
+              FSize:8/unsigned,
+              _Reserved:24,
+              Partial/binary>> = All,
             undefined, Acc) ->
-    {{{FirstOffset, Timestamp}, [All], Size + TSize - byte_size(Partial)},
+    {{{FirstOffset, Timestamp}, [All], FSize + Size + TSize - byte_size(Partial)},
      lists:reverse(Acc)};
 parse_chunk(Bin, PartialHeaderBin, Acc)
     when is_binary(PartialHeaderBin) ->

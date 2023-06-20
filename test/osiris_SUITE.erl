@@ -34,6 +34,7 @@ all_tests() ->
      single_node_uncorrelated_write,
      cluster_write_replication_plain,
      cluster_write_replication_tls,
+     cluster_write_replication_plain_with_filter,
      start_many_clusters,
      quorum_write,
      cluster_batch_write,
@@ -240,12 +241,15 @@ start_many_clusters(Config) ->
     ok.
 
 cluster_write_replication_plain(Config) ->
-    cluster_write(Config).
+    cluster_write(Config, undefined).
 
 cluster_write_replication_tls(Config) ->
-    cluster_write(Config).
+    cluster_write(Config, undefined).
 
-cluster_write(Config) ->
+cluster_write_replication_plain_with_filter(Config) ->
+    cluster_write(Config, <<"banana">>).
+
+cluster_write(Config, Filter) ->
     ok = logger:set_primary_config(level, all),
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
@@ -258,10 +262,16 @@ cluster_write(Config) ->
           epoch => 1,
           leader_node => LeaderNode,
           replica_nodes => Replicas},
-    {ok, #{leader_pid := Leader,
-           replica_pids := ReplicaPids}} = osiris:start_cluster(Conf0),
-    ok = osiris:write(Leader, WriterId, 42, <<"mah-data">>),
-    ok = osiris:write(Leader, WriterId, 43, <<"mah-data2">>),
+    {ok, #{leader_pid := Leader, replica_pids := ReplicaPids}} = osiris:start_cluster(Conf0),
+    {Data1, Data2} = case Filter of
+                         undefined ->
+                             {<<"mah-data">>, <<"mah-data2">>};
+                         _ ->
+                             {{Filter, <<"mah-data">>}, {Filter, <<"mah-data2">>}}
+                     end,
+
+    ok = osiris:write(Leader, WriterId, 42, Data1),
+    ok = osiris:write(Leader, WriterId, 43, Data2),
     receive
         {osiris_written, _, undefined, [42, 43]} ->
             ok;
@@ -280,7 +290,8 @@ cluster_write(Config) ->
     %% give time for all members to receive data
     timer:sleep(500),
     [begin
-         ok = validate_log(P, [{0, <<"mah-data">>}, {1, <<"mah-data2">>}])
+         ok = validate_log_offset_reader(P, [{0, <<"mah-data">>}, {1, <<"mah-data2">>}],
+                                         Filter)
      end || P <- [Leader | ReplicaPids]],
     [stop_peer(Ref) || {Ref, _} <- PeerStates],
     ok.
@@ -971,6 +982,7 @@ restart_replica(Config) ->
     {ok, _Replica1b} = osiris_replica:start(node(R1Pid), Conf),
     _ = [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>]) || N <- Msgs],
     wait_for_written(Msgs),
+    timer:sleep(1000),
     ok.
 
 
@@ -1984,24 +1996,6 @@ search_paths() ->
     lists:filter(fun(P) -> string:prefix(P, Ld) =:= nomatch end,
                  code:get_path()).
 
-% start_profile(Config, Modules) ->
-%     Dir = ?config(priv_dir, Config),
-%     Case = ?config(test_case, Config),
-%     GzFile = filename:join([Dir, "lg_" ++ atom_to_list(Case) ++ ".gz"]),
-%     ct:pal("Profiling to ~p~n", [GzFile]),
-
-%     lg:trace(Modules, lg_file_tracer,
-%              GzFile, #{running => false, mode => profile}).
-
-% stop_profile(Config) ->
-%     Case = ?config(test_case, Config),
-%     ct:pal("Stopping profiling for ~p~n", [Case]),
-%     lg:stop(),
-%     Dir = ?config(priv_dir, Config),
-%     Name = filename:join([Dir, "lg_" ++ atom_to_list(Case)]),
-%     lg_callgrind:profile_many(Name ++ ".gz.*", Name ++ ".out",#{}),
-%     ok.
-
 validate_log(Leader, Exp) when is_pid(Leader) ->
     case node(Leader) == node() of
         true ->
@@ -2017,28 +2011,39 @@ validate_log(Log, []) ->
 validate_log(Log0, Expected) ->
     case osiris_log:read_chunk_parsed(Log0) of
         {end_of_stream, _} ->
-            ct:fail("validate log failed, rem: ~p", [Expected]);
+            ct:fail("validate log failed on node ~s, rem: ~p log ~p", [node(), Expected, Log0]);
         {Entries, Log} ->
+            ct:pal("got entries ~p", [Entries]),
             validate_log(Log, Expected -- Entries)
     end.
 
 validate_log_offset_reader(Leader, Exp) when is_pid(Leader) ->
+    validate_log_offset_reader(Leader, Exp, undefined).
+
+validate_log_offset_reader(Leader, Exp, Filter) when is_pid(Leader) ->
     case node(Leader) == node() of
         true ->
-            {ok, Log0} = osiris:init_reader(Leader, first, {'test', []}),
-            validate_log_offset_reader(Log0, Exp);
+            Options = case Filter of
+                          undefined ->
+                              #{};
+                          _ ->
+                              #{filter_spec => #{filters => [Filter]}}
+                      end,
+            {ok, Log0} = osiris:init_reader(Leader, first, {'test', []}, Options),
+            validate_log_offset_reader0(Log0, Exp);
         false ->
             ok = erpc:call(node(Leader), ?MODULE, ?FUNCTION_NAME, [Leader, Exp])
-    end;
-validate_log_offset_reader(Log, []) ->
+    end.
+
+validate_log_offset_reader0(Log, []) ->
     ok = osiris_log:close(Log),
     ok;
-validate_log_offset_reader(Log0, Expected) ->
+validate_log_offset_reader0(Log0, Expected) ->
     case osiris_log:read_chunk_parsed(Log0) of
         {end_of_stream, _} ->
             ct:fail("validate log failed, rem: ~p", [Expected]);
         {Entries, Log} ->
-            validate_log_offset_reader(Log, Expected -- Entries)
+            validate_log_offset_reader0(Log, Expected -- Entries)
     end.
 
 print_counters() ->

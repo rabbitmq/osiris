@@ -335,15 +335,24 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-do_sendfile(#state{socket = Sock, log = Log0} = State0) ->
+do_sendfile(#state{socket = Sock,
+                   transport = Transport} = State) ->
+    ok = setopts(Transport, Sock, [{nopush, true}]),
+    do_sendfile0(State).
+
+do_sendfile0(#state{socket = Sock,
+                    transport = Transport,
+                    log = Log0} = State0) ->
     State = maybe_send_committed_offset(State0),
     case osiris_log:send_file(Sock, Log0) of
         {ok, Log} ->
-            do_sendfile(State#state{log = Log});
+            do_sendfile0(State#state{log = Log});
         {error, _Err} ->
+            ok = setopts(Transport, Sock, [{nopush, false}]),
             ?DEBUG("osiris_replica_reader: sendfile err ~w", [_Err]),
             State;
         {end_of_stream, Log} ->
+            ok = setopts(Transport, Sock, [{nopush, false}]),
             State#state{log = Log}
     end.
 
@@ -383,3 +392,9 @@ connect_options() ->
      {nodelay, true},
      {sndbuf, SndBuf},
      {keepalive, KeepAlive}].
+
+setopts(tcp, Sock, Opts) ->
+    ok = inet:setopts(Sock, Opts);
+setopts(ssl, Sock, Opts) ->
+    ok = ssl:setopts(Sock, Opts).
+
