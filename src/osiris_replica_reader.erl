@@ -162,32 +162,37 @@ init(#{hosts := Hosts,
             CntSpec = {CntId, ?COUNTER_FIELDS},
             Config = #{counter_spec => CntSpec, transport => Transport},
             %% TODO: handle errors
-            try
-                {ok, Log} =
-                    osiris_writer:init_data_reader(LeaderPid, TailInfo, Config),
-                CntRef = osiris_log:counters_ref(Log),
-                ?INFO("~ts: starting osiris replica reader at offset ~b",
-                      [Name, osiris_log:next_offset(Log)]),
+            Ret = osiris_writer:init_data_reader(LeaderPid, TailInfo, Config),
+            case Ret of
+                {ok, Log} ->
+                    CntRef = osiris_log:counters_ref(Log),
+                    ?INFO("~ts: starting osiris replica reader at offset ~b",
+                          [Name, osiris_log:next_offset(Log)]),
 
-                ok = send(Transport, Sock, Token),
-                %% register data listener with osiris_proc
-                ok = osiris_writer:register_data_listener(LeaderPid, StartOffset),
-                MRef = monitor(process, LeaderPid),
-                State =
-                    maybe_send_committed_offset(#state{log = Log,
-                                                       name = Name,
-                                                       transport = Transport,
-                                                       socket = Sock,
-                                                       replica_pid = ReplicaPid,
-                                                       leader_pid = LeaderPid,
-                                                       leader_monitor_ref = MRef,
-                                                       counter = CntRef,
-                                                       counter_id = CntId}),
-                {ok, State}
-            catch
-                exit:{noproc, _} ->
+                    ok = send(Transport, Sock, Token),
+                    %% register data listener with osiris_proc
+                    ok = osiris_writer:register_data_listener(LeaderPid, StartOffset),
+                    MRef = monitor(process, LeaderPid),
+                    State =
+                        maybe_send_committed_offset(#state{log = Log,
+                                                           name = Name,
+                                                           transport = Transport,
+                                                           socket = Sock,
+                                                           replica_pid = ReplicaPid,
+                                                           leader_pid = LeaderPid,
+                                                           leader_monitor_ref = MRef,
+                                                           counter = CntRef,
+                                                           counter_id = CntId}),
+                    {ok, State};
+                {error, no_process} ->
                     ?WARN("osiris writer for ~p is down, replica reader will not start", [ExtRef]),
-                    {stop, writer_unavailable}
+                    {stop, writer_unavailable};
+                {error, {offset_out_of_range, Range} = Reason} ->
+                    ?WARN("data reader found an offset out of range: ~p, replica reader will not start", [Range]),
+                    {stop, Reason};
+                {error, {invalid_last_offset_epoch, Epoch, Offset} = Reason} ->
+                    ?WARN("data reader found an invalid last offset epoch: epoch ~p offset ~p, replica reader will not start", [Epoch, Offset]),
+                    {stop, Reason}
             end;
         {error, Reason} ->
             ?WARN("could not connect osiris to replica at ~p", [Hosts]),
