@@ -243,43 +243,47 @@ handle_continue(#{name := Name0,
                                   start_offset => TailInfo,
                                   reference => ExtRef,
                                   connection_token => Token},
-            RRPid = osiris_replica_reader:start(Node, ReplicaReaderConf),
-            true = link(RRPid),
-            GcInterval0 = application:get_env(osiris,
-                                              replica_forced_gc_default_interval,
-                                              4999),
+            case osiris_replica_reader:start(Node, ReplicaReaderConf) of
+                {ok, RRPid} ->
+                    true = link(RRPid),
+                    GcInterval0 = application:get_env(osiris,
+                                                      replica_forced_gc_default_interval,
+                                                      4999),
 
-            GcInterval1 = case is_integer(GcInterval0) of
-                              true ->
-                                  _ = erlang:send_after(GcInterval0, self(), force_gc),
-                                  GcInterval0;
-                              false ->
-                                  infinity
-                          end,
-            counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
-            counters:put(CntRef, ?C_EPOCH, Epoch),
-            Shared = osiris_log:get_shared(Log),
-            osiris_util:cache_reader_context(self(), Dir, Name, Shared, ExtRef,
-                                             fun(Inc) ->
-                                                     counters:add(CntRef, ?C_READERS, Inc)
-                                             end),
-            EvtFmt = maps:get(event_formatter, Config, undefined),
-            {noreply,
-             #?MODULE{cfg =
-                      #cfg{name = Name,
-                           leader_pid = LeaderPid,
-                           acceptor_pid = Acceptor,
-                           replica_reader_pid = RRPid,
-                           directory = Dir,
-                           port = Port,
-                           gc_interval = GcInterval1,
-                           reference = ExtRef,
-                           event_formatter = EvtFmt,
-                           counter = CntRef,
-                           token = Token,
-                           transport = Transport},
-                      log = Log,
-                      parse_state = undefined}}
+                    GcInterval1 = case is_integer(GcInterval0) of
+                                      true ->
+                                          _ = erlang:send_after(GcInterval0, self(), force_gc),
+                                          GcInterval0;
+                                      false ->
+                                          infinity
+                                  end,
+                    counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
+                    counters:put(CntRef, ?C_EPOCH, Epoch),
+                    Shared = osiris_log:get_shared(Log),
+                    osiris_util:cache_reader_context(self(), Dir, Name, Shared, ExtRef,
+                                                     fun(Inc) ->
+                                                             counters:add(CntRef, ?C_READERS, Inc)
+                                                     end),
+                    EvtFmt = maps:get(event_formatter, Config, undefined),
+                    {noreply,
+                     #?MODULE{cfg =
+                                  #cfg{name = Name,
+                                       leader_pid = LeaderPid,
+                                       acceptor_pid = Acceptor,
+                                       replica_reader_pid = RRPid,
+                                       directory = Dir,
+                                       port = Port,
+                                       gc_interval = GcInterval1,
+                                       reference = ExtRef,
+                                       event_formatter = EvtFmt,
+                                       counter = CntRef,
+                                       token = Token,
+                                       transport = Transport},
+                              log = Log,
+                              parse_state = undefined}};
+                {error, Reason} ->
+                    {stop, Reason, undefined}
+            end
     end.
 
 combine_ips_hosts(tcp, IPs, HostName, HostNameFromHost) when
