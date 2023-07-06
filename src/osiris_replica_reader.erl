@@ -49,44 +49,6 @@
         ]
        ).
 
--spec maybe_connect(osiris_log:transport(), list(), integer(), list()) ->
-                       {ok, term(), term()} | {error, term()}.
-maybe_connect(_, [], _Port, _Options) ->
-    {error, connection_refused};
-maybe_connect(tcp, [H | T], Port, Options) ->
-    ?DEBUG("trying to connect to ~p", [H]),
-    case gen_tcp:connect(H, Port, Options) of
-        {ok, Sock} ->
-            {ok, Sock, H};
-        {error, _} ->
-            ?DEBUG("osiris replica connection refused, host:~p - port: ~p", [H, Port]),
-            maybe_connect(tcp, T, Port, Options)
-    end;
-maybe_connect(ssl, [H | T], Port, Options) ->
-    ?DEBUG("trying to establish TLS connection to ~p", [H]),
-    Opts = Options ++
-        application:get_env(osiris, replication_client_ssl_options, []) ++
-        maybe_add_sni_option(H),
-    case ssl:connect(H, Port, Opts) of
-        {ok, Sock} ->
-            {ok, Sock, H};
-        {error, {tls_alert, {handshake_failure, _}}} ->
-            ?DEBUG("osiris replica TLS connection refused (handshake failure), host:~p - port: ~p",
-                  [H, Port]),
-            maybe_connect(ssl, T, Port, Options);
-        {error, E} ->
-            ?DEBUG("osiris replica TLS connection refused, host:~p - port: ~p", [H, Port]),
-            ?DEBUG("error while trying to establish TLS connection ~p", [E]),
-            maybe_connect(ssl, T, Port, Options)
-    end.
-
-maybe_add_sni_option(H) when is_binary(H) ->
-    [{server_name_indication, binary_to_list(H)}];
-maybe_add_sni_option(H) when is_list(H) ->
-    [{server_name_indication, H}];
-maybe_add_sni_option(_) ->
-    [].
-
 %%%===================================================================
 %%% API functions
 %%%===================================================================
@@ -154,22 +116,23 @@ init(#{hosts := Hosts,
 
     ?DEBUG("~ts: trying to connect to replica at ~p", [Name, Hosts]),
 
-    case maybe_connect(Transport, Hosts, Port, connect_options())
+    case maybe_connect(Name, Transport, Hosts, Port, connect_options())
     of
         {ok, Sock, Host} ->
-            ?DEBUG("~ts: successfully connected to host ~p", [Name, Host]),
+            ?DEBUG_(Name, "successfully connected to host ~p port ~b",
+                    [Host, Port]),
             CntId = {?MODULE, ExtRef, Host, Port},
             CntSpec = {CntId, ?COUNTER_FIELDS},
             Config = #{counter_spec => CntSpec, transport => Transport},
-            %% TODO: handle errors
+            %% send token to replica to complete connection setup
+            ok = send(Transport, Sock, Token),
             Ret = osiris_writer:init_data_reader(LeaderPid, TailInfo, Config),
             case Ret of
                 {ok, Log} ->
                     CntRef = osiris_log:counters_ref(Log),
-                    ?INFO("~ts: starting osiris replica reader at offset ~b",
-                          [Name, osiris_log:next_offset(Log)]),
+                    ?INFO_(Name, "starting osiris replica reader at offset ~b",
+                          [osiris_log:next_offset(Log)]),
 
-                    ok = send(Transport, Sock, Token),
                     %% register data listener with osiris_proc
                     ok = osiris_writer:register_data_listener(LeaderPid, StartOffset),
                     MRef = monitor(process, LeaderPid),
@@ -185,17 +148,24 @@ init(#{hosts := Hosts,
                                                            counter_id = CntId}),
                     {ok, State};
                 {error, no_process} ->
-                    ?WARN("osiris writer for ~p is down, replica reader will not start", [ExtRef]),
+                    ?WARN_(Name,
+                           "osiris writer for ~p is down, replica reader will not start",
+                          [ExtRef]),
                     {stop, writer_unavailable};
                 {error, {offset_out_of_range, Range} = Reason} ->
-                    ?WARN("data reader found an offset out of range: ~p, replica reader will not start", [Range]),
+                    ?WARN_(Name,
+                           "data reader found an offset out of range: ~p, replica reader will not start",
+                          [Range]),
                     {stop, Reason};
                 {error, {invalid_last_offset_epoch, Epoch, Offset} = Reason} ->
-                    ?WARN("data reader found an invalid last offset epoch: epoch ~p offset ~p, replica reader will not start", [Epoch, Offset]),
+                    ?WARN_(Name,
+                           "data reader found an invalid last offset epoch: epoch ~p offset ~p, replica reader will not start",
+                           [Epoch, Offset]),
                     {stop, Reason}
             end;
         {error, Reason} ->
-            ?WARN("could not connect osiris to replica at ~p", [Hosts]),
+            ?WARN_(Name, "could not connect osiris to replica at ~p Reason:",
+                   [Hosts, Reason]),
             {stop, Reason}
     end.
 
@@ -272,42 +242,37 @@ handle_info({'DOWN', Ref, _, _, Info},
                    leader_monitor_ref = Ref} =
                 State) ->
     %% leader is down, exit
-    ?ERROR("osiris_replica_reader: '~ts' detected leader down "
-           "with ~W - exiting...",
-           [Name, Info, 10]),
+    ?ERROR_(Name, "detected leader down with ~W - exiting...",
+           [Info, 10]),
     %% this should be enough to make the replica shut down
     ok = close(Transport, Sock),
     {stop, Info, State};
 handle_info({tcp_closed, Socket},
             #state{name = Name, socket = Socket} = State) ->
-    ?DEBUG("osiris_replica_reader: '~ts' Socket closed. Exiting...",
-           [Name]),
+    ?DEBUG_(Name, "Socket closed. Exiting...", []),
     {stop, normal, State};
 handle_info({ssl_closed, Socket},
             #state{name = Name, socket = Socket} = State) ->
-    ?DEBUG("osiris_replica_reader: '~ts' TLS socket closed. Exiting...",
-           [Name]),
+    ?DEBUG_(Name, "TLS socket closed. Exiting...", []),
     {stop, normal, State};
 handle_info({tcp_error, Socket, Error},
             #state{name = Name, socket = Socket} = State) ->
-    ?DEBUG("osiris_replica_reader: '~ts' Socket error ~p. "
-           "Exiting...",
-           [Name, Error]),
+    ?DEBUG_(Name, "Socket error ~p. "
+           "Exiting...", [Error]),
     {stop, {tcp_error, Error}, State};
 handle_info({ssl_error, Socket, Error},
             #state{name = Name, socket = Socket} = State) ->
-    ?DEBUG("osiris_replica_reader: '~ts' TLS socket error ~p. "
-           "Exiting...",
-           [Name, Error]),
+    ?DEBUG_(Name, "TLS socket error ~p. "
+           "Exiting...", [Error]),
     {stop, {ssl_error, Error}, State};
-handle_info({'EXIT', Ref, Info}, State) ->
-    ?DEBUG("osiris_replica_reader:handle_info/2: EXIT received "
+handle_info({'EXIT', Ref, Info}, #state{name = Name} = State) ->
+    ?DEBUG_(Name, "EXIT received "
            "~w, Info: ~w",
            [Ref, Info]),
     {stop, normal, State};
 handle_info(Info, #state{name = Name} = State) ->
-    ?DEBUG("osiris_replica_reader: '~ts' unhandled message ~W",
-           [Name, Info, 10]),
+    ?DEBUG_(Name, "'~ts' unhandled message ~W",
+           [Info, 10]),
     {noreply, State}.
 
 %%--------------------------------------------------------------------
@@ -345,7 +310,8 @@ do_sendfile(#state{socket = Sock,
     ok = setopts(Transport, Sock, [{nopush, true}]),
     do_sendfile0(State).
 
-do_sendfile0(#state{socket = Sock,
+do_sendfile0(#state{name = Name,
+                    socket = Sock,
                     transport = Transport,
                     log = Log0} = State0) ->
     State = maybe_send_committed_offset(State0),
@@ -354,7 +320,7 @@ do_sendfile0(#state{socket = Sock,
             do_sendfile0(State#state{log = Log});
         {error, _Err} ->
             ok = setopts(Transport, Sock, [{nopush, false}]),
-            ?DEBUG("osiris_replica_reader: sendfile err ~w", [_Err]),
+            ?DEBUG_(Name, "sendfile err ~w", [_Err]),
             State;
         {end_of_stream, Log} ->
             ok = setopts(Transport, Sock, [{nopush, false}]),
@@ -402,4 +368,41 @@ setopts(tcp, Sock, Opts) ->
     ok = inet:setopts(Sock, Opts);
 setopts(ssl, Sock, Opts) ->
     ok = ssl:setopts(Sock, Opts).
+
+maybe_connect(_Name, _, [], _Port, _Options) ->
+    {error, connection_refused};
+maybe_connect(Name, tcp, [H | T], Port, Options) ->
+    ?DEBUG_(Name, "trying to connect to ~p on port ~b", [H, Port]),
+    case gen_tcp:connect(H, Port, Options) of
+        {ok, Sock} ->
+            {ok, Sock, H};
+        {error, Reason} ->
+            ?DEBUG_(Name, "connection refused, reason: ~w host:~p - port: ~p",
+                    [Reason, H, Port]),
+            maybe_connect(Name, tcp, T, Port, Options)
+    end;
+maybe_connect(Name, ssl, [H | T], Port, Options) ->
+    ?DEBUG_(Name, "trying to establish TLS connection to ~p using port ~b", [H, Port]),
+    Opts = Options ++
+        application:get_env(osiris, replication_client_ssl_options, []) ++
+        maybe_add_sni_option(H),
+    case ssl:connect(H, Port, Opts) of
+        {ok, Sock} ->
+            {ok, Sock, H};
+        {error, {tls_alert, {handshake_failure, _}}} ->
+            ?DEBUG_(Name, "TLS connection refused (handshake failure), host:~p - port: ~p",
+                    [H, Port]),
+            maybe_connect(Name, ssl, T, Port, Options);
+        {error, E} ->
+            ?DEBUG_(Name, "TLS connection refused, host:~p - port: ~p", [H, Port]),
+            ?DEBUG_(Name, "error while trying to establish TLS connection ~p", [E]),
+            maybe_connect(Name, ssl, T, Port, Options)
+    end.
+
+maybe_add_sni_option(H) when is_binary(H) ->
+    [{server_name_indication, binary_to_list(H)}];
+maybe_add_sni_option(H) when is_list(H) ->
+    [{server_name_indication, H}];
+maybe_add_sni_option(_) ->
+    [].
 

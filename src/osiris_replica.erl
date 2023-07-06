@@ -11,21 +11,6 @@
 
 -include("osiris.hrl").
 
--define(INFO_(Name, Str, Args),
-             ?INFO("~ts [~s:~s/~b] " Str,
-                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
-
--define(WARN_(Name, Str, Args),
-             ?WARN("~ts [~s:~s/~b] " Str,
-                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
-
--define(ERROR_(Name, Str, Args),
-             ?ERROR("~ts [~s:~s/~b] " Str,
-                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
-
--define(DEBUG_(Name, Str, Args),
-             ?DEBUG("~ts [~s:~s/~b] " Str,
-                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
 %% osiris replica, starts TCP listener ("server side" of the link),
 %% spawns remote reader, TCP listener replicates and
 %% confirms latest offset back to primary
@@ -227,11 +212,10 @@ handle_continue(#{name := Name0,
                                          HostNameFromHost),
 
             Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
-            ?DEBUG_(Name, "replica resolved host endpoints: ~w",
-                    [IpsHosts]),
-            ?DEBUG_(Name, "replica using '~s' transport for replication",
-                    [Transport]),
+            ?DEBUG_(Name, "replica resolved host endpoints: ~0p", [IpsHosts]),
             {Port, LSock} = open_listener(Transport, {Min, Max}, 0),
+            ?DEBUG_(Name, "replica listening on port '~b' using transport ~s",
+                    [Port, Transport]),
             Acceptor = spawn_link(fun() -> accept(Name, Transport, LSock, Self) end),
 
             ReplicaReaderConf = #{hosts => IpsHosts,
@@ -309,14 +293,24 @@ open_listener(Transport, {Min, Max} = Range, Attempts) ->
             throw({stop, E})
     end.
 
-accept(_Name, tcp, LSock, Process) ->
-    {ok, Sock} = gen_tcp:accept(LSock),
-    _ = gen_tcp:close(LSock),
-    ok = gen_tcp:controlling_process(Sock, Process),
-    Process ! {socket, Sock},
-    ok;
+accept(Name, tcp, LSock, Process) ->
+    case gen_tcp:accept(LSock) of
+        {ok, Sock} ->
+            try gen_tcp:close(LSock) of
+                ok -> ok
+            catch _:Err ->
+                      ?DEBUG_(Name, "gen_tcp:close/1 failed with ~p", [Err])
+            end,
+            ok = gen_tcp:controlling_process(Sock, Process),
+            Process ! {socket, Sock},
+            ok;
+        {error, Err} ->
+            ?DEBUG_(Name, "gen_tcp:accept/1 failed with ~p", [Err]),
+            gen_tcp:close(LSock),
+            ok
+    end;
 accept(Name, ssl, LSock, Process) ->
-    ?DEBUG_(Name, "Starting socket listener for replication over TLS", []),
+    ?DEBUG_(Name, "Starting socket acceptor for replication over TLS", []),
     {ok, Sock0} = ssl:transport_accept(LSock),
     case ssl:handshake(Sock0,
                        application:get_env(osiris,
@@ -458,7 +452,8 @@ handle_info({socket, Socket}, #?MODULE{cfg = #cfg{name = Name,
             ok = setopts(Transport, Socket, [{active, 5}]),
             {noreply, State#?MODULE{cfg = Cfg#cfg{socket = Socket}}};
         {ok, Other} ->
-            ?WARN_(Name, "invalid token received ~w", [Other]),
+            ?WARN_(Name, "invalid token received ~w expected ~w",
+                   [Other, Token]),
             {stop, invalid_token, State};
         {error, Reason} ->
             ?WARN_(Name, "error awaiting token ~w", [Reason])
