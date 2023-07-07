@@ -55,3 +55,19 @@
 -define(SUP, osiris_server_sup).
 
 -define(DEFAULT_FILTER_SIZE, 16).
+
+-define(INFO_(Name, Str, Args),
+             ?INFO("~ts [~s:~s/~b] " Str,
+                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
+
+-define(WARN_(Name, Str, Args),
+             ?WARN("~ts [~s:~s/~b] " Str,
+                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
+
+-define(ERROR_(Name, Str, Args),
+             ?ERROR("~ts [~s:~s/~b] " Str,
+                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
+
+-define(DEBUG_(Name, Str, Args),
+             ?DEBUG("~ts [~s:~s/~b] " Str,
+                  [Name, ?MODULE, ?FUNCTION_NAME, ?FUNCTION_ARITY | Args])).
