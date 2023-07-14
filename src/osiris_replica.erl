@@ -595,6 +595,10 @@ terminate(Reason, #?MODULE{cfg = #cfg{name = Name,
 code_change(_OldVsn, State, _Extra) ->
     {ok, State}.
 
+format_status(undefined) ->
+    %% Handle formatting the status when the server shut down before start-up,
+    %% for example when the rpc call in `handle_continue/2' fails.
+    undefined;
 format_status(#{state := #?MODULE{cfg = #cfg{name = Name,
                                              reference = ExtRef},
                                   log = Log,
