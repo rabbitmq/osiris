@@ -8,7 +8,7 @@ NAME = "osiris"
 
 VERSION = "1.6.3"
 
-DESCRIPTION = "New project"
+DESCRIPTION = "Foundation of the log-based streaming subsystem for RabbitMQ"
 
 APP_ENV = """[
 	{data_dir, "/tmp/osiris"},
