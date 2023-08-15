@@ -6,7 +6,7 @@ load("@rules_erlang//:ct.bzl", "assert_suites2", "ct_suite")
 
 NAME = "osiris"
 
-VERSION = "1.6.3"
+VERSION = module_version()
 
 DESCRIPTION = "Foundation of the log-based streaming subsystem for RabbitMQ"
 

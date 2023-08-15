@@ -1,11 +1,11 @@
 module(
-    name = "osiris",
+    name = "com_github_rabbitmq_osiris",
     version = "1.6.3",
 )
 
 bazel_dep(
     name = "rules_erlang",
-    version = "3.10.5",
+    version = "3.11.4",
 )
 
 erlang_config = use_extension(
@@ -69,7 +69,7 @@ erlang_dev_package = use_extension(
 erlang_package.hex_package(
     name = "eunit_formatters",
     version = "0.5.0",
-    build_file = "@osiris//bzl:BUILD.eunit_formatters",
+    build_file = "@com_github_rabbitmq_osiris//bzl:BUILD.eunit_formatters",
 )
 
 use_repo(

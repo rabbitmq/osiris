@@ -1,4 +1,4 @@
-workspace(name = "osiris")
+workspace(name = "com_github_rabbitmq_osiris")
 
 load(
     "@bazel_tools//tools/build_defs/repo:http.bzl",
