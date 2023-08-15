@@ -28,7 +28,8 @@ jobs:
       - name: Inject the git sha as the osiris version
         working-directory: osiris
         run: |
-          sed -i"_orig" -E '/VERSION/ s/1\.[0-9]+\.[0-9]+/${{ github.event.pull_request.head.sha || github.sha }}/' BUILD.bazel
+          sed -i"_orig" -E '/VERSION/ s/module_version\(\)/"${{ github.event.pull_request.head.sha || github.sha }}"/' BUILD.bazel
+          git diff
 
       - name: Checkout RabbitMQ
         uses: actions/checkout@v3
