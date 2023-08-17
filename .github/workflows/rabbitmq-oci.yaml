@@ -6,7 +6,7 @@ on:
     inputs:
       rabbitmq_ref:
         description: The branch, tag or commit of rabbitmq-server to use
-        default: master
+        default: main
 env:
   GENERIC_UNIX_ARCHIVE: ${{ github.workspace }}/rabbitmq-server/bazel-bin/package-generic-unix.tar.xz
 jobs:
@@ -80,17 +80,14 @@ jobs:
         working-directory: rabbitmq-server
         run: |
           sed -i"_orig" -E '/APP_VERSION/ s/3\.[0-9]+\.[0-9]+/${{ steps.load-rabbitmq-info.outputs.RABBITMQ_SHA }}/' rabbitmq.bzl
-          RULES_ERLANG_VERSION=$(bazelisk query --output=build //external:rules_erlang  | sed -r -n 's/^.*tag = "(.*)".*$/\1/p')
           bazelisk build :package-generic-unix \
             --config=rbe-${{ matrix.otp_major }} \
-            --override_repository rules_erlang~$RULES_ERLANG_VERSION~erlang_package~osiris=${{ github.workspace }}/osiris
+            --override_module com_github_rabbitmq_osiris=${{ github.workspace }}/osiris
 
-          # rules_erlang version detection is not bullet-proof, so let's check that override did indeed work
+          # check that override did indeed work
           set -o pipefail
           if ! tar --list -f ./bazel-bin/package-generic-unix.tar.xz  | grep -F "plugins/osiris-${{ github.event.pull_request.head.sha || github.sha }}/ebin/osiris.app" ; then
             echo "Failed to override osiris repo"
-            echo "Inferred repo name: rules_erlang~$RULES_ERLANG_VERSION~erlang_package~osiris"
-            echo "Repo name as seen after build:"
             ls bazel-bin/external/ | grep osiris
             exit 1
           fi
