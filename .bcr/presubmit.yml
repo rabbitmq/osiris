@@ -15,7 +15,7 @@ platforms:
     build_flags:
     - --incompatible_strict_action_env
     build_targets:
-    - '@com_github_rabbitmq_osiris//:erlang_app'
+    - '@rabbitmq_osiris//:erlang_app'
   ubuntu2004:
     environment:
       ERLANG_VERSION: "25.0"
@@ -24,4 +24,4 @@ platforms:
     build_flags:
     - --incompatible_strict_action_env
     build_targets:
-    - '@com_github_rabbitmq_osiris//:erlang_app'
+    - '@rabbitmq_osiris//:erlang_app'
