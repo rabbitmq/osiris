@@ -82,7 +82,7 @@ jobs:
           sed -i"_orig" -E '/APP_VERSION/ s/3\.[0-9]+\.[0-9]+/${{ steps.load-rabbitmq-info.outputs.RABBITMQ_SHA }}/' rabbitmq.bzl
           bazelisk build :package-generic-unix \
             --config=rbe-${{ matrix.otp_major }} \
-            --override_module com_github_rabbitmq_osiris=${{ github.workspace }}/osiris
+            --override_module rabbitmq_osiris=${{ github.workspace }}/osiris
 
           # check that override did indeed work
           set -o pipefail
