@@ -47,6 +47,9 @@
          directory/1,
          delete_directory/1]).
 
+-export([dump_init/1,
+         dump_chunk/1,
+         dump_crc_check/1]).
 -ifdef(TEST).
 -export([part_test/0]).
 -endif.
@@ -2380,7 +2383,8 @@ find_segment_for_offset(Offset, IdxFiles) ->
 can_read_next_chunk_id(#?MODULE{mode = #read{type = offset,
                                              next_offset = NextOffset},
                               cfg = #cfg{shared = Ref}}) ->
-    osiris_log_shared:committed_chunk_id(Ref) >= NextOffset;
+    osiris_log_shared:last_chunk_id(Ref) >= NextOffset andalso
+        osiris_log_shared:committed_chunk_id(Ref) >= NextOffset;
 can_read_next_chunk_id(#?MODULE{mode = #read{type = data,
                                              next_offset = NextOffset},
                               cfg = #cfg{shared = Ref}}) ->
@@ -2858,6 +2862,83 @@ close_fd(undefined) ->
 close_fd(Fd) ->
     _ = file:close(Fd),
     ok.
+
+
+dump_init(File) ->
+    {ok, Fd} = file:open(File, [raw, binary, read]),
+    {ok, <<"OSIL", _V:4/binary>> } = file:read(Fd, ?LOG_HEADER_SIZE),
+    Fd.
+
+
+dump_chunk(Fd) ->
+    {ok, Pos} = file:position(Fd, cur),
+    case file:read(Fd, ?HEADER_SIZE_B + ?DEFAULT_FILTER_SIZE) of
+        {ok, <<?MAGIC:4/unsigned,
+               ?VERSION:4/unsigned,
+               ChType:8/unsigned,
+               NumEntries:16/unsigned,
+               NumRecords:32/unsigned,
+               Timestamp:64/signed,
+               Epoch:64/unsigned,
+               NextChId0:64/unsigned,
+               Crc:32/integer,
+               DataSize:32/unsigned,
+               TrailerSize:32/unsigned,
+               FilterSize:8/unsigned,
+               _Reserved:24,
+               MaybeFilter/binary>>} ->
+
+            NextPos = Pos + ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
+
+            ChunkFilter = case MaybeFilter of
+                              <<F:FilterSize/binary, _/binary>> ->
+                                  %% filter is of default size or 0
+                                  F;
+                              _ when FilterSize > 0 ->
+                                  %% the filter is larger than default
+                                  case file:pread(Fd, Pos + ?HEADER_SIZE_B,
+                                                  FilterSize) of
+                                      {ok, F} ->
+                                          F;
+                                      eof ->
+                                          eof
+                                  end;
+                              _ ->
+                                  <<>>
+                          end,
+            {ok, Data} = file:pread(Fd, Pos + FilterSize + ?HEADER_SIZE_B, DataSize),
+            CrcMatch = erlang:crc32(Data) =:= Crc,
+            _ = file:position(Fd, NextPos),
+            #{chunk_id => NextChId0,
+              epoch => Epoch,
+              type => ChType,
+              crc => Crc,
+              data => Data,
+              crc_match => CrcMatch,
+              num_records => NumRecords,
+              num_entries => NumEntries,
+              timestamp => Timestamp,
+              data_size => DataSize,
+              trailer_size => TrailerSize,
+              filter_size => FilterSize,
+              chunk_filter => ChunkFilter,
+              next_position => NextPos,
+              position => Pos};
+        eof ->
+            eof
+    end.
+
+dump_crc_check(Fd) ->
+    case dump_chunk(Fd) of
+        eof ->
+            eof;
+        #{crc_match := false} = Ch ->
+            Ch;
+        _ ->
+            dump_crc_check(Fd)
+    end.
+
+
 
 -ifdef(TEST).
 
