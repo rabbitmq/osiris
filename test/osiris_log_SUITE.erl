@@ -232,7 +232,7 @@ write_batch_with_filters_variable_size(Config) ->
                            {<<"banana">>, <<"hi">>}], S2),
     ?assertEqual(4, osiris_log:next_offset(S3)),
 
-    Shared = osiris_log:get_shared(S0),
+    Shared = osiris_log:get_shared(S3),
     Conf = Conf0#{shared => Shared},
     osiris_log_shared:set_committed_chunk_id(Shared, 2), %% second chunk index
     {ok, F0} = osiris_log:init_offset_reader(0, add_filter(<<"banana">>, Conf)),
@@ -259,7 +259,7 @@ subbatch(Config) ->
     S1 = osiris_log:write(
              lists:reverse([Batch, <<"simple">>]), S0),
     ?assertEqual(3, osiris_log:next_offset(S1)),
-    OffRef = osiris_log_shared:new(),
+    OffRef = osiris_log:get_shared(S1),
     {ok, R0} =
         osiris_log:init_offset_reader(0, Conf#{shared => OffRef}),
     {end_of_stream, R1} = osiris_log:read_chunk_parsed(R0),
@@ -283,7 +283,7 @@ subbatch_compressed(Config) ->
     S1 = osiris_log:write(
              lists:reverse([Batch, <<"simple">>]), S0),
     ?assertEqual(3, osiris_log:next_offset(S1)),
-    OffRef = osiris_log_shared:new(),
+    OffRef = osiris_log:get_shared(S1),
     {ok, R0} =
         osiris_log:init_offset_reader(0, Conf#{shared => OffRef}),
     {end_of_stream, R1} = osiris_log:read_chunk_parsed(R0),
@@ -365,12 +365,12 @@ read_chunk_parsed_2_multiple_chunks(Config) ->
 read_header(Config) ->
     Conf = ?config(osiris_conf, Config),
     W0 = osiris_log:init(Conf),
-    OffRef = osiris_log_shared:new(),
+    OffRef = osiris_log:get_shared(W0),
     {ok, R0} =
         osiris_log:init_offset_reader(first, Conf#{shared => OffRef}),
     {end_of_stream, R1} = osiris_log:read_header(R0),
     W1 = osiris_log:write([<<"hi">>, <<"ho">>], W0),
-    _W = osiris_log:write([<<"hum">>], W1),
+    W2 = osiris_log:write([<<"hum">>], W1),
     osiris_log_shared:set_committed_chunk_id(OffRef, 3),
     {ok, H1, R2} = osiris_log:read_header(R1),
     ?assertMatch(#{chunk_id := 0,
@@ -392,7 +392,12 @@ read_header(Config) ->
                    data_size := _,
                    trailer_size := 0},
                  H2),
-    {end_of_stream, _R} = osiris_log:read_header(R3),
+    {end_of_stream, R4} = osiris_log:read_header(R3),
+    _W = osiris_log:write([<<"bah">>], W2),
+    %% simulate the case where the chunk write is not yet complate but there is
+    %% data
+    osiris_log_shared:set_last_chunk_id(OffRef, 2),
+    {end_of_stream, _R} = osiris_log:read_header(R4),
     ok.
 
 write_multi_log(Config) ->
@@ -409,7 +414,7 @@ write_multi_log(Config) ->
             filename:join(?config(dir, Config), "*.segment")),
     ?assertEqual(2, length(Segments)),
 
-    OffRef = osiris_log_shared:new(),
+    OffRef = osiris_log:get_shared(S1),
     %% takes a single offset tracking data into account
     osiris_log_shared:set_committed_chunk_id(OffRef, NextOffset),
     %% ensure all records can be read
@@ -1200,7 +1205,9 @@ init_corrupted_log(Config) ->
     Conf0 = ?config(osiris_conf, Config),
     Conf = Conf0#{dir => LDir},
     _ = osiris_log:init(Conf),
-    set_shared(Conf, 2),
+    #{shared := Shared} = Conf,
+    osiris_log_shared:set_committed_chunk_id(Shared, 2),
+    osiris_log_shared:set_last_chunk_id(Shared, 2),
 
     % after osiris_log:init, the sizes of the index and segment files
     % should be as they were before they got corrrupted
