@@ -44,7 +44,7 @@ jobs:
             "patch_strip": 0,
             "patches": [],
             "presubmit_yml": "${{ github.workspace }}/${REPO_NAME}/.bcr/presubmit.yml",
-            "strip_prefix": "${NAME}-${VERSION}",
+            "strip_prefix": "${REPO_NAME}-${VERSION}",
             "test_module_build_targets": [],
             "test_module_path": null,
             "test_module_test_targets": [],
