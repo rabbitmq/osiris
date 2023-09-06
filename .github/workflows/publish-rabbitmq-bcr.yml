@@ -2,6 +2,7 @@ name: Add to rabbitmq/bazel-central-registry@erlang-packages
 on:
   release:
     types: [published]
+  workflow_dispatch:
 jobs:
   add-module:
     runs-on: ubuntu-latest
@@ -26,6 +27,9 @@ jobs:
         VERSION="${VERSION#v}"
         MAJOR="${VERSION:0:1}"
 
+        echo "VERSION: ${VERSION}"
+        echo "MAJOR: ${MAJOR}"
+
         cat << EOF > ${MODULE_NAME}.json
         {
             "build_file": "${{ github.workspace }}/${REPO_NAME}/BUILD.bazel",
@@ -48,6 +52,8 @@ jobs:
             "version": "${VERSION}"
         }
         EOF
+
+        jq '.' ${MODULE_NAME}.json
 
         bazel run //tools:add_module -- \
           --input=${MODULE_NAME}.json
