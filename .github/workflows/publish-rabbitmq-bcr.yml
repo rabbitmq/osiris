@@ -32,7 +32,7 @@ jobs:
 
         cat << EOF > ${MODULE_NAME}.json
         {
-            "build_file": "${{ github.workspace }}/${REPO_NAME}/BUILD.bazel",
+            "build_file": null,
             "build_targets": [
                 "@${MODULE_NAME}//:${MODULE_NAME}",
                 "@${MODULE_NAME}//:erlang_app"
