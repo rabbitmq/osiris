@@ -60,13 +60,13 @@ delete_child(Node, #{name := Name} = Config) ->
                         _ = stop_child(Node, OthName),
                         rpc:call(Node, osiris_log, delete_directory, [Config]);
                     {error, not_found} ->
-                        ok
+                        rpc:call(Node, osiris_log, delete_directory, [Config])
                 end
         end
     catch
         _:{noproc, _} ->
             %% Whole supervisor or app is already down - i.e. stop_app
-            ok
+            rpc:call(Node, osiris_log, delete_directory, [Config])
     end.
 
 flip_name(N) when is_binary(N) ->
