@@ -156,11 +156,14 @@ handle_continue(#{name := Name0,
     Node = node(LeaderPid),
 
     case rpc:call(Node, osiris_writer, overview, [LeaderPid]) of
+        {error, no_process} ->
+            ?INFO_(Name, "Writer process not alive, exiting...", []),
+            {stop, {shutdown, writer_unavailable}, undefined};
         {error, _} = Err ->
             {stop, Err, undefined};
         {badrpc, Reason} ->
             {stop, {badrpc, Reason}, undefined};
-        {ok, {LeaderRange, LeaderEpochOffs}}  ->
+        {ok, {LeaderRange, LeaderEpochOffs}} ->
             {ok, {Min, Max}} = application:get_env(port_range),
             Transport = application:get_env(osiris, replication_transport, tcp),
             Self = self(),
