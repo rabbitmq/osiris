@@ -502,22 +502,13 @@ handle_info({'DOWN', _Ref, process, Pid, Info},
     ?DEBUG_(Name, "DOWN received for Pid ~w, Info: ~w",
            [Pid, Info]),
     {noreply, State};
-handle_info({'EXIT', RRPid, shutdown = Info},
-            #?MODULE{cfg = #cfg{name = Name,
-                                replica_reader_pid = RRPid}} = State) ->
-    %% any replica reader exit is troublesome and requires the replica to also
-    %% terminate
-    ?INFO_(Name, "replica reader ~w exited with ~w", [RRPid, Info]),
-    %% the replica reader shut down normally, so we use the normal return code
-    %% to avoid logging the whole stack trace
-    {stop, normal, State};
 handle_info({'EXIT', RRPid, Info},
             #?MODULE{cfg = #cfg{name = Name,
                                 replica_reader_pid = RRPid}} = State) ->
     %% any replica reader exit is troublesome and requires the replica to also
     %% terminate
     ?ERROR_(Name, "replica reader ~w exited with ~w", [RRPid, Info]),
-    {stop, replica_reader_exit, State};
+    {stop, {shutdown, Info}, State};
 handle_info({'EXIT', Ref, normal},
             #?MODULE{cfg = #cfg{name = Name}} = State) ->
     %% we assume any 'normal' EXIT is fine to ignore (port etc)
