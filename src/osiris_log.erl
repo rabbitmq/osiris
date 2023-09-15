@@ -585,7 +585,7 @@ maybe_fix_corrupted_files(#{dir := Dir}) ->
     ok = maybe_fix_corrupted_files(sorted_index_files(Dir));
 maybe_fix_corrupted_files([IdxFile]) ->
     SegFile = segment_from_index_file(IdxFile),
-    ok = truncate_invalid_idx_records(IdxFile, file_size(SegFile)),
+    ok = truncate_invalid_idx_records(IdxFile, file_size_or_zero(SegFile)),
     case file_size(IdxFile) =< ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B of
         true ->
             % the only index doesn't contain a single valid record
@@ -596,7 +596,7 @@ maybe_fix_corrupted_files([IdxFile]) ->
         false ->
             ok
     end,
-    case file_size(SegFile) =< ?LOG_HEADER_SIZE + ?HEADER_SIZE_B of
+    case file_size_or_zero(SegFile) =< ?LOG_HEADER_SIZE + ?HEADER_SIZE_B of
         true ->
             % the only segment doesn't contain a single valid chunk
             % make sure it has a valid header
@@ -609,7 +609,7 @@ maybe_fix_corrupted_files([IdxFile]) ->
 maybe_fix_corrupted_files(IdxFiles) ->
     LastIdxFile = lists:last(IdxFiles),
     LastSegFile = segment_from_index_file(LastIdxFile),
-    case file_size(LastSegFile) of
+    try file_size(LastSegFile) of
         N when N =< ?HEADER_SIZE_B ->
             % if the segment doesn't contain any chunks, just delete it
             ?WARNING("deleting an empty segment file: ~p", [LastSegFile]),
@@ -618,6 +618,11 @@ maybe_fix_corrupted_files(IdxFiles) ->
             maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile]);
         LastSegFileSize ->
             ok = truncate_invalid_idx_records(LastIdxFile, LastSegFileSize)
+    catch missing_file ->
+            % if the last segment is missing, just delete its index
+            ?WARNING("deleting index of the missing last segment file: ~p", [LastSegFile]),
+            ok = prim_file:delete(LastIdxFile),
+            maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile])
     end.
 
 non_empty_index_files([]) ->
