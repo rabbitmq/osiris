@@ -2565,13 +2565,11 @@ recover_tracking(#?MODULE{cfg = #cfg{tracking_config = TrkConfig},
     %% there are prior segments we could scan at least two segments increasing
     %% the chance of encountering a snapshot and thus ensure we don't miss any
     %% tracking entries
-    {ok, 0} = file:position(Fd, 0),
-    {ok, ?LOG_HEADER_SIZE} = file:position(Fd, ?LOG_HEADER_SIZE),
     Trk = osiris_tracking:init(undefined, TrkConfig),
-    recover_tracking(Fd, Trk).
+    recover_tracking(Fd, Trk, ?LOG_HEADER_SIZE).
 
-recover_tracking(Fd, Trk0) ->
-    case file:read(Fd, ?HEADER_SIZE_B) of
+recover_tracking(Fd, Trk0, Pos0) ->
+    case file:pread(Fd, Pos0, ?HEADER_SIZE_B) of
         {ok,
          <<?MAGIC:4/unsigned,
            ?VERSION:4/unsigned,
@@ -2586,27 +2584,29 @@ recover_tracking(Fd, Trk0) ->
            TSize:32/unsigned,
            FSize:8/unsigned,
            _Reserved:24>>} ->
-            {ok, _} = file:position(Fd, {cur, FSize}),
+            Pos = Pos0 + ?HEADER_SIZE_B,
+            NextPos = Pos + Size + TSize + FSize,
             case ChType of
                 ?CHNK_TRK_DELTA ->
                     %% tracking is written a single record so we don't
                     %% have to parse
-                    {ok, <<0:1, S:31, Data:S/binary>>} = file:read(Fd, Size),
+                    {ok, <<0:1, S:31, Data:S/binary>>} =
+                        file:pread(Fd, Pos + FSize, Size),
                     Trk = osiris_tracking:append_trailer(ChunkId, Data, Trk0),
-                    {ok, _} = file:position(Fd, {cur, TSize}),
                     %% A tracking delta chunk will not have any writer data
                     %% so no need to parse writers here
-                    recover_tracking(Fd, Trk);
+                    recover_tracking(Fd, Trk, NextPos);
                 ?CHNK_TRK_SNAPSHOT ->
-                    {ok, <<0:1, S:31, Data:S/binary>>} = file:read(Fd, Size),
-                    {ok, _} = file:read(Fd, TSize),
+                    {ok, <<0:1, S:31, Data:S/binary>>} =
+                        file:pread(Fd, Pos + FSize, Size),
                     Trk = osiris_tracking:init(Data, Trk0),
-                    recover_tracking(Fd, Trk);
-                ?CHNK_USER ->
-                    {ok, _} = file:position(Fd, {cur, Size}),
-                    {ok, TData} = file:read(Fd, TSize),
+                    recover_tracking(Fd, Trk, NextPos);
+                ?CHNK_USER when TSize > 0 ->
+                    {ok, TData} = file:pread(Fd, Pos + FSize + Size, TSize),
                     Trk = osiris_tracking:append_trailer(ChunkId, TData, Trk0),
-                    recover_tracking(Fd, Trk)
+                    recover_tracking(Fd, Trk, NextPos);
+                ?CHNK_USER ->
+                    recover_tracking(Fd, Trk0, NextPos)
             end;
         eof ->
             Trk0
