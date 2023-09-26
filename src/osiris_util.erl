@@ -139,7 +139,7 @@ replication_over_tls_configuration(InitArgs, FileConsultFun, LogFun) ->
                 {error, Error} ->
                     LogFun(warn,
                            "Error while reading TLS "
-                           ++ "distributon option file ~ts: ~p",
+                           ++ "distributon option file ~ts: ~0p",
                            [OptFile, Error]),
                     LogFun(warn,
                            "Stream replication over TLS will NOT be enabled",
@@ -148,7 +148,7 @@ replication_over_tls_configuration(InitArgs, FileConsultFun, LogFun) ->
                 R ->
                     LogFun(warn,
                            "Unexpected result while reading TLS distributon "
-                           "option file ~ts: ~p",
+                           "option file ~ts: ~0p",
                            [OptFile, R]),
                     LogFun(warn,
                            "Stream replication over TLS will NOT be enabled",
@@ -274,7 +274,7 @@ get_reader_context(Pid)
   when is_pid(Pid) andalso node(Pid) == node() ->
     case ets:lookup(osiris_reader_context_cache, Pid) of
         [] ->
-            {ok, Ctx0} = gen:call(Pid, '$gen_call', get_reader_context),
+            {ok, Ctx0} = gen:call(Pid, '$gen_call', get_reader_context, infinity),
             Ctx0;
         [{_Pid, Dir, Name, Shared, Ref, ReadersCountersFun}] ->
             #{dir => Dir,

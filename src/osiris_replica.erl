@@ -155,7 +155,10 @@ handle_continue(#{name := Name0,
     process_flag(message_queue_data, off_heap),
     Node = node(LeaderPid),
 
-    case rpc:call(Node, osiris_writer, overview, [LeaderPid]) of
+    %% osiris_writer:overview/1 may need to call into the writer process and
+    %% wait for it to initialise before replying. This could take some time
+    %% so it makes no sense to have an upper bound on the timeout
+    case rpc:call(Node, osiris_writer, overview, [LeaderPid], infinity) of
         {error, no_process} ->
             ?INFO_(Name, "Writer process not alive, exiting...", []),
             {stop, {shutdown, writer_unavailable}, undefined};
@@ -306,13 +309,13 @@ accept(Name, tcp, LSock, Process) ->
             try gen_tcp:close(LSock) of
                 ok -> ok
             catch _:Err ->
-                      ?DEBUG_(Name, "gen_tcp:close/1 failed with ~p", [Err])
+                      ?DEBUG_(Name, "gen_tcp:close/1 failed with ~0p", [Err])
             end,
             ok = gen_tcp:controlling_process(Sock, Process),
             Process ! {socket, Sock},
             ok;
         {error, Err} ->
-            ?DEBUG_(Name, "gen_tcp:accept/1 failed with ~p", [Err]),
+            ?DEBUG_(Name, "gen_tcp:accept/1 failed with ~0p", [Err]),
             gen_tcp:close(LSock),
             ok
     end;
@@ -489,7 +492,7 @@ handle_info({ssl_closed, Socket},
     {stop, normal, State};
 handle_info({tcp_error, Socket, Error},
             #?MODULE{cfg = #cfg{name = Name, socket = Socket}} = State) ->
-    ?DEBUG_(Name, "osiris_replica: ~ts Socket error ~p. Exiting...",
+    ?DEBUG_(Name, "osiris_replica: ~ts Socket error ~0p. Exiting...",
            [Error]),
     {stop, {tcp_error, Error}, State};
 handle_info({ssl_error, Socket, Error},
