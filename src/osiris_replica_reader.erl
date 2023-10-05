@@ -158,8 +158,8 @@ init(#{hosts := Hosts,
                     {stop, Reason}
             end;
         {error, Reason} ->
-            ?WARN_(Name, "could not connect osiris to replica at ~0p Reason:",
-                   [Hosts, Reason]),
+            ?WARN_(Name, "could not connect replica reader to replica at ~0p port ~b, Reason: ~0p",
+                   [Hosts, Port, Reason]),
             {stop, Reason}
     end.
 
