@@ -108,12 +108,12 @@ init(#{hosts := Hosts,
        connection_token := Token}) ->
     process_flag(trap_exit, true),
 
-    ?DEBUG("~ts: trying to connect to replica at ~p", [Name, Hosts]),
+    ?DEBUG("~ts: trying to connect to replica at ~0p", [Name, Hosts]),
 
     case maybe_connect(Name, Transport, Hosts, Port, connect_options())
     of
         {ok, Sock, Host} ->
-            ?DEBUG_(Name, "successfully connected to host ~p port ~b",
+            ?DEBUG_(Name, "successfully connected to host ~0p port ~b",
                     [Host, Port]),
             CntId = {?MODULE, ExtRef, Host, Port},
             CntSpec = {CntId, ?COUNTER_FIELDS},
@@ -143,23 +143,23 @@ init(#{hosts := Hosts,
                     {ok, State};
                 {error, no_process} ->
                     ?WARN_(Name,
-                           "osiris writer for ~p is down, replica reader will not start",
+                           "osiris writer for ~0p is down, replica reader will not start",
                           [ExtRef]),
                     {stop, writer_unavailable};
                 {error, {offset_out_of_range, Range} = Reason} ->
                     ?WARN_(Name,
-                           "data reader found an offset out of range: ~p, replica reader will not start",
+                           "data reader found an offset out of range: ~0p, replica reader will not start",
                           [Range]),
                     {stop, Reason};
                 {error, {invalid_last_offset_epoch, Epoch, Offset} = Reason} ->
                     ?WARN_(Name,
-                           "data reader found an invalid last offset epoch: epoch ~p offset ~p, replica reader will not start",
+                           "data reader found an invalid last offset epoch: epoch ~0p offset ~0p, replica reader will not start",
                            [Epoch, Offset]),
                     {stop, Reason}
             end;
         {error, Reason} ->
-            ?WARN_(Name, "could not connect osiris to replica at ~p Reason:",
-                   [Hosts, Reason]),
+            ?WARN_(Name, "could not connect replica reader to replica at ~0p port ~b, Reason: ~0p",
+                   [Hosts, Port, Reason]),
             {stop, Reason}
     end.
 
@@ -251,12 +251,12 @@ handle_info({ssl_closed, Socket},
     {stop, normal, State};
 handle_info({tcp_error, Socket, Error},
             #state{name = Name, socket = Socket} = State) ->
-    ?DEBUG_(Name, "Socket error ~p. "
+    ?DEBUG_(Name, "Socket error ~0p. "
            "Exiting...", [Error]),
     {stop, {tcp_error, Error}, State};
 handle_info({ssl_error, Socket, Error},
             #state{name = Name, socket = Socket} = State) ->
-    ?DEBUG_(Name, "TLS socket error ~p. "
+    ?DEBUG_(Name, "TLS socket error ~0p. "
            "Exiting...", [Error]),
     {stop, {ssl_error, Error}, State};
 handle_info({'EXIT', Ref, Info}, #state{name = Name} = State) ->
@@ -366,17 +366,17 @@ setopts(ssl, Sock, Opts) ->
 maybe_connect(_Name, _, [], _Port, _Options) ->
     {error, connection_refused};
 maybe_connect(Name, tcp, [H | T], Port, Options) ->
-    ?DEBUG_(Name, "trying to connect to ~p on port ~b", [H, Port]),
+    ?DEBUG_(Name, "trying to connect to ~0p on port ~b", [H, Port]),
     case gen_tcp:connect(H, Port, Options) of
         {ok, Sock} ->
             {ok, Sock, H};
         {error, Reason} ->
-            ?DEBUG_(Name, "connection refused, reason: ~w host:~p - port: ~p",
+            ?DEBUG_(Name, "connection refused, reason: ~w host:~0p - port: ~0p",
                     [Reason, H, Port]),
             maybe_connect(Name, tcp, T, Port, Options)
     end;
 maybe_connect(Name, ssl, [H | T], Port, Options) ->
-    ?DEBUG_(Name, "trying to establish TLS connection to ~p using port ~b", [H, Port]),
+    ?DEBUG_(Name, "trying to establish TLS connection to ~0p using port ~b", [H, Port]),
     Opts = Options ++
         application:get_env(osiris, replication_client_ssl_options, []) ++
         maybe_add_sni_option(H),
@@ -384,12 +384,12 @@ maybe_connect(Name, ssl, [H | T], Port, Options) ->
         {ok, Sock} ->
             {ok, Sock, H};
         {error, {tls_alert, {handshake_failure, _}}} ->
-            ?DEBUG_(Name, "TLS connection refused (handshake failure), host:~p - port: ~p",
+            ?DEBUG_(Name, "TLS connection refused (handshake failure), host:~0p - port: ~0p",
                     [H, Port]),
             maybe_connect(Name, ssl, T, Port, Options);
         {error, E} ->
-            ?DEBUG_(Name, "TLS connection refused, host:~p - port: ~p", [H, Port]),
-            ?DEBUG_(Name, "error while trying to establish TLS connection ~p", [E]),
+            ?DEBUG_(Name, "TLS connection refused, host:~0p - port: ~0p", [H, Port]),
+            ?DEBUG_(Name, "error while trying to establish TLS connection ~0p", [E]),
             maybe_connect(Name, ssl, T, Port, Options)
     end.
 

@@ -53,6 +53,7 @@ all_tests() ->
      init_offset_reader_timestamp_empty,
      init_offset_reader_timestamp,
      init_offset_reader_timestamp_multi_segment,
+     init_offset_reader_validate_single_msg_chunks,
      init_offset_reader_truncated,
      init_data_reader_next,
      init_data_reader_empty_log,
@@ -72,7 +73,6 @@ all_tests() ->
      accept_chunk_does_not_truncate_tail_in_same_epoch,
      accept_chunk_in_other_epoch,
      init_epoch_offsets_discards_all_when_no_overlap_in_same_epoch,
-     overview,
      init_corrupted_log,
      init_only_one_corrupted_segment,
      init_empty_last_files,
@@ -81,13 +81,18 @@ all_tests() ->
      evaluate_retention_max_age_empty,
      offset_tracking,
      offset_tracking_snapshot,
-     many_segment_overview
+     many_segment_overview,
+     small_chunk_overview,
+     overview
     ].
+
+
 
 groups() ->
     [{tests, [], all_tests()}].
 
 init_per_suite(Config) ->
+    _ = application:ensure_all_started(logger),
     osiris:configure_logger(logger),
     Config.
 
@@ -731,6 +736,40 @@ init_offset_reader_timestamp_multi_segment(Config) ->
     ?assertEqual(2, osiris_log:next_offset(L4)),
     osiris_log:close(L4),
     ok.
+
+init_offset_reader_validate_single_msg_chunks(Config) ->
+    ok = logger:set_primary_config(level, all),
+    Data = crypto:strong_rand_bytes(100),
+    ChIds = lists:seq(0, 20000),
+    EpochChunks =
+        [begin {1, [Data]} end || _ <- ChIds],
+    Conf = ?config(osiris_conf, Config),
+    LDir = ?config(leader_dir, Config),
+    LLog0 = seed_log(LDir, EpochChunks, Config),
+    set_shared(Conf, 20000),
+
+    % IdxFiles = osiris_log:sorted_index_files(LDir),
+    RConf = Conf#{dir => LDir},
+                  % index_files => IdxFiles},
+    {T19999, {ok, L19999}} = timer:tc(
+                               fun () ->
+                                       osiris_log:init_offset_reader(19730, RConf)
+                               end),
+    osiris_log:close(L19999),
+    ct:pal("T19999 took ~bms", [T19999 div 1000]),
+    {T, _} = timer:tc(fun () ->
+                              [begin
+                                   {ok, L} = osiris_log:init_offset_reader(ChId, RConf),
+                                   ?assertEqual(ChId, osiris_log:next_offset(L)),
+                                   osiris_log:close(L)
+                               end || ChId <- ChIds,
+                                      %% checking all is too slow
+                                      ChId rem 9 == 0]
+                      end),
+    ct:pal("Takne ~b", [T div 1000]),
+    osiris_log:close(LLog0),
+    ok.
+
 init_offset_reader_truncated(Config) ->
     Data = crypto:strong_rand_bytes(1500),
     EpochChunks =
@@ -959,7 +998,8 @@ accept_chunk(Config) ->
     ok = logger:set_primary_config(level, all),
     Conf = ?config(osiris_conf, Config),
     LConf = Conf#{dir => ?config(leader_dir, Config)},
-    FConf = Conf#{dir => ?config(follower1_dir, Config)},
+    FConf = Conf#{dir => ?config(follower1_dir, Config),
+                  shared => osiris_log_shared:new()},
     L0 = osiris_log:init(LConf),
     %% write an entry with just tracking
     L1 = osiris_log:write([<<"hi">>], ?CHNK_USER, ?LINE, <<>>, L0),
@@ -1451,22 +1491,75 @@ offset_tracking_snapshot(Config) ->
     osiris_log:close(S3),
     ok.
 
+small_chunk_overview(Config) ->
+    Data = crypto:strong_rand_bytes(1000),
+    ChSz = 1,
+    ChNum = 8196 * 4,
+    EpochChunks =
+        [begin
+            [{E, [Data || _ <- lists:seq(1, ChSz)]} || _ <- lists:seq(1, ChNum)]
+         end || E <- lists:seq(1, 10)],
+    Conf0 = ?config(osiris_conf, Config),
+    Conf = Conf0#{max_segment_size_bytes => 128_000_000},
+    osiris_log:close(seed_log(Conf, lists:flatten(EpochChunks), Config)),
+    Dir = maps:get(dir, Conf),
+    {UnsortedTaken, Files} = timer:tc(fun () -> osiris_log:index_files_unsorted(Dir) end),
+    {SortedTaken, _} = timer:tc(fun () -> osiris_log:sorted_index_files(Dir) end),
+
+    ct:pal("UnsortedTaken ~bms, SortedTaken ~bms, num files ~b",
+           [UnsortedTaken div 1000, SortedTaken div 1000, length(Files)]),
+    {OverviewTaken, LogOverview} = timer:tc(fun () ->
+                                                    osiris_log:overview(Dir)
+                                            end),
+    ct:pal("OverviewTaken ~bms", [OverviewTaken div 1000]),
+    ?assertMatch({{0,327839},
+                  [{1,32783},
+                   {2,65567},
+                   {3,98351},
+                   {4,131135},
+                   {5,163919},
+                   {6,196703},
+                   {7,229487},
+                   {8,262271},
+                   {9,295055},
+                   {10,327839}]}, LogOverview),
+    {InitTaken100, {ok, L100}} = timer:tc(
+                             fun () ->
+                                     osiris_log:init_offset_reader(257000, Conf)
+                             end),
+    osiris_log:close(L100),
+    ct:pal("InitTaken100 ~bms", [InitTaken100 div 1000]),
+    {InitTaken, {ok, L}} = timer:tc(
+                             fun () ->
+                                     osiris_log:init_offset_reader(245869, Conf)
+                             end),
+    ct:pal("InitTaken ~bms next ~b", [InitTaken div 1000,osiris_log:next_offset(L)]),
+    osiris_log:close(L),
+    ok.
+
 many_segment_overview(Config) ->
     Data = crypto:strong_rand_bytes(1000),
+    ChSz = 8,
+    ChNum = 1024,
     EpochChunks =
-    [{1, [Data || _ <- lists:seq(1, 8)]} || _ <- lists:seq(1, 1024)] ++
-    [{2, [Data || _ <- lists:seq(1, 8)]} || _ <- lists:seq(1, 1024)] ++
-    [{3, [Data || _ <- lists:seq(1, 8)]} || _ <- lists:seq(1, 1024)] ++
-    [{4, [Data || _ <- lists:seq(1, 8)]} || _ <- lists:seq(1, 1024)] ++
-    [{5, [Data || _ <- lists:seq(1, 8)]} || _ <- lists:seq(1, 1024)],
+        [{1, [Data || _ <- lists:seq(1, ChSz)]} || _ <- lists:seq(1, ChNum)] ++
+        [{2, [Data || _ <- lists:seq(1, ChSz)]} || _ <- lists:seq(1, ChNum)] ++
+        [{3, [Data || _ <- lists:seq(1, ChSz)]} || _ <- lists:seq(1, ChNum)] ++
+        [{4, [Data || _ <- lists:seq(1, ChSz)]} || _ <- lists:seq(1, ChNum)] ++
+        [{5, [Data || _ <- lists:seq(1, ChSz)]} || _ <- lists:seq(1, ChNum)],
     Conf0 = ?config(osiris_conf, Config),
     Conf = Conf0#{max_segment_size_bytes => 64000},
+    Dir = maps:get(dir, Conf),
     osiris_log:close(seed_log(Conf, EpochChunks, Config)),
+    {UnsortedTaken, Files} = timer:tc(fun () -> osiris_log:index_files_unsorted(Dir) end),
+    {SortedTaken, _} = timer:tc(fun () -> osiris_log:sorted_index_files(Dir) end),
+    ct:pal("UnsortedTaken ~bms, SortedTaken ~bms, num files ~b",
+           [UnsortedTaken div 1000, SortedTaken div 1000, length(Files)]),
     %% {40051,{{0,40959},[{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]}}
     {OverviewTaken, LogOverview} = timer:tc(fun () ->
                                                     osiris_log:overview(maps:get(dir, Conf))
                                             end),
-    ct:pal("OverviewTaken ~p", [OverviewTaken]),
+    ct:pal("OverviewTaken ~bms", [OverviewTaken div 1000]),
     ct:pal("~p", [LogOverview]),
     %% {{0,40959},[{-1,-1},{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]}
     ?assertEqual({{0,40959},
@@ -1477,7 +1570,7 @@ many_segment_overview(Config) ->
                        fun () ->
                                osiris_log:close(osiris_log:init(Conf6))
                        end),
-    ct:pal("InitTaken ~p", [InitTaken]),
+    ct:pal("InitTaken ~bms", [InitTaken div 1000]),
 
     {OffsLastTaken, _} =
         timer:tc(fun () ->

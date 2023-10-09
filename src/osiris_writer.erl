@@ -160,25 +160,40 @@ query_replication_state(Pid) when is_pid(Pid) ->
 
 -spec init(osiris:config()) ->
     {ok, undefined, {continue, osiris:config()}}.
-init(Config) ->
-    {ok, undefined, {continue, Config}}.
+init(#{name := Name0,
+       reference := ExtRef} = Config0) ->
+    %% augment config
+    Name = osiris_util:normalise_name(Name0),
+    Shared = osiris_log_shared:new(),
+    Dir = osiris_log:directory(Config0),
+    CntName = {?MODULE, ExtRef},
+    Config = Config0#{name => Name,
+                      dir => Dir,
+                      shared => Shared,
+                      counter_spec => {CntName, ?ADD_COUNTER_FIELDS}},
+    CntRef = osiris_log:make_counter(Config),
+    {ok, undefined, {continue, Config#{counter => CntRef}}}.
 
-handle_continue(#{name := Name0,
+handle_continue(#{name := Name,
+                  dir := Dir,
                   epoch := Epoch,
                   reference := ExtRef,
+                  shared := Shared,
+                  counter := CntRef,
                   replica_nodes := Replicas} =
                 Config, undefined)
-  when ?IS_STRING(Name0) ->
-    Name = osiris_util:normalise_name(Name0),
-    Dir = osiris_log:directory(Config),
+  when ?IS_STRING(Name) ->
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
-    CntName = {?MODULE, ExtRef},
-    Log = osiris_log:init(Config#{dir => Dir,
-                                  counter_spec =>
-                                      {CntName, ?ADD_COUNTER_FIELDS}}),
+    Log = osiris_log:init(Config),
+    %% reader context can only be cached _after_ log init as we need to ensure
+    %% there is at least 1 segment/index pair and also that the log has been
+    %% truncated such that only valid index / segment data remains.
+    osiris_util:cache_reader_context(self(), Dir, Name, Shared, ExtRef,
+                                     fun(Inc) ->
+                                             counters:add(CntRef, ?C_READERS, Inc)
+                                     end),
     Trk = osiris_log:recover_tracking(Log),
-    CntRef = osiris_log:counters_ref(Log),
     %% should this not be be chunk id rather than last offset?
     LastOffs = osiris_log:next_offset(Log) - 1,
     CommittedOffset =
@@ -198,11 +213,6 @@ handle_continue(#{name := Name0,
     ?INFO("osiris_writer:init/1: name: ~ts last offset: ~b "
           "committed chunk id: ~b epoch: ~b",
           [Name, LastOffs, CommittedOffset, Epoch]),
-    Shared = osiris_log:get_shared(Log),
-    osiris_util:cache_reader_context(self(), Dir, Name, Shared, ExtRef,
-                                     fun(Inc) ->
-                                             counters:add(CntRef, ?C_READERS, Inc)
-                                     end),
     {ok,
      #?MODULE{cfg =
                   #cfg{name = Name,
