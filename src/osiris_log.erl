@@ -936,9 +936,8 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
                     _ = file:advise(Fd, 0, 0, random),
                     {ok, IdxFd} = file:open(IdxFile, [read, write, binary, raw]),
 
-                    {_ChType, ChId, E, _Num, Size, TSize} = header_info(Fd, Pos),
-                    %% position at end of chunk
-                    {ok, _Pos} = file:position(Fd, {cur, Size + TSize}),
+                    NextPos = next_chunk_pos(Fd, Pos),
+                    {ok, _} = file:position(Fd, NextPos),
                     ok = file:truncate(Fd),
 
                     {ok, _} = file:position(IdxFd, IdxPos + ?INDEX_RECORD_SIZE_B),
@@ -1366,45 +1365,33 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
     end.
 
 -spec read_chunk(state()) ->
-                    {ok,
-                     {chunk_type(),
-                      offset(),
-                      epoch(),
-                      HeaderData :: iodata(),
-                      RecordData :: iodata(),
-                      TrailerData :: iodata()},
-                     state()} |
-                    {end_of_stream, state()} |
-                    {error, {invalid_chunk_header, term()}}.
+    {ok, binary(), state()} |
+    {end_of_stream, state()} |
+    {error, {invalid_chunk_header, term()}}.
 read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
-    %% reads the next chunk of unparsed entries
-    %% NB: this may return records before the requested index,
-    %% that is fine - the reading process can do the appropriate filtering
+    %% reads the next chunk of unparsed chunk data
     case catch read_header0(State0) of
         {ok,
-         #{type := ChType,
+         #{type := _ChType,
            chunk_id := ChId,
-           epoch := Epoch,
+           epoch := _Epoch,
            crc := Crc,
            num_records := NumRecords,
-           header_data := HeaderData,
+           header_data := _HeaderData,
            data_size := DataSize,
            filter_size := FilterSize,
            position := Pos,
            next_position := NextPos,
            trailer_size := TrailerSize},
          #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State} ->
-            DataPos = Pos + ?HEADER_SIZE_B + FilterSize,
-            {ok, BlobData} = file:pread(Fd, DataPos, DataSize),
-            TrailerData = case TrailerSize > 0 of
-                              true ->
-                                  file:pread(Fd, DataPos + DataSize,
-                                             TrailerSize);
-                              false ->
-                                  <<>>
-                          end,
-            validate_crc(ChId, Crc, BlobData),
-            {ok, {ChType, ChId, Epoch, HeaderData, BlobData, TrailerData},
+            ToRead = ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
+            {ok, ChData} = file:pread(Fd, Pos, ToRead),
+            <<_:?HEADER_SIZE_B/binary,
+              _:FilterSize/binary,
+              RecordData:DataSize/binary,
+              _/binary>> = ChData,
+            validate_crc(ChId, Crc, RecordData),
+            {ok, ChData,
              State#?MODULE{mode = Read#read{next_offset = ChId + NumRecords,
                                             position = NextPos}}};
         Other ->
@@ -1479,12 +1466,16 @@ is_valid_chunk_on_disk(SegFile, Pos) ->
                              _TrailerSize:32/unsigned,
                              FilterSize:8/unsigned,
                              _Reserved:24>>} ->
-                              {ok, Data} = file:pread(SegFd, Pos + FilterSize + ?HEADER_SIZE_B,
-                                                      DataSize),
-                              case erlang:crc32(Data) of
-                                  Crc ->
-                                      true;
-                                  _ ->
+                              DataPos = Pos + FilterSize + ?HEADER_SIZE_B,
+                              case file:pread(SegFd, DataPos, DataSize) of
+                                  {ok, Data} ->
+                                      case erlang:crc32(Data) of
+                                          Crc ->
+                                              true;
+                                          _ ->
+                                              false
+                                      end;
+                                  eof ->
                                       false
                               end;
                           _ ->
@@ -1618,22 +1609,21 @@ delete_directory(Name) when ?IS_STRING(Name) ->
 
 %% Internal
 
-header_info(Fd, Pos) ->
-    {ok, Pos} = file:position(Fd, Pos),
+next_chunk_pos(Fd, Pos) ->
     {ok, <<?MAGIC:4/unsigned,
            ?VERSION:4/unsigned,
-           ChType:8/unsigned,
+           _ChType:8/unsigned,
            _NumEntries:16/unsigned,
-           Num:32/unsigned,
+           _Num:32/unsigned,
            _Timestamp:64/signed,
-           Epoch:64/unsigned,
-           Offset:64/unsigned,
+           _Epoch:64/unsigned,
+           _Offset:64/unsigned,
            _Crc:32/integer,
            Size:32/unsigned,
            TSize:32/unsigned,
-           _FSize:8/unsigned,
-           _Reserved:24>>} = file:read(Fd, ?HEADER_SIZE_B),
-    {ChType, Offset, Epoch, Num, Size, TSize}.
+           FSize:8/unsigned,
+           _Reserved:24>>} = file:pread(Fd, Pos, ?HEADER_SIZE_B),
+    Pos + ?HEADER_SIZE_B + FSize + Size + TSize.
 
 parse_records(_Offs, <<>>, Acc) ->
     %% TODO: this could probably be changed to body recursive

@@ -997,40 +997,39 @@ init_epoch_offsets_multi_segment2(Config) ->
 accept_chunk(Config) ->
     ok = logger:set_primary_config(level, all),
     Conf = ?config(osiris_conf, Config),
-    LConf = Conf#{dir => ?config(leader_dir, Config)},
+    LDir = ?config(leader_dir, Config),
+    LConf = Conf#{dir => LDir},
     FConf = Conf#{dir => ?config(follower1_dir, Config),
                   shared => osiris_log_shared:new()},
     L0 = osiris_log:init(LConf),
-    %% write an entry with just tracking
     L1 = osiris_log:write([<<"hi">>], ?CHNK_USER, ?LINE, <<>>, L0),
-    % L1 = osiris_log:write_tracking(#{<<"id1">> => {offset, 1}}, delta, L0),
-    timer:sleep(100),
-
+    timer:sleep(10),
     Now = ?LINE,
-    L2 = osiris_log:write([<<"hi">>], ?CHNK_USER, Now, <<>>, L1),
+    L2 = osiris_log:write([{<<"filter">>, <<"ho">>}], ?CHNK_USER, Now, <<>>, L1),
 
-    F0 = osiris_log:init(FConf),
+    {Range, EOChIds} = osiris_log:overview(LDir),
 
+    F0 = osiris_log:init_acceptor(Range, EOChIds, FConf),
+
+    %% replica reader
     RConf = LConf#{shared => osiris_log:get_shared(L2)},
-
-    {ok, R0} =
-        osiris_log:init_data_reader(
-            osiris_log:tail_info(F0), RConf),
-    {Chunk1, R1} = read_chunk(R0),
+    {ok, R0} = osiris_log:init_data_reader(
+                 osiris_log:tail_info(F0), RConf),
+    {ok, Chunk1, R1} = osiris_log:read_chunk(R0),
     F1 = osiris_log:accept_chunk(Chunk1, F0),
-    {Chunk2, R2} = read_chunk(R1),
+    {ok, Chunk2, R2} = osiris_log:read_chunk(R1),
     F2 = osiris_log:accept_chunk(Chunk2, F1),
 
     osiris_log:close(L2),
     osiris_log:close(R2),
     osiris_log:close(F2),
-    FL0 = osiris_log:init(FConf),
+    FL0 = osiris_log:init_acceptor(Range, EOChIds, FConf),
     osiris_log:close(FL0),
-    ok.
 
-read_chunk(S0) ->
-    {ok, {_, _, _, Hd, Ch, Tr}, S1} = osiris_log:read_chunk(S0),
-    {[Hd, Ch, Tr], S1}.
+    osiris_log_shared:set_committed_chunk_id(maps:get(shared, FConf), 1),
+    {ok, O0} = osiris_log:init_offset_reader(last, FConf),
+    {[{1, <<"ho">>}], _o} = osiris_log:read_chunk_parsed(O0),
+    ok.
 
 init_acceptor_truncates_tail(Config) ->
     ok = logger:set_primary_config(level, all),
@@ -1087,10 +1086,10 @@ accept_chunk_truncates_tail(Config) ->
                   shared => LShared},
     {ok, RLog0} =
         osiris_log:init_data_reader(osiris_log:tail_info(ALog0), RConf),
-    {ok, {_, _, _, Hd, Ch, Tr}, RLog1} = osiris_log:read_chunk(RLog0),
-    ALog1 = osiris_log:accept_chunk([Hd, Ch, Tr], ALog0),
-    {ok, {_, _, _, Hd2, Ch2, Tr2}, _RLog} = osiris_log:read_chunk(RLog1),
-    ALog = osiris_log:accept_chunk([Hd2, Ch2, Tr2], ALog1),
+    {ok, Ch1, RLog1} = osiris_log:read_chunk(RLog0),
+    ALog1 = osiris_log:accept_chunk([Ch1], ALog0),
+    {ok, Ch2, _RLog} = osiris_log:read_chunk(RLog1),
+    ALog = osiris_log:accept_chunk([Ch2], ALog1),
 
     osiris_log:close(ALog),
     % validate equal
