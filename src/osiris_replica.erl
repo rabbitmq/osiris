@@ -292,7 +292,7 @@ open_listener(_Transport, Range, 100) ->
 open_listener(Transport, {Min, Max} = Range, Attempts) ->
     Offs = rand:uniform(Max - Min),
     Port = Min + Offs,
-    Options = listener_opts(),
+    Options = listener_opts(Transport),
     case listen(Transport, Port, Options) of
         {ok, LSock} ->
             {Port, LSock};
@@ -322,11 +322,8 @@ accept(Name, tcp, LSock, Process) ->
 accept(Name, ssl, LSock, Process) ->
     ?DEBUG_(Name, "Starting socket acceptor for replication over TLS", []),
     {ok, Sock0} = ssl:transport_accept(LSock),
-    case ssl:handshake(Sock0,
-                       application:get_env(osiris,
-                                           replication_server_ssl_options,
-                                           []))
-    of
+    SslOptions = application:get_env(osiris, replication_server_ssl_options, []),
+    case ssl:handshake(Sock0, SslOptions) of
         {ok, Sock} ->
             _ = ssl:close(LSock),
             ok = ssl:controlling_process(Sock, Process),
@@ -725,7 +722,7 @@ setopts(tcp, Socket, Options) ->
 setopts(ssl, Socket, Options) ->
     ssl:setopts(Socket, Options).
 
-listener_opts() ->
+listener_opts(tcp) ->
     RcvBuf = application:get_env(osiris, replica_recbuf, ?DEF_REC_BUF),
     Buffer = application:get_env(osiris, replica_buffer, RcvBuf * 2),
     KeepAlive = application:get_env(osiris, replica_keepalive, false),
@@ -741,7 +738,11 @@ listener_opts() ->
      {buffer, Buffer},
      {recbuf, RcvBuf},
      {keepalive, KeepAlive}
-    ].
+    ];
+listener_opts(ssl) ->
+    Opts = listener_opts(tcp),
+    SslOptions = application:get_env(osiris, replication_server_ssl_options, []),
+    Opts ++ SslOptions.
 
 listen(tcp, Port, Options) ->
     gen_tcp:listen(Port, Options);
