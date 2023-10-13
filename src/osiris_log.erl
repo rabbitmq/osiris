@@ -1294,12 +1294,12 @@ last_user_chunk_id0(Name, [IdxFile | Rest]) ->
 %% Searches the index file backwards for the chunk id of the last user chunk.
 last_user_chunk_id_in_index(NextPos, IdxFd) ->
     case file:pread(IdxFd, NextPos, ?INDEX_RECORD_SIZE_B) of
-        {ok, <<Offset:64/unsigned,
+        {ok, <<ChunkId:64/unsigned,
                _Timestamp:64/signed,
                _Epoch:64/unsigned,
                FilePos:32/unsigned,
                ?CHNK_USER:8/unsigned>>} ->
-            {ok, Offset, FilePos};
+            {ok, ChunkId, FilePos};
         {ok, ?IDX_MATCH(_, _, _)} ->
             last_user_chunk_id_in_index(NextPos - ?INDEX_RECORD_SIZE_B, IdxFd);
         {error, _} = Error ->
