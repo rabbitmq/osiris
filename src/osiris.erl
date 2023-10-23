@@ -74,6 +74,8 @@
                 batch() |
                 {filter_value(), iodata() | batch()}.
 
+%% returned when reading
+-type entry() :: binary() | batch().
 -type reader_options() :: #{transport => tcp | ssl,
                             chunk_selector => all | user_data,
                             filter_spec => osiris_bloom:filter_spec()
@@ -89,7 +91,8 @@
               retention_spec/0,
               timestamp/0,
               writer_id/0,
-              data/0]).
+              data/0,
+             entry/0]).
 
 -spec start_cluster(config()) ->
     {ok, config()} |
