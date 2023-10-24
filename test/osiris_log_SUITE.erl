@@ -338,6 +338,9 @@ iterator_read_chunk(Config) ->
     {{HoOffs, <<"ho">>}, I2} = osiris_log:iterator_next(I1),
     {{BatchOffs, Batch}, I} = osiris_log:iterator_next(I2),
     ?assertMatch(end_of_chunk, osiris_log:iterator_next(I)),
+    %% test batch parsing
+    ?assertMatch({ok,[{2,<<"hi">>},{3,<<"h0">>}]},
+                 osiris_log:batch_records(BatchOffs, Batch)),
     ok.
 
 iterator_read_chunk_mixed_sizes_with_credit(Config) ->
