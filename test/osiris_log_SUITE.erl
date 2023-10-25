@@ -36,6 +36,8 @@ all_tests() ->
      write_batch_with_filters_variable_size,
      subbatch,
      subbatch_compressed,
+     iterator_read_chunk,
+     iterator_read_chunk_mixed_sizes_with_credit,
      read_chunk_parsed,
      read_chunk_parsed_2,
      read_chunk_parsed_multiple_chunks,
@@ -86,6 +88,18 @@ all_tests() ->
      overview
     ].
 
+-define(assertMatch_(Guard, Expr),
+        begin
+            case (Expr) of
+                Guard -> ok;
+                X__V -> erlang:error({assertMatch,
+                                      [{module, ?MODULE},
+                                       {line, ?LINE},
+                                       {expression, (??Expr)},
+                                       {pattern, (??Guard)},
+                                       {value, X__V}]})
+            end
+        end).
 
 
 groups() ->
@@ -301,6 +315,55 @@ subbatch_compressed(Config) ->
 
     osiris_log:close(S1),
     osiris_log:close(R1),
+    ok.
+
+iterator_read_chunk(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf),
+    Shared = osiris_log:get_shared(S0),
+    RConf = Conf#{shared => Shared},
+    {ok, R0} = osiris_log:init_offset_reader(0, RConf),
+    {end_of_stream, R1} = osiris_log:chunk_iterator(R0),
+    IOData = <<0:1, 2:31/unsigned, "hi", 0:1, 2:31/unsigned, "h0">>,
+    CompType = 0, %% no compression
+    Batch = {batch, 2, CompType, byte_size(IOData), IOData},
+    EntriesRev = [Batch,
+                  <<"ho">>,
+                  {<<"filter">>, <<"hi">>}],
+    {ChId, _S1} = write_committed(EntriesRev, S0),
+    {ok, _H, I0, _R2} = osiris_log:chunk_iterator(R1),
+    HoOffs = ChId + 1,
+    BatchOffs = ChId + 2,
+    {{ChId, <<"hi">>}, I1} = osiris_log:iterator_next(I0),
+    {{HoOffs, <<"ho">>}, I2} = osiris_log:iterator_next(I1),
+    {{BatchOffs, Batch}, I} = osiris_log:iterator_next(I2),
+    ?assertMatch(end_of_chunk, osiris_log:iterator_next(I)),
+    %% test batch parsing
+    ?assertMatch({ok,[{2,<<"hi">>},{3,<<"h0">>}]},
+                 osiris_log:batch_records(BatchOffs, Batch)),
+    ok.
+
+iterator_read_chunk_mixed_sizes_with_credit(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf),
+    Shared = osiris_log:get_shared(S0),
+    RConf = Conf#{shared => Shared},
+    {ok, R0} = osiris_log:init_offset_reader(0, RConf),
+    {end_of_stream, R1} = osiris_log:chunk_iterator(R0),
+    Big = crypto:strong_rand_bytes(100_000),
+    EntriesRev = [Big,
+                  <<"ho">>,
+                  {<<"filter">>, <<"hi">>}],
+    {ChId, _S1} = write_committed(EntriesRev, S0),
+    %% this is a less than ideal case where we have one large and two very
+    %% small entries inthe same batch. The read ahead only
+    {ok, _H, I0, _R2} = osiris_log:chunk_iterator(R1, 2),
+    HoOffs = ChId + 1,
+    BigOffs = ChId + 2,
+    {{ChId, <<"hi">>}, I1} = osiris_log:iterator_next(I0),
+    {{HoOffs, <<"ho">>}, I2} = osiris_log:iterator_next(I1),
+    {{BigOffs, Big}, I} = osiris_log:iterator_next(I2),
+    ?assertMatch(end_of_chunk, osiris_log:iterator_next(I)),
     ok.
 
 read_chunk_parsed(Config) ->
@@ -1702,3 +1765,13 @@ make_trailer(Type, K, V) ->
 
 set_shared(#{shared := Ref}, Value) ->
     osiris_log_shared:set_committed_chunk_id(Ref, Value).
+
+%% writes and commits the chunk
+write_committed(Entries, S0) ->
+    ChId = osiris_log:next_offset(S0),
+    S = osiris_log:write(Entries, S0),
+    Shared = osiris_log:get_shared(S0),
+    osiris_log_shared:set_committed_chunk_id(Shared, ChId),
+    osiris_log_shared:set_last_chunk_id(Shared, ChId),
+    {ChId, S}.
+
