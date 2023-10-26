@@ -32,7 +32,6 @@
          chunk_iterator/1,
          chunk_iterator/2,
          iterator_next/1,
-         batch_records/2,
          read_chunk/1,
          read_chunk_parsed/1,
          read_chunk_parsed/2,
@@ -1749,13 +1748,6 @@ next_chunk_pos(Fd, Pos) ->
            _Reserved:24>>} = file:pread(Fd, Pos, ?HEADER_SIZE_B),
     Pos + ?HEADER_SIZE_B + FSize + Size + TSize.
 
-
-%% utility function to parse an uncompressed subbatch into records
-batch_records(ChId, {batch, _NumRecords, 0, _UncompLen, Data}) ->
-    Records = lists:reverse(parse_subbatch(ChId, Data, [])),
-    {ok, Records};
-batch_records(_ChId, {batch, _NumRecords, CompType, _UncompLen, _Data}) ->
-    {error, {compression_type_not_supported, CompType}}.
 
 parse_subbatch(_Offs, <<>>, Acc) ->
     Acc;
