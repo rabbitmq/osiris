@@ -31,6 +31,7 @@ all() ->
 
 all_tests() ->
     [single_node_write,
+     single_node_write_sub_batch_restart,
      single_node_uncorrelated_write,
      cluster_write_replication_plain,
      cluster_write_replication_tls,
@@ -176,6 +177,49 @@ single_node_write(Config) ->
         exit(osiris_written_timeout)
     end,
     ?assertEqual(42, osiris:fetch_writer_seq(Leader, Wid)),
+    ok.
+
+single_node_write_sub_batch_restart(Config) ->
+    Name = ?config(cluster_name, Config),
+    Dir = ?config(priv_dir, Config),
+    Conf0 =
+        #{name => Name,
+          reference => Name,
+          epoch => 1,
+          leader_node => node(),
+          replica_nodes => [],
+          tracking_max_writers => 255,
+          dir => Dir},
+    SDir = filename:join(Dir, Name),
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    Entries = [simple(<<"abcdefghikjlmn">>) || _ <- lists:seq(1, 11)],
+    Batch = {batch, 11, 0, iolist_size(Entries), Entries},
+    ok = osiris:write(Leader, undefined, 42, Batch),
+    receive
+        {osiris_written, _Name, _WriterId, [42]} ->
+            ok = osiris_writer:stop(Conf0),
+            %% simulate data loss of first chunk, only header remains
+            truncate(filename:join(SDir, "00000000000000000000.segment"), 56),
+            {ok, Leader1} = osiris_writer:start(Conf0#{epoch => 3}),
+            osiris_writer:read_tracking(Leader1),
+            ok = osiris:write(Leader1, undefined, 43, Batch),
+            receive
+                {osiris_written, _, _, [43]} ->
+                    ok = osiris_writer:stop(Conf0),
+                    {ok, Leader2} = osiris_writer:start(Conf0#{epoch => 4}),
+                    %% read tracking to ensure write is actually running ok
+                    #{} = osiris_writer:read_tracking(Leader2),
+                    ok
+            after 2000 ->
+                      flush(),
+                      exit(osiris_written_timeout)
+            end,
+            timer:sleep(1000),
+            ok
+    after 2000 ->
+        flush(),
+        exit(osiris_written_timeout)
+    end,
     ok.
 
 single_node_uncorrelated_write(Config) ->
@@ -2113,3 +2157,9 @@ wildcard(Wc) when is_list(Wc) ->
 wildcard(Wc) ->
     wildcard(unicode:characters_to_list(Wc)).
 
+truncate(File, Sz) ->
+    {ok, Fd} = file:open(File, [raw, binary, read, write]),
+    {ok, _} = file:position(Fd, Sz),
+    ok = file:truncate(Fd),
+    ok = file:close(Fd),
+    ok.
