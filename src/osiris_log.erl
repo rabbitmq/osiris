@@ -53,7 +53,9 @@
          make_counter/1]).
 
 -export([dump_init/1,
+         dump_init_idx/1,
          dump_chunk/1,
+         dump_index/1,
          dump_crc_check/1]).
 %% for testing
 -export([
@@ -597,10 +599,12 @@ init(#{dir := Dir,
             %% the empty log case
             {ok, SegFd} = open(Filename, ?FILE_OPTS_WRITE),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
-            %% TODO: do we potentially need to truncate the segment
-            %% here too?
-            {ok, _} = file:position(SegFd, eof),
-            {ok, _} = file:position(IdxFd, eof),
+            {ok, _} = file:position(SegFd, ?LOG_HEADER_SIZE),
+            %% the segment could potentially have trailing data here so we'll
+            %% do a truncate just in case. The index would have been truncated
+            %% earlier
+            ok = file:truncate(SegFd),
+            {ok, _} = file:position(IdxFd, ?IDX_HEADER_SIZE),
             osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
             #?MODULE{cfg = Cfg,
                      mode =
@@ -3028,6 +3032,29 @@ dump_init(File) ->
     {ok, Fd} = file:open(File, [raw, binary, read]),
     {ok, <<"OSIL", _V:4/binary>> } = file:read(Fd, ?LOG_HEADER_SIZE),
     Fd.
+
+dump_init_idx(File) ->
+    {ok, Fd} = file:open(File, [raw, binary, read]),
+    {ok, <<"OSII", _V:4/binary>> } = file:read(Fd, ?IDX_HEADER_SIZE),
+    Fd.
+
+dump_index(Fd) ->
+    case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
+        {ok,
+         <<ChunkId:64/unsigned,
+           Timestamp:64/signed,
+           Epoch:64/unsigned,
+           FilePos:32/unsigned,
+           ChType:8/unsigned>>} ->
+            #{chunk_id => ChunkId,
+              timestamp => Timestamp,
+              epoch => Epoch,
+              file_pos => FilePos,
+              type => ChType};
+        Err ->
+            Err
+    end.
+
 
 
 dump_chunk(Fd) ->
