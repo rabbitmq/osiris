@@ -1560,7 +1560,9 @@ read_chunk_parsed(#?MODULE{mode = #read{}} = State0,
             {Records, State1};
         {ok, Header, I0, State1} when HeaderOrNot == with_header ->
             Records = iter_all_records(iterator_next(I0), []),
-            {ok, Header, Records, State1}
+            {ok, Header, Records, State1};
+        Err ->
+            Err
     end.
 
 iter_all_records(end_of_chunk, Acc) ->
