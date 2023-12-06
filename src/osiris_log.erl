@@ -1922,7 +1922,8 @@ build_segment_info(SegFile, LastChunkPos, IdxFile) ->
            FirstChId:64/unsigned,
            _FirstCrc:32/integer,
            FirstSize:32/unsigned,
-           FirstTSize:32/unsigned,
+           FirstFSize:8/unsigned,
+           FirstTSize:24/unsigned,
            _/binary>>} ->
             case file:pread(Fd, LastChunkPos, ?HEADER_SIZE_B) of
                 {ok,
@@ -1939,7 +1940,8 @@ build_segment_info(SegFile, LastChunkPos, IdxFile) ->
                    LastTSize:32/unsigned,
                    LastFSize:8/unsigned,
                    _Reserved:24>>} ->
-                    Size = LastChunkPos + ?HEADER_SIZE_B + LastFSize + LastSize + LastTSize,
+                    LastChunkSize = LastFSize + LastSize + LastTSize,
+                    Size = LastChunkPos + ?HEADER_SIZE_B + LastChunkSize,
                     %% TODO: this file:position/2 all has no actual function and
                     %% is only used to emit a debug log. Remove?
                     {ok, Eof} = file:position(Fd, eof),
@@ -1947,25 +1949,25 @@ build_segment_info(SegFile, LastChunkPos, IdxFile) ->
                               [?MODULE, filename:basename(SegFile),
                                Size, Eof], Size =/= Eof),
                     _ = file:close(Fd),
+                    FstChInfo = #chunk_info{epoch = FirstEpoch,
+                                            timestamp = FirstTs,
+                                            id = FirstChId,
+                                            num = FirstNumRecords,
+                                            type = FirstChType,
+                                            size = FirstFSize + FirstSize + FirstTSize,
+                                            pos = ?LOG_HEADER_SIZE},
+                    LastChInfo = #chunk_info{epoch = LastEpoch,
+                                             timestamp = LastTs,
+                                             id = LastChId,
+                                             num = LastNumRecords,
+                                             type = LastChType,
+                                             size = LastChunkSize,
+                                             pos = LastChunkPos},
                     {ok, #seg_info{file = SegFile,
                                    index = IdxFile,
                                    size = Size,
-                                   first =
-                                   #chunk_info{epoch = FirstEpoch,
-                                               timestamp = FirstTs,
-                                               id = FirstChId,
-                                               num = FirstNumRecords,
-                                               type = FirstChType,
-                                               size = FirstSize + FirstTSize,
-                                               pos = ?LOG_HEADER_SIZE},
-                                   last =
-                                   #chunk_info{epoch = LastEpoch,
-                                               timestamp = LastTs,
-                                               id = LastChId,
-                                               num = LastNumRecords,
-                                               type = LastChType,
-                                               size = LastSize + LastTSize,
-                                               pos = LastChunkPos}}};
+                                   first = FstChInfo,
+                                   last = LastChInfo}};
                 _ ->
                     % last chunk is corrupted - try the previous one
                     _ = file:close(Fd),
