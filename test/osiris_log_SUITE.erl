@@ -32,6 +32,7 @@ all_tests() ->
      init_recover_with_writers,
      init_with_lower_epoch,
      write_batch,
+     write_with_filter_attach_next,
      write_batch_with_filter,
      write_batch_with_filters_variable_size,
      subbatch,
@@ -205,6 +206,25 @@ write_batch(Config) ->
     ?assertEqual(0, osiris_log:next_offset(S0)),
     S1 = osiris_log:write([<<"hi">>], S0),
     ?assertEqual(1, osiris_log:next_offset(S1)),
+    ok.
+
+write_with_filter_attach_next(Config) ->
+    %% bug fix where the chunk_info size didn't include the filter size which
+    %% cause the next attach strategy to point to an invalid location in the
+    %% segment when filters were used.
+    Conf0 = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf0#{filter_size => 32}),
+    ?assertEqual(0, osiris_log:next_offset(S0)),
+    %% write an entry with a filter value and an entry without a filter value
+    {_, S1} = write_committed([<<"ho">>, {<<"banana">>, <<"hi">>}], S0),
+    Shared = osiris_log:get_shared(S1),
+    Conf = Conf0#{shared => Shared},
+    {ok, R0} = osiris_log:init_offset_reader(next, Conf),
+    {end_of_stream, R1} = osiris_log:read_chunk_parsed(R0),
+    %% then write a chunk without any filtred entries at all
+    {_, _S2} = write_committed([<<"hum">>], S1),
+    ?assertMatch({[{2, <<"hum">>}], _R1},
+                 osiris_log:read_chunk_parsed(R1)),
     ok.
 
 write_batch_with_filter(Config) ->
