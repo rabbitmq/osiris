@@ -73,6 +73,8 @@
 
 -export_type([state/0]).
 
+-callback start(Config :: map()) -> {ok, Writer :: pid()}.
+
 start(Config = #{name := Name, leader_node := Leader}) ->
     supervisor:start_child({?SUP, Leader},
                            #{id => osiris_util:normalise_name(Name),

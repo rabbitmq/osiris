@@ -103,7 +103,8 @@ start_cluster(Config00 = #{name := Name}) ->
     true = osiris_util:validate_base64uri(Name),
     %% ensure reference is set
     Config0 = maps:merge(#{reference => Name}, Config00),
-    case osiris_writer:start(Config0) of
+    WriterMod = get_writer_module(Config00),
+    case WriterMod:start(Config0) of
         {ok, Pid} ->
             Config = Config0#{leader_pid => Pid},
             case start_replicas(Config) of
@@ -115,7 +116,8 @@ start_cluster(Config00 = #{name := Name}) ->
     end.
 
 stop_cluster(Config) ->
-    ok = osiris_writer:stop(Config),
+    WriterMod = get_writer_module(Config),
+    ok = WriterMod:stop(Config),
     [ok = osiris_replica:stop(N, Config)
      || N <- maps:get(replica_nodes, Config)],
     ok.
@@ -124,10 +126,12 @@ stop_cluster(Config) ->
 delete_cluster(Config) ->
     [ok = osiris_replica:delete(R, Config)
      || R <- maps:get(replica_nodes, Config)],
-    ok = osiris_writer:delete(Config).
+    WriterMod = get_writer_module(Config),
+    ok = WriterMod:delete(Config).
 
 start_writer(Config) ->
-    osiris_writer:start(Config).
+    WriterMod = get_writer_module(Config),
+    WriterMod:start(Config).
 
 start_replica(Replica, Config) ->
     osiris_replica:start(Replica, Config).
@@ -293,3 +297,6 @@ get_stats(Pid)
       last_chunk_id => osiris_log_shared:last_chunk_id(Shared)};
 get_stats(Pid) when is_pid(Pid) ->
     erpc:call(node(Pid), ?MODULE, ?FUNCTION_NAME, [Pid]).
+
+get_writer_module(Config) ->
+    maps:get(writer_mod, Config, osiris_writer).
