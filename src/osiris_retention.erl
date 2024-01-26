@@ -9,6 +9,7 @@
 
 -behaviour(gen_server).
 
+-include("osiris.hrl").
 %% API functions
 -export([start_link/0,
          eval/4]).
@@ -65,15 +66,20 @@ handle_call(_Request, _From, State) ->
 %% @spec handle_cast(Msg, State) -> {noreply, State} |
 %%                                  {noreply, State, Timeout} |
 %%                                  {stop, Reason, State}
-handle_cast({eval, Pid, _Name, Dir, Specs, Fun} = Eval, State) ->
+handle_cast({eval, Pid, Name, Dir, Specs, Fun} = Eval, State) ->
     %% only do retention evaluation for stream processes that are
     %% alive as the callback Fun passed in would update a shared atomic
     %% value and this atomic is new per process incarnation
     case is_process_alive(Pid) of
         true ->
-            Result = osiris_log:evaluate_retention(Dir, Specs),
-            _ = Fun(Result),
-            {noreply, schedule(Eval, Result, State)};
+            try osiris_log:evaluate_retention(Dir, Specs) of
+                Result ->
+                    _ = Fun(Result),
+                    {noreply, schedule(Eval, Result, State)}
+            catch _:Err ->
+                      ?DEBUG_(Name, "retention evaluation failed with ~w", [Err]),
+                      {noreply, State}
+            end;
         false ->
             {noreply, State}
     end.
