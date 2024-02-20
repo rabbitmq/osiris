@@ -9,6 +9,7 @@
 -module(osiris_writer).
 
 -behaviour(gen_batch_server).
+-behaviour(osiris_member).
 
 -include("osiris.hrl").
 
@@ -32,6 +33,11 @@
          format_status/1,
          stop/1,
          delete/1]).
+
+%% osiris_member impl
+-export([start/2,
+         stop/2,
+         delete/2]).
 
 -define(C_COMMITTED_OFFSET, ?C_NUM_LOG_FIELDS + 1).
 -define(C_READERS, ?C_NUM_LOG_FIELDS + 2).
@@ -73,20 +79,33 @@
 
 -export_type([state/0]).
 
--callback start(Config :: map()) -> {ok, Writer :: pid()}.
-
-start(Config = #{name := Name, leader_node := Leader}) ->
-    supervisor:start_child({?SUP, Leader},
+-spec start(node(), Config :: osiris:config()) ->
+    supervisor:startchild_ret().
+start(Node, #{name := Name, leader_node := Node} = Config) ->
+    supervisor:start_child({?SUP, Node},
                            #{id => osiris_util:normalise_name(Name),
                              start => {?MODULE, start_link, [Config]},
                              restart => temporary,
                              shutdown => 5000,
                              type => worker}).
 
-stop(#{name := Name, leader_node := Node}) ->
-    %% stop child handles name normalisation
-    ?SUP:stop_child(Node, Name).
+-spec stop(node(), osiris:config()) ->
+    ok | {error, not_found}.
+stop(Node, #{leader_node := Node} = Config) ->
+    ?SUP:stop_child(Node, Config).
 
+-spec delete(node(), osiris:config()) ->
+    ok | {error, term()}.
+delete(Node, #{leader_node := Node} = Config) ->
+    ?SUP:delete_child(Node, Config).
+
+%% backwards compat
+start(#{leader_node := LeaderNode} = Config) ->
+    start(LeaderNode, Config).
+%% backwards compat
+stop(#{leader_node := Node} = Config) ->
+    stop(Node, Config).
+%% backwards compat
 delete(#{leader_node := Node} = Config) ->
     ?SUP:delete_child(Node, Config).
 

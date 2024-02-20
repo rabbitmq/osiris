@@ -8,6 +8,7 @@
 -module(osiris_replica).
 
 -behaviour(gen_server).
+-behaviour(osiris_member).
 
 -include("osiris.hrl").
 
@@ -86,6 +87,8 @@
 %%% API functions
 %%%===================================================================
 
+-spec start(node(), Config :: osiris:config()) ->
+    supervisor:startchild_ret().
 start(Node, Config = #{name := Name}) when ?IS_STRING(Name) ->
     case supervisor:start_child({?SUP, Node},
                                 #{id => Name,
@@ -105,10 +108,14 @@ start(Node, Config = #{name := Name}) when ?IS_STRING(Name) ->
             Err
     end.
 
+-spec stop(node(), osiris:config()) ->
+    ok | {error, not_found}.
 stop(Node, #{name := Name}) ->
     ?SUP:stop_child(Node, Name).
 
-delete(Node, Config = #{}) ->
+-spec delete(node(), osiris:config()) ->
+    ok | {error, term()}.
+delete(Node, Config) ->
     ?SUP:delete_child(Node, Config).
 
 %%--------------------------------------------------------------------
