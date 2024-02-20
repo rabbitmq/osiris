@@ -18,9 +18,8 @@
 
 %% API functions
 -export([start/2,
-         start_link/1,
-         stop/2,
-         delete/2]).
+         start_link/1
+        ]).
 %% Test
 -export([get_port/1, combine_ips_hosts/4]).
 %% gen_server callbacks
@@ -107,16 +106,6 @@ start(Node, Config = #{name := Name}) when ?IS_STRING(Name) ->
         Err ->
             Err
     end.
-
--spec stop(node(), osiris:config()) ->
-    ok | {error, not_found}.
-stop(Node, #{name := Name}) ->
-    ?SUP:stop_child(Node, Name).
-
--spec delete(node(), osiris:config()) ->
-    ok | {error, term()}.
-delete(Node, Config) ->
-    ?SUP:delete_child(Node, Config).
 
 %%--------------------------------------------------------------------
 %% @doc

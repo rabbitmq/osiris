@@ -26,10 +26,8 @@
 
          start_writer/1,
          start_replica/2,
-         stop_writer/1,
-         stop_replica/2,
-         delete_writer/1,
-         delete_replica/2,
+         stop_member/2,
+         delete_member/2,
 
          delete_cluster/1,
          configure_logger/1,
@@ -121,16 +119,18 @@ start_cluster(Config00 = #{name := Name}) ->
     end.
 
 stop_cluster(Config) ->
-    ok = stop_writer(Config),
-    [ok = stop_replica(N, Config)
+    WriterNode = maps:get(leader_node, Config),
+    ok = stop_member(WriterNode, Config),
+    [ok = stop_member(N, Config)
      || N <- maps:get(replica_nodes, Config)],
     ok.
 
 -spec delete_cluster(config()) -> ok.
 delete_cluster(Config) ->
-    [ok = delete_replica(N, Config)
+    [ok = delete_member(N, Config)
      || N <- maps:get(replica_nodes, Config)],
-    ok = delete_writer(Config).
+    WriterNode = maps:get(leader_node, Config),
+    ok = delete_member(WriterNode, Config).
 
 -spec start_writer(osiris:config()) ->
     supervisor:startchild_ret().
@@ -145,31 +145,15 @@ start_replica(Node, Config) ->
     Mod = maps:get(replica_mod, Config, osiris_replica),
     osiris_member:start(Mod, Node, Config).
 
--spec stop_writer(osiris:config()) ->
+-spec stop_member(node(), osiris:config()) ->
     ok | {error, not_found}.
-stop_writer(Config) ->
-    Mod = get_writer_module(Config),
-    Node = maps:get(leader_node, Config),
-    osiris_member:stop(Mod, Node, Config).
+stop_member(Node, Config) ->
+    osiris_member:stop(Node, Config).
 
--spec stop_replica(node(), osiris:config()) ->
+-spec delete_member(node(), osiris:config()) ->
     ok | {error, not_found}.
-stop_replica(Node, Config) ->
-    Mod = maps:get(replica_mod, Config, osiris_replica),
-    osiris_member:stop(Mod, Node, Config).
-
--spec delete_writer(osiris:config()) ->
-    ok | {error, not_found}.
-delete_writer(Config) ->
-    Mod = get_writer_module(Config),
-    Node = maps:get(leader_node, Config),
-    osiris_member:delete(Mod, Node, Config).
-
--spec delete_replica(node(), osiris:config()) ->
-    ok | {error, not_found}.
-delete_replica(Node, Config) ->
-    Mod = maps:get(replica_mod, Config, osiris_replica),
-    osiris_member:delete(Mod, Node, Config).
+delete_member(Node, Config) ->
+    osiris_member:delete(Node, Config).
 
 -spec write(Pid :: pid(), Data :: data()) -> ok.
 write(Pid, Data) ->

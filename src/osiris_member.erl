@@ -1,19 +1,15 @@
 -module(osiris_member).
 
+
+-include("osiris.hrl").
 -export([start/3,
-         stop/3,
-         delete/3]).
+         stop/2,
+         delete/2]).
 
 %% Callbacks
 
 -callback start(node(), osiris:config()) ->
     supervisor:startchild_ret().
-
--callback stop(node(), osiris:config()) ->
-    ok | {error, not_found}.
-
--callback delete(node(), osiris:config()) ->
-    ok | {error, term()}.
 
 %% API
 
@@ -22,12 +18,12 @@
 start(Mod, Node, Config) ->
     Mod:start(Node, Config).
 
--spec stop(module(), node(), osiris:config()) ->
+-spec stop(node(), osiris:config()) ->
     ok | {error, not_found}.
-stop(Mod, Node, Config) ->
-    Mod:stop(Node, Config).
+stop(Node, Config) ->
+    ?SUP:stop_child(Node, Config).
 
--spec delete(module(), node(), osiris:config()) ->
+-spec delete(node(), osiris:config()) ->
     ok | {error, term()}.
-delete(Mod, Node, Config) ->
-    Mod:delete(Node, Config).
+delete(Node, Config) ->
+    ?SUP:delete_child(Node, Config).
