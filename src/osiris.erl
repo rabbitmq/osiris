@@ -23,8 +23,12 @@
          update_retention/2,
          start_cluster/1,
          stop_cluster/1,
+
          start_writer/1,
          start_replica/2,
+         stop_member/2,
+         delete_member/2,
+
          delete_cluster/1,
          configure_logger/1,
          get_stats/1]).
@@ -103,7 +107,7 @@ start_cluster(Config00 = #{name := Name}) ->
     true = osiris_util:validate_base64uri(Name),
     %% ensure reference is set
     Config0 = maps:merge(#{reference => Name}, Config00),
-    case osiris_writer:start(Config0) of
+    case start_writer(Config0) of
         {ok, Pid} ->
             Config = Config0#{leader_pid => Pid},
             case start_replicas(Config) of
@@ -115,22 +119,41 @@ start_cluster(Config00 = #{name := Name}) ->
     end.
 
 stop_cluster(Config) ->
-    ok = osiris_writer:stop(Config),
-    [ok = osiris_replica:stop(N, Config)
+    WriterNode = maps:get(leader_node, Config),
+    ok = stop_member(WriterNode, Config),
+    [ok = stop_member(N, Config)
      || N <- maps:get(replica_nodes, Config)],
     ok.
 
 -spec delete_cluster(config()) -> ok.
 delete_cluster(Config) ->
-    [ok = osiris_replica:delete(R, Config)
-     || R <- maps:get(replica_nodes, Config)],
-    ok = osiris_writer:delete(Config).
+    [ok = delete_member(N, Config)
+     || N <- maps:get(replica_nodes, Config)],
+    WriterNode = maps:get(leader_node, Config),
+    ok = delete_member(WriterNode, Config).
 
+-spec start_writer(osiris:config()) ->
+    supervisor:startchild_ret().
 start_writer(Config) ->
-    osiris_writer:start(Config).
+    Mod = get_writer_module(Config),
+    Node = maps:get(leader_node, Config),
+    osiris_member:start(Mod, Node, Config).
 
-start_replica(Replica, Config) ->
-    osiris_replica:start(Replica, Config).
+-spec start_replica(node(), osiris:config()) ->
+    supervisor:startchild_ret().
+start_replica(Node, Config) ->
+    Mod = maps:get(replica_mod, Config, osiris_replica),
+    osiris_member:start(Mod, Node, Config).
+
+-spec stop_member(node(), osiris:config()) ->
+    ok | {error, not_found}.
+stop_member(Node, Config) ->
+    osiris_member:stop(Node, Config).
+
+-spec delete_member(node(), osiris:config()) ->
+    ok | {error, not_found}.
+delete_member(Node, Config) ->
+    osiris_member:delete(Node, Config).
 
 -spec write(Pid :: pid(), Data :: data()) -> ok.
 write(Pid, Data) ->
@@ -258,7 +281,7 @@ start_replicas(_Config, [], ReplicaPids) ->
     {ok, ReplicaPids};
 start_replicas(Config, [Node | Nodes], ReplicaPids) ->
     try
-        case osiris_replica:start(Node, Config) of
+        case start_replica(Node, Config) of
             {ok, Pid} ->
                 start_replicas(Config, Nodes, [Pid | ReplicaPids]);
             {ok, Pid, _} ->
@@ -293,3 +316,6 @@ get_stats(Pid)
       last_chunk_id => osiris_log_shared:last_chunk_id(Shared)};
 get_stats(Pid) when is_pid(Pid) ->
     erpc:call(node(Pid), ?MODULE, ?FUNCTION_NAME, [Pid]).
+
+get_writer_module(Config) ->
+    maps:get(writer_mod, Config, osiris_writer).

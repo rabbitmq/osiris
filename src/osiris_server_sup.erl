@@ -9,6 +9,7 @@
 
 -behaviour(supervisor).
 
+-include("osiris.hrl").
 -export([start_link/0]).
 -export([init/1,
          stop_child/2,
@@ -21,7 +22,9 @@ init([]) ->
     Procs = [],
     {ok, {{one_for_one, 1, 5}, Procs}}.
 
-stop_child(Node, Name) ->
+stop_child(Node, #{name := Name}) ->
+    stop_child(Node, Name);
+stop_child(Node, Name) when ?IS_STRING(Name) ->
     try
         %% as replicas are temporary we don't have to explicitly
         %% delete them

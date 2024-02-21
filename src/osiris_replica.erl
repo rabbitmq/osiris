@@ -8,6 +8,7 @@
 -module(osiris_replica).
 
 -behaviour(gen_server).
+-behaviour(osiris_member).
 
 -include("osiris.hrl").
 
@@ -17,9 +18,8 @@
 
 %% API functions
 -export([start/2,
-         start_link/1,
-         stop/2,
-         delete/2]).
+         start_link/1
+        ]).
 %% Test
 -export([get_port/1, combine_ips_hosts/4]).
 %% gen_server callbacks
@@ -86,6 +86,8 @@
 %%% API functions
 %%%===================================================================
 
+-spec start(node(), Config :: osiris:config()) ->
+    supervisor:startchild_ret().
 start(Node, Config = #{name := Name}) when ?IS_STRING(Name) ->
     case supervisor:start_child({?SUP, Node},
                                 #{id => Name,
@@ -104,12 +106,6 @@ start(Node, Config = #{name := Name}) when ?IS_STRING(Name) ->
         Err ->
             Err
     end.
-
-stop(Node, #{name := Name}) ->
-    ?SUP:stop_child(Node, Name).
-
-delete(Node, Config = #{}) ->
-    ?SUP:delete_child(Node, Config).
 
 %%--------------------------------------------------------------------
 %% @doc
