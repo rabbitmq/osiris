@@ -18,8 +18,7 @@
 start(Mod, Node, Config) ->
     Mod:start(Node, Config).
 
--spec stop(node(), osiris:config()) ->
-    ok | {error, not_found}.
+-spec stop(node(), osiris:config()) -> ok.
 stop(Node, Config) ->
     ?SUP:stop_child(Node, Config).
 

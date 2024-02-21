@@ -50,9 +50,9 @@ all_tests() ->
      cluster_restart_new_leader,
      cluster_delete,
      cluster_failure,
+     restart_replica,
      replica_reader_failure_should_stop_replica,
      start_cluster_invalid_replicas,
-     restart_replica,
      replica_unknown_command,
      diverged_replica,
      retention,
@@ -1020,13 +1020,13 @@ restart_replica(Config) ->
     _ = [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>]) || N <- Msgs],
     wait_for_written(Msgs),
     timer:sleep(100),
-    ok = erpc:call(node(R1Pid), gen_server, stop, [R1Pid]),
+    ok = osiris:stop_member(node(R1Pid), Conf),
     _ = [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>]) || N <- Msgs],
     wait_for_written(Msgs),
-    {ok, _Replica1b} = osiris_replica:start(node(R1Pid), Conf),
+    {ok, _Replica1b} = osiris:start_replica(node(R1Pid), Conf),
     _ = [osiris:write(LeaderE1Pid, undefined, N, [<<N:64/integer>>]) || N <- Msgs],
     wait_for_written(Msgs),
-    timer:sleep(1000),
+    [stop_peer(Ref) || {Ref, _} <- PeerStates],
     ok.
 
 

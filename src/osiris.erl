@@ -145,8 +145,7 @@ start_replica(Node, Config) ->
     Mod = maps:get(replica_mod, Config, osiris_replica),
     osiris_member:start(Mod, Node, Config).
 
--spec stop_member(node(), osiris:config()) ->
-    ok | {error, not_found}.
+-spec stop_member(node(), osiris:config()) -> ok.
 stop_member(Node, Config) ->
     osiris_member:stop(Node, Config).
 
