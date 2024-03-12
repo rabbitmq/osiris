@@ -144,19 +144,22 @@ init(#{hosts := Hosts,
                     {ok, State};
                 {error, no_process} ->
                     ?WARN_(Name,
-                           "osiris writer for ~0p is down, replica reader will not start",
+                           "osiris writer for ~0p is down,
+                           replica reader will not start",
                           [ExtRef]),
-                    {stop, writer_unavailable};
-                {error, {offset_out_of_range, Range} = Reason} ->
+                    {stop, normal};
+                {error, {offset_out_of_range, Range}} ->
                     ?WARN_(Name,
-                           "data reader found an offset out of range: ~0p, replica reader will not start",
-                          [Range]),
-                    {stop, Reason};
-                {error, {invalid_last_offset_epoch, Epoch, Offset} = Reason} ->
+                           "data reader requested an offset (~b) that was out
+                           of range: ~0p, replica reader will not start",
+                          [StartOffset, Range]),
+                    {stop, normal};
+                {error, {invalid_last_offset_epoch, Epoch, Offset}} ->
                     ?WARN_(Name,
-                           "data reader found an invalid last offset epoch: epoch ~0p offset ~0p, replica reader will not start",
+                           "data reader found an invalid last offset epoch:
+                           epoch ~0p offset ~0p, replica reader will not start",
                            [Epoch, Offset]),
-                    {stop, Reason}
+                    {stop, normal}
             end;
         {error, Reason} ->
             ?WARN_(Name, "could not connect replica reader to replica at ~0p port ~b, Reason: ~0p",
