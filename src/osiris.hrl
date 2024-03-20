@@ -45,6 +45,7 @@
 -define(IDX_HEADER_SIZE, 8).
 -define(LOG_HEADER_SIZE, 8).
 -define(FILE_OPTS_WRITE, [raw, binary, write, read]).
+-define(INDEX_RECORD_SIZE_B, 29).
 
 
 %% chunk types

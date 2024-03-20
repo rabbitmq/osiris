@@ -86,22 +86,9 @@ all_tests() ->
      offset_tracking_snapshot,
      many_segment_overview,
      small_chunk_overview,
-     overview
+     overview,
+     init_partial_writes
     ].
-
--define(assertMatch_(Guard, Expr),
-        begin
-            case (Expr) of
-                Guard -> ok;
-                X__V -> erlang:error({assertMatch,
-                                      [{module, ?MODULE},
-                                       {line, ?LINE},
-                                       {expression, (??Expr)},
-                                       {pattern, (??Guard)},
-                                       {value, X__V}]})
-            end
-        end).
-
 
 groups() ->
     [{tests, [], all_tests()}].
@@ -1274,8 +1261,8 @@ overview(Config) ->
 
 init_corrupted_log(Config) ->
     % this test intentionally corrupts the log in a way we observed
-    % when a working system was suddenly powered off; since index
-    % is written first, it contains an entry for a chunk that was not
+    % when a working system was suddenly powered off;
+    % the index contains an entry for a chunk that was not
     % written; additionally the index contains some trailing zeros
     % index:
     % | index header
@@ -1354,13 +1341,9 @@ init_only_one_corrupted_segment(Config) ->
     osiris_log:close(Log),
 
     % we should have 2 segments for this test
-    IdxFiles =
-    filelib:wildcard(
-      filename:join(LDir, "*.index")),
+    IdxFiles = filelib:wildcard(filename:join(LDir, "*.index")),
     ?assertEqual(2, length(IdxFiles)),
-    SegFiles =
-    filelib:wildcard(
-      filename:join(LDir, "*.segment")),
+    SegFiles = filelib:wildcard(filename:join(LDir, "*.segment")),
     ?assertEqual(2, length(SegFiles)),
 
     % delete the first segment
@@ -1728,7 +1711,75 @@ many_segment_overview(Config) ->
     ct:pal("RetentionTaken ~p", [RetentionTaken]),
     ok.
 
+init_partial_writes(Config) ->
+    run_scenario(Config, []),
+    %% chunk body missing
+    run_scenario(Config, [{segment, {eof, -27}}]),
+    %% chunk body missing, empty space
+    run_scenario(Config, 23, 23, [{segment, {eof, -27}},
+                                  {segment, {eof, 27}}]),
+    %% last index record missing
+    run_scenario(Config, [{index, {eof, -?INDEX_RECORD_SIZE_B}}]),
+
+    run_scenario(Config, [{index, 4096},
+                          {segment, 4096 * 10}]),
+    run_scenario(Config, [{segment, 0}]),
+    ok.
+
+run_scenario(Config, Scenario) ->
+    run_scenario(Config, 2, 23, Scenario).
+
+run_scenario(Config, NumChunks, MsgSize, Scenario) ->
+    ct:pal("Running ~p", [Scenario]),
+    LDir = ?config(leader_dir, Config),
+    Conf = #{dir => LDir,
+             epoch => 1,
+             max_segment_size_bytes => 4096 * 256,
+             name => ?config(test_case, Config)},
+    Msg = crypto:strong_rand_bytes(MsgSize),
+    EpochChunks = [{1, [Msg]} || _ <- lists:seq(1, NumChunks)],
+    Log0 = seed_log(LDir, EpochChunks, Config),
+    SegPath = filename:join(LDir, "00000000000000000000.segment"),
+    IdxPath = filename:join(LDir, "00000000000000000000.index"),
+    % record the segment and index sizes before corrupting the log
+    % ValidSegSize = filelib:file_size(SegPath),
+    % ValidIdxSize = filelib:file_size(IdxPath),
+    osiris_log:close(Log0),
+
+    [begin
+         case T of
+             {index, At} ->
+                 truncate_at(IdxPath, At);
+             {segment, At} ->
+                 truncate_at(SegPath, At)
+         end
+     end || T <- Scenario],
+
+    Conf2 = Conf#{epoch => 2},
+    Log1 = osiris_log:init(Conf2),
+    _ = osiris_log:recover_tracking(Log1),
+    Log2 = osiris_log:write([<<"AAAAFFFFTTTEEEERRR">>], Log1),
+    osiris_log:close(Log2),
+
+    Log3 = osiris_log:init(Conf2#{epoch => 3}),
+    _ = osiris_log:recover_tracking(Log3),
+    _ = osiris_log:close(Log3),
+
+    %% this reads and parses every chunk in the segment
+    dump_segment(SegPath),
+    delete_dir(LDir),
+
+    ok.
+
 %% Utility
+
+truncate_at(File, Pos) ->
+    {ok, Fd} = file:open(File, [raw, binary, read, write]),
+    % truncate the file so that chunk <<four>> is missing and <<three>> is corrupted
+    {ok, _} = file:position(Fd, Pos),
+    _ = file:truncate(Fd),
+    _ = file:close(Fd),
+    ok.
 
 seed_log(Conf, EpochChunks, Config) ->
     Trk = osiris_tracking:init(undefined, #{}),
@@ -1792,3 +1843,28 @@ write_committed(Entries, S0) ->
     osiris_log_shared:set_last_chunk_id(Shared, ChId),
     {ChId, S}.
 
+dump_segment(Path) ->
+    dump_segment0(osiris_log:dump_init(Path)).
+
+dump_segment0(Fd) ->
+    case osiris_log:dump_chunk(Fd) of
+        eof ->
+            ok;
+        #{crc_match := false} = Ch ->
+            ct:fail("crc invalid ~p", [Ch]);
+        _Map ->
+            % ct:pal("DUMP CHUNK: ~p", [Map]),
+            dump_segment0(Fd)
+    end.
+
+delete_dir(Dir) ->
+    case file:list_dir(Dir) of
+        {ok, Files} ->
+            [ok =
+                 file:delete(
+                     filename:join(Dir, F))
+             || F <- Files],
+            ok = file:del_dir(Dir);
+        {error, enoent} ->
+            ok
+    end.

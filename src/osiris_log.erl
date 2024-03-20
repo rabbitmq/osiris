@@ -65,10 +65,8 @@
 
 % maximum size of a segment in bytes
 -define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
-% -define(MIN_SEGMENT_SIZE_B, 4_000_000).
 % maximum number of chunks per segment
 -define(DEFAULT_MAX_SEGMENT_SIZE_C, 256_000).
--define(INDEX_RECORD_SIZE_B, 29).
 -define(C_OFFSET, 1).
 -define(C_FIRST_OFFSET, 2).
 -define(C_FIRST_TIMESTAMP, 3).
@@ -443,7 +441,7 @@
          epoch :: epoch(),
          num :: non_neg_integer(),
          type :: chunk_type(),
-         %% size of data + trailer
+         %% size of data + filter + trailer
          size :: non_neg_integer(),
          %% position in segment file
          pos :: integer()
@@ -578,7 +576,7 @@ init(#{dir := Dir,
             {ok, Size} = file:position(SegFd, Size),
             %% maybe_fix_corrupted_files has truncated the index to the last
             %% record pointing
-            %% at a valid chunk we can now truncate the segment to size i
+            %% at a valid chunk we can now truncate the segment to size in
             %% case there is trailing data
             ok = file:truncate(SegFd),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
@@ -1720,11 +1718,19 @@ close(#?MODULE{cfg = #cfg{counter_id = CntId,
             osiris_counters:delete(CntId)
     end.
 
-delete_directory(#{name := Name} = Config) when is_map(Config) ->
+delete_directory(#{name := Name,
+                   dir := _} = Config) ->
+    Dir = directory(Config),
+    ?DEBUG_(Name, " deleting directory ~ts", [Dir]),
+    delete_dir(Dir);
+delete_directory(#{name := Name}) ->
     delete_directory(Name);
 delete_directory(Name) when ?IS_STRING(Name) ->
     Dir = directory(Name),
     ?DEBUG_(Name, " deleting directory ~ts", [Dir]),
+    delete_dir(Dir).
+
+delete_dir(Dir) ->
     case file:list_dir(Dir) of
         {ok, Files} ->
             [ok =
@@ -2359,9 +2365,8 @@ write_chunk(Chunk,
             counters:add(CntRef, ?C_CHUNKS, 1),
             maybe_set_first_offset(Next, Cfg),
             State#?MODULE{mode =
-                          Write#write{tail_info =
-                                      {NextOffset,
-                                       {Epoch, Next, Timestamp}},
+                          Write#write{tail_info = {NextOffset,
+                                                   {Epoch, Next, Timestamp}},
                                       segment_size = {SegSizeBytes + Size,
                                                       SegSizeChunks + 1}}}
     end.
