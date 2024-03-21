@@ -55,7 +55,8 @@ jobs:
 
         jq '.' ${MODULE_NAME}.json
 
-        bazel run //tools:add_module -- \
+        pip install -r tools/requirements_lock.txt
+        python3 tools/add_module.py \
           --input=${MODULE_NAME}.json
 
         git diff
