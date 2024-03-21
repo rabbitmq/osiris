@@ -2727,14 +2727,22 @@ part(Len, [B | L]) when Len > 0 ->
 
 -spec recover_tracking(state()) ->
     osiris_tracking:state().
-recover_tracking(#?MODULE{cfg = #cfg{tracking_config = TrkConfig},
-                          fd = Fd}) ->
+recover_tracking(#?MODULE{cfg = #cfg{directory = Dir,
+                                     tracking_config = TrkConfig},
+                          current_file = File}) ->
+    %% we need to open a new file handle here as we cannot use the one that is
+    %% being used for appending to the segment as pread _may_ move the file
+    %% position on some systems (such as windows)
+    {ok, Fd} = open(filename:join(Dir, File), [read, raw, binary]),
+    _ = file:advise(Fd, 0, 0, random),
     %% TODO: if the first chunk in the segment isn't a tracking snapshot and
     %% there are prior segments we could scan at least two segments increasing
     %% the chance of encountering a snapshot and thus ensure we don't miss any
     %% tracking entries
-    Trk = osiris_tracking:init(undefined, TrkConfig),
-    recover_tracking(Fd, Trk, ?LOG_HEADER_SIZE).
+    Trk0 = osiris_tracking:init(undefined, TrkConfig),
+    Trk = recover_tracking(Fd, Trk0, ?LOG_HEADER_SIZE),
+    _ = file:close(Fd),
+    Trk.
 
 recover_tracking(Fd, Trk0, Pos0) ->
     case file:pread(Fd, Pos0, ?HEADER_SIZE_B) of
