@@ -8,181 +8,176 @@ on:
         description: The branch, tag or commit of rabbitmq-server to use
         default: main
 env:
-  GENERIC_UNIX_ARCHIVE: ${{ github.workspace }}/rabbitmq-server/bazel-bin/package-generic-unix.tar.xz
+  REGISTRY_IMAGE: pivotalrabbitmq/rabbitmq
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
-
-  build-publish-dev:
+  build-package-generic-unix:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - image_tag_suffix: otp-max
-            otp_major: 25
+    outputs:
+      TAG_1: ${{ steps.tags.outputs.TAG_1 }}
+      TAG_2: ${{ steps.tags.outputs.TAG_2 }}
+      TAG_3: ${{ steps.tags.outputs.TAG_3 }}
+      TAG_4: ${{ steps.tags.outputs.TAG_4 }}
     steps:
-      - name: Checkout Osiris
-        uses: actions/checkout@v3
-        with:
-          path: osiris
-
-      - name: Inject the git sha as the osiris version
-        working-directory: osiris
-        run: |
-          sed -i"_orig" -E '/VERSION/ s/module_version\(\)/"${{ github.event.pull_request.head.sha || github.sha }}"/' BUILD.bazel
-          git diff
-
       - name: Checkout RabbitMQ
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
           repository: rabbitmq/rabbitmq-server
           ref: ${{ github.event.inputs.rabbitmq_ref }}
-          path: rabbitmq-server
-
-      - name: Mount Bazel Cache
-        uses: actions/cache@v1
+      - name: Checkout Osiris
+        uses: actions/checkout@v4
         with:
-          path: "/home/runner/repo-cache/"
-          key: repo-cache
-
-      - name: Configure Bazel
-        working-directory: rabbitmq-server
+          path: deps/osiris
+      - name: Patch Osiris version
+        working-directory: deps/osiris
         run: |
-          if [ -n "${{ secrets.BUILDBUDDY_API_KEY }}" ]; then
-          cat << EOF >> user.bazelrc
-            build:buildbuddy --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_API_KEY }}
-          EOF
-          fi
-          cat << EOF >> user.bazelrc
-            build:buildbuddy --build_metadata=ROLE=CI
-            build:buildbuddy --build_metadata=VISIBILITY=PRIVATE
-            build:buildbuddy --repository_cache=/home/runner/repo-cache/
-            build:buildbuddy --color=yes
-            build:buildbuddy --disk_cache=
-
-            build:buildbuddy --remote_download_toplevel
-          EOF
-
-      - name: Load OTP Version Info
-        working-directory: rabbitmq-server
-        id: load-info
-        run: |
-          bazelisk build :otp_version --config=rbe-${{ matrix.otp_major }}
-          echo "::set-output name=otp::$(cat bazel-bin/otp_version.txt)"
-
-      - name: Load RabbitMQ Version Info
-        id: load-rabbitmq-info
-        working-directory: rabbitmq-server
-        run: |
-          echo "::set-output name=RABBITMQ_SHA::$(git rev-parse HEAD)"
-          echo "::set-output name=RABBITMQ_REF::$(git rev-parse --abbrev-ref HEAD)"
-
-      - name: Build generic unix package with this osiris
-        working-directory: rabbitmq-server
-        run: |
-          sed -i"_orig" -E '/APP_VERSION/ s/3\.[0-9]+\.[0-9]+/${{ steps.load-rabbitmq-info.outputs.RABBITMQ_SHA }}/' rabbitmq.bzl
-          bazelisk build :package-generic-unix \
-            --config=rbe-${{ matrix.otp_major }} \
-            --override_module rabbitmq_osiris=${{ github.workspace }}/osiris
-
-          # check that override did indeed work
-          set -o pipefail
-          if ! tar --list -f ./bazel-bin/package-generic-unix.tar.xz  | grep -F "plugins/osiris-${{ github.event.pull_request.head.sha || github.sha }}/ebin/osiris.app" ; then
-            echo "Failed to override osiris repo"
-            ls bazel-bin/external/ | grep osiris
-            exit 1
-          fi
-
-      - name: Resolve generic unix package path
-        run: |
-          echo "::set-output name=ARTIFACT_PATH::$(readlink -f ${GENERIC_UNIX_ARCHIVE})"
-        id: resolve-artifact-path
-
-      - name: Save the package as a workflow artifact
-        uses: actions/upload-artifact@v3
+          sed -i"_orig" "/PROJECT_VERSION =/ s/[0-9]+\\.[0-9]+\\.[0-9]+/${{ github.event.pull_request.head.sha || github.sha }}/" Makefile
+      - name: Configure Erlang
+        uses: erlef/setup-beam@v1
         with:
-          name: rabbitmq-package-generic-unix-${{ steps.load-info.outputs.otp }}.tar.xz
-          path: ${{ steps.resolve-artifact-path.outputs.ARTIFACT_PATH }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Cache Docker layers
-        uses: actions/cache@v3
+          otp-version: 26.2
+          elixir-version: 1.15
+      - name: make package-generic-unix
+        run: |
+          make package-generic-unix
+      - name: Upload package-generic-unix
+        uses: actions/upload-artifact@v4.3.1
         with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-${{ matrix.image_tag_suffix }}-buildx-${{ github.event.pull_request.head.sha || github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-${{ matrix.image_tag_suffix }}-buildx-
-
-      - name: Check for Push Credentials
-        id: authorized
+          name: package-generic-unix
+          path: PACKAGES/rabbitmq-server-*.tar.xz
+      - name: Compute Tags
+        id: tags
         run: |
-          if [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
-            echo "::set-output name=PUSH::true"
-          else
-            echo "::set-output name=PUSH::false"
-          fi
+          OTP="$(erl -eval '{ok, Version} = file:read_file(filename:join([code:root_dir(), "releases", erlang:system_info(otp_release), "OTP_VERSION"])), io:fwrite(Version), halt().' -noshell)"
 
-      - name: Login to DockerHub
-        if: steps.authorized.outputs.PUSH == 'true'
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_PASSWORD }}
-
-      - name: Expand generic-unix-package
-        working-directory: rabbitmq-server/packaging/docker-image
-        run: |
-          xzcat ${GENERIC_UNIX_ARCHIVE} | tar xvf -
-
-      - name: Compute Image Tags
-        id: compute-tags
-        run: |
-          RABBIT_REF=${{ steps.load-rabbitmq-info.outputs.RABBITMQ_REF }}
-          RABBIT_SHA=${{ steps.load-rabbitmq-info.outputs.RABBITMQ_SHA }}
+          RABBIT_SHA=$(git rev-parse HEAD)
+          RABBIT_REF=$(git rev-parse --abbrev-ref HEAD)
 
           OSIRIS_SHA=${{ github.event.pull_request.head.sha || github.sha }}
           OSIRIS_ABBREV=osiris-${OSIRIS_SHA:0:7}
 
-          TAG_1=rabbitmq-${RABBIT_REF}-${OSIRIS_ABBREV}-${{ steps.load-info.outputs.otp }}
-          TAG_2=rabbitmq-${RABBIT_REF}-${OSIRIS_ABBREV}-${{ matrix.image_tag_suffix }}
-          TAG_3=rabbitmq-${RABBIT_SHA:0:7}-${OSIRIS_ABBREV}-${{ steps.load-info.outputs.otp }}
-          TAG_4=rabbitmq-${RABBIT_SHA:0:7}-${OSIRIS_ABBREV}-${{ matrix.image_tag_suffix }}
+          TAG_1=rabbitmq-${RABBIT_REF}-${OSIRIS_ABBREV}-${OTP}
+          TAG_2=rabbitmq-${RABBIT_REF}-${OSIRIS_ABBREV}-otp-max-bazel
+          TAG_3=rabbitmq-${RABBIT_SHA:0:7}-${OSIRIS_ABBREV}-${OTP}
+          TAG_4=rabbitmq-${RABBIT_SHA:0:7}-${OSIRIS_ABBREV}-otp-max-bazel
 
-          echo "Will tag with ${TAG_1}"
-          echo "Will tag with ${TAG_2}"
-          echo "Will tag with ${TAG_3}"
-          echo "Will tag with ${TAG_4}"
+          echo "TAG_1=$TAG_1" | tee -a $GITHUB_OUTPUT
+          echo "TAG_2=$TAG_2" | tee -a $GITHUB_OUTPUT
+          echo "TAG_3=$TAG_3" | tee -a $GITHUB_OUTPUT
+          echo "TAG_4=$TAG_4" | tee -a $GITHUB_OUTPUT
 
-          echo "::set-output name=TAG_1::${TAG_1}"
-          echo "::set-output name=TAG_2::${TAG_2}"
-          echo "::set-output name=TAG_3::${TAG_3}"
-          echo "::set-output name=TAG_4::${TAG_4}"
-
-      - name: Build and push
+  build:
+    needs: build-package-generic-unix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+    steps:
+      - name: Prepare
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          repository: rabbitmq/rabbitmq-server
+          ref: ${{ github.event.inputs.rabbitmq_ref }}
+      - name: Download package-generic-unix
+        uses: actions/download-artifact@v4
+        with:
+          name: package-generic-unix
+          path: PACKAGES
+      - name: Rename package-generic-unix
+        run: |
+          cp \
+            PACKAGES/rabbitmq-server-generic-unix-*.tar.xz \
+            packaging/docker-image/package-generic-unix.tar.xz
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          tags: |
+            type=raw,value=${{ needs.build-package-generic-unix.outputs.TAG_1 }}
+            type=raw,value=${{ needs.build-package-generic-unix.outputs.TAG_2 }}
+            type=raw,value=${{ needs.build-package-generic-unix.outputs.TAG_3 }}
+            type=raw,value=${{ needs.build-package-generic-unix.outputs.TAG_4 }}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v5
         with:
-          context: rabbitmq-server/packaging/docker-image
-          pull: true
-          push: ${{ steps.authorized.outputs.PUSH }}
-          tags: |
-            pivotalrabbitmq/rabbitmq:${{ steps.compute-tags.outputs.TAG_1 }}
-            pivotalrabbitmq/rabbitmq:${{ steps.compute-tags.outputs.TAG_2 }}
-            pivotalrabbitmq/rabbitmq:${{ steps.compute-tags.outputs.TAG_3 }}
-            pivotalrabbitmq/rabbitmq:${{ steps.compute-tags.outputs.TAG_4 }}
-          build-args: |
-            SKIP_PGP_VERIFY=true
-            PGP_KEYSERVER=pgpkeys.eu
-            OTP_VERSION=${{ steps.load-info.outputs.otp }}
-            SKIP_OTP_VERIFY=true
-            RABBITMQ_BUILD=rabbitmq_server-${{ steps.load-rabbitmq-info.outputs.RABBITMQ_SHA }}
-          cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache-new
-
-      # Temp fix
-      # https://github.com/docker/build-push-action/issues/252
-      # https://github.com/moby/buildkit/issues/1896
-      - name: Move cache
+          context: packaging/docker-image
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=ghcr.io/rabbitmq/rabbitmq:buildcache-${{ env.PLATFORM_PAIR }}
+          outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+      - name: Export digest
         run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    runs-on: ubuntu-latest
+    needs:
+      - build-package-generic-unix
+      - build
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY_IMAGE }}
+          tags: |
+            type=raw,value=${{ needs.build-package-generic-unix.outputs.TAG_1 }}
+            type=raw,value=${{ needs.build-package-generic-unix.outputs.TAG_2 }}
+            type=raw,value=${{ needs.build-package-generic-unix.outputs.TAG_3 }}
+            type=raw,value=${{ needs.build-package-generic-unix.outputs.TAG_4 }}
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}
+      - name: Create manifest list and push
+        working-directory: /tmp/digests
+        run: |
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
+      - name: Inspect image
+        run: |
+          docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
