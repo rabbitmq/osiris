@@ -144,8 +144,14 @@ init(#{hosts := Hosts,
                     {ok, State};
                 {error, no_process} ->
                     ?WARN_(Name,
-                           "osiris writer for ~0p is down,
-                           replica reader will not start",
+                           "osiris writer for ~0p is down, "
+                           "replica reader will not start",
+                          [ExtRef]),
+                    {stop, normal};
+                {error, enoent} ->
+                    ?WARN_(Name,
+                           "data reader for ~0p encountered an 'enonet' error whilst
+                           initialising, replica reader will not start",
                           [ExtRef]),
                     {stop, normal};
                 {error, {offset_out_of_range, Range}} ->

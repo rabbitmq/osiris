@@ -268,7 +268,8 @@ handle_continue(#{name := Name0,
                               log = Log,
                               parse_state = undefined}};
                 {error, Reason} ->
-                    {stop, Reason, undefined}
+                    ?WARN_(Name, " failed to start replica reader. Reason ~0p", [Reason]),
+                    {stop, {shutdown, Reason}, undefined}
             end
     end.
 
