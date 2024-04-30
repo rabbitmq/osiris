@@ -971,7 +971,8 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
 -spec init_data_reader(osiris:tail_info(), config()) ->
     {ok, state()} |
     {error, {offset_out_of_range, empty | {offset(), offset()}}} |
-    {error, {invalid_last_offset_epoch, epoch(), offset()}}.
+    {error, {invalid_last_offset_epoch, epoch(), offset()}} |
+    {error, file:posix()}.
 init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir,
                                             name := Name} = Config) ->
     IdxFiles = sorted_index_files(Dir),
@@ -989,19 +990,19 @@ init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir,
         _ when PrevEOT == empty ->
             %% this assumes the offset is in range
             %% first we need to validate PrevEO
-            {ok, init_data_reader_from(
-                   StartChunkId,
-                   find_segment_for_offset(StartChunkId, IdxFiles),
-                   Config)};
+            init_data_reader_from(StartChunkId,
+                                  find_segment_for_offset(StartChunkId,
+                                                          IdxFiles),
+                                  Config);
         _ ->
             {PrevEpoch, PrevChunkId, _PrevTs} = PrevEOT,
             case check_chunk_has_expected_epoch(Name, PrevChunkId,
                                                 PrevEpoch, IdxFiles) of
                 ok ->
-                    {ok, init_data_reader_from(
-                           StartChunkId,
-                           find_segment_for_offset(StartChunkId, IdxFiles),
-                           Config)};
+                    init_data_reader_from(StartChunkId,
+                                          find_segment_for_offset(StartChunkId,
+                                                                  IdxFiles),
+                                          Config);
                 {error, _} = Err ->
                     Err
             end
@@ -1029,25 +1030,30 @@ init_data_reader_at(ChunkId, FilePos, File,
                     #{dir := Dir, name := Name,
                       shared := Shared,
                       readers_counter_fun := CountersFun} = Config) ->
-    {ok, Fd} = file:open(File, [raw, binary, read]),
-    Cnt = make_counter(Config),
-    counters:put(Cnt, ?C_OFFSET, ChunkId - 1),
-    CountersFun(1),
-    #?MODULE{cfg =
-                 #cfg{directory = Dir,
-                      counter = Cnt,
-                      counter_id = counter_id(Config),
-                      name = Name,
-                      readers_counter_fun = CountersFun,
-                      shared = Shared
-                     },
-             mode =
-                 #read{type = data,
-                       next_offset = ChunkId,
-                       chunk_selector = all,
-                       position = FilePos,
-                       transport = maps:get(transport, Config, tcp)},
-             fd = Fd}.
+    case file:open(File, [raw, binary, read]) of
+        {ok, Fd} ->
+            Cnt = make_counter(Config),
+            counters:put(Cnt, ?C_OFFSET, ChunkId - 1),
+            CountersFun(1),
+            {ok,
+             #?MODULE{cfg =
+                      #cfg{directory = Dir,
+                           counter = Cnt,
+                           counter_id = counter_id(Config),
+                           name = Name,
+                           readers_counter_fun = CountersFun,
+                           shared = Shared
+                          },
+                      mode =
+                      #read{type = data,
+                            next_offset = ChunkId,
+                            chunk_selector = all,
+                            position = FilePos,
+                            transport = maps:get(transport, Config, tcp)},
+                      fd = Fd}};
+        Err ->
+            Err
+    end.
 
 init_data_reader_from(ChunkId,
                       {end_of_log, #seg_info{file = File,

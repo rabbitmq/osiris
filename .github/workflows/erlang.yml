@@ -35,7 +35,6 @@ jobs:
       fail-fast: false
       matrix:
         otp_major:
-        - "24"
         - "25"
         - "26"
     steps:
