@@ -12,6 +12,8 @@
 
 -include("osiris.hrl").
 
+-define(DEFAULT_PORT_RANGE, {6000, 6500}).
+
 %% osiris replica, starts TCP listener ("server side" of the link),
 %% spawns remote reader, TCP listener replicates and
 %% confirms latest offset back to primary
@@ -163,7 +165,8 @@ handle_continue(#{name := Name0,
         {badrpc, Reason} ->
             {stop, {badrpc, Reason}, undefined};
         {ok, {LeaderRange, LeaderEpochOffs}} ->
-            {ok, {Min, Max}} = application:get_env(port_range),
+            {Min, Max} = application:get_env(osiris, port_range,
+                                             ?DEFAULT_PORT_RANGE),
             Transport = application:get_env(osiris, replication_transport, tcp),
             Self = self(),
             CntName = {?MODULE, ExtRef},

@@ -1,16 +1,18 @@
 PROJECT = osiris
-PROJECT_DESCRIPTION = Foundation of the log-based streaming subsystem for RabbitMQ
-PROJECT_VERSION = 1.8.1
+# PROJECT_DESCRIPTION = Foundation of the log-based streaming subsystem for RabbitMQ
+# PROJECT_VERSION = 1.8.1
 
-define PROJECT_ENV
-[
-	{data_dir, "/tmp/osiris"},
-	{port_range, {6000, 6500}},
-	{max_segment_size_chunks, 256000},
-	{replication_transport, tcp},
-	{replica_forced_gc_default_interval, 4999}
-]
-endef
+# define PROJECT_ENV
+# [
+# 	{data_dir, "/tmp/osiris"},
+# 	{port_range, {6000, 6500}},
+# 	{max_segment_size_chunks, 256000},
+# 	{replication_transport, tcp},
+# 	{replica_forced_gc_default_interval, 4999}
+# ]
+# endef
+#
+# This project uses an app.src file
 
 LOCAL_DEPS = sasl crypto
 dep_gen_batch_server = hex 0.8.8
