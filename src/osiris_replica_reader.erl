@@ -250,7 +250,14 @@ handle_info({'DOWN', Ref, _, _, Info},
            [Info, 10]),
     %% this should be enough to make the replica shut down
     ok = close(Transport, Sock),
-    {stop, Info, State};
+    %% If the reason is `noproc`, it means the leader is already gone at the
+    %% time `init/1` was called. Therefore the set of processes is being shut
+    %% down concurrently. We can exit with the `normal` reason in this case.
+    Reason = case Info of
+                 noproc -> normal;
+                 _ -> Info
+             end,
+    {stop, Reason, State};
 handle_info({tcp_closed, Socket},
             #state{name = Name, socket = Socket} = State) ->
     ?DEBUG_(Name, "Socket closed. Exiting...", []),
