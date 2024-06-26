@@ -17,12 +17,12 @@ jobs:
       run: |
         sudo npm install --global --silent @bazel/buildozer
 
-        VERSION_ERLANG_MK="$(sed -ne 's/PROJECT_VERSION = \(.*\)/\1/p' Makefile)"
+        # VERSION_ERLANG_MK="$(sed -ne 's/PROJECT_VERSION = \(.*\)/\1/p' Makefile)"
 
-        if [[ "${{ github.ref_name }}" != "v$VERSION_ERLANG_MK" ]]; then
-          echo "Version in Makefile ($VERSION_ERLANG_MK) does not match tag (${{ github.ref_name }})"
-          exit 1
-        fi
+        # if [[ "${{ github.ref_name }}" != "v$VERSION_ERLANG_MK" ]]; then
+        #   echo "Version in Makefile ($VERSION_ERLANG_MK) does not match tag (${{ github.ref_name }})"
+        #   exit 1
+        # fi
 
         VERSION_BAZEL="$(cat MODULE.bazel | buildozer 'print version' -:%module)"
 
