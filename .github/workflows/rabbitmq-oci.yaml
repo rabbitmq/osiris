@@ -40,8 +40,8 @@ jobs:
       - name: Configure Erlang
         uses: erlef/setup-beam@v1
         with:
-          otp-version: 26.2
-          elixir-version: 1.15
+          otp-version: 27.0
+          elixir-version: 1.17
       - name: make package-generic-unix
         run: |
           make package-generic-unix
