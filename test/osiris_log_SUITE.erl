@@ -71,6 +71,7 @@ all_tests() ->
      % truncate,
      % truncate_multi_segment,
      accept_chunk,
+     accept_chunk_inital_offset,
      init_acceptor_truncates_tail,
      accept_chunk_truncates_tail,
      accept_chunk_does_not_truncate_tail_in_same_epoch,
@@ -1061,6 +1062,27 @@ init_epoch_offsets_multi_segment2(Config) ->
     osiris_log:close(Log0),
     ok.
 
+accept_chunk_inital_offset(Config) ->
+    ok = logger:set_primary_config(level, all),
+    Conf = ?config(osiris_conf, Config),
+
+
+    Ch1 = fake_chunk([<<"blob1">>], ?LINE, 1, 100),
+
+    F0 = osiris_log:init(Conf#{initial_offset => 100}, acceptor),
+    F1 = osiris_log:accept_chunk(Ch1, F0),
+    ?assertEqual(101, osiris_log:next_offset(F1)),
+
+    Dir = maps:get(dir, Conf),
+    {ok, Files} = file:list_dir(Dir),
+    [ok = file:delete(filename:join(Dir, F)) || F <- Files],
+    osiris_log:close(F1),
+
+    X0 = osiris_log:init(Conf#{initial_offset => 200}, acceptor),
+    ?assertEqual(200, osiris_log:next_offset(X0)),
+
+    ok.
+
 accept_chunk(Config) ->
     ok = logger:set_primary_config(level, all),
     Conf = ?config(osiris_conf, Config),
@@ -1868,3 +1890,8 @@ delete_dir(Dir) ->
         {error, enoent} ->
             ok
     end.
+
+fake_chunk(Blobs, Ts, Epoch, NextChId) ->
+    iolist_to_binary(
+      element(1,
+              osiris_log:make_chunk(Blobs, <<>>, 0, Ts, Epoch, NextChId, 16))).

@@ -60,7 +60,8 @@
 %% for testing
 -export([
          sorted_index_files/1,
-         index_files_unsorted/1
+         index_files_unsorted/1,
+         make_chunk/7
         ]).
 
 % maximum size of a segment in bytes
