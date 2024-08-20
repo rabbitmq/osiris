@@ -600,6 +600,7 @@ init(#{dir := Dir,
             {ok, SegFd} = open(Filename, ?FILE_OPTS_WRITE),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, _} = file:position(SegFd, ?LOG_HEADER_SIZE),
+            counters:put(Cnt, ?C_SEGMENTS, 1),
             %% the segment could potentially have trailing data here so we'll
             %% do a truncate just in case. The index would have been truncated
             %% earlier
@@ -2040,8 +2041,8 @@ overview(Dir) ->
 index_files_with_segment([<<_:20/binary, ".segment">> | Rem], Dir, Acc) ->
     %% orphaned segment file, ignore
     index_files_with_segment(Rem, Dir, Acc);
-index_files_with_segment([<<_:20/binary, ".index">> = I,
-                          <<_:20/binary, ".segment">>
+index_files_with_segment([<<Name:20/binary, ".index">> = I,
+                          <<Name:20/binary, ".segment">>
                            | Rem], Dir, Acc) ->
     index_files_with_segment(Rem, Dir, [filename:join(Dir, I) | Acc]);
 index_files_with_segment(_, _, Acc) ->
