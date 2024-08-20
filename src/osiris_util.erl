@@ -8,6 +8,7 @@
 -module(osiris_util).
 
 -include("osiris.hrl").
+-include_lib("kernel/include/file.hrl").
 
 -export([validate_base64uri/1,
          to_base64uri/1,
@@ -20,7 +21,9 @@
          partition_parallel/3,
          normalise_name/1,
          get_reader_context/1,
-         cache_reader_context/6
+         cache_reader_context/6,
+         is_dir/1,
+         is_file/1
         ]).
 
 %% For testing
@@ -292,4 +295,20 @@ cache_reader_context(Pid, Dir, Name, Shared, Ref, ReadersCounterFun)
                       {Pid, Dir, Name, Shared, Ref, ReadersCounterFun}),
     ok.
 
+is_dir(Dir) ->
+    case prim_file:read_file_info(Dir) of
+        {ok, #file_info{type=directory}} ->
+            true;
+        _ ->
+            false
+    end.
 
+is_file(File) ->
+    case prim_file:read_file_info(File) of
+        {ok, #file_info{type = directory}} ->
+            true;
+        {ok, #file_info{type = regular}} ->
+            true;
+        _ ->
+            false
+    end.
