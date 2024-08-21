@@ -88,7 +88,9 @@ all_tests() ->
      many_segment_overview,
      small_chunk_overview,
      overview,
-     init_partial_writes
+     init_partial_writes,
+     overview_with_missing_segment,
+     overview_with_missing_segment_at_start
     ].
 
 groups() ->
@@ -154,7 +156,7 @@ init_recover(Config) ->
     S2 = osiris_log:init(?config(osiris_conf, Config)),
     ?assertEqual(1, osiris_log:next_offset(S2)),
     %% validate the segment filename is recovered
-    ?assertMatch(#{file := "00000000000000000000.segment"},
+    ?assertMatch(#{file := <<"00000000000000000000.segment">>},
                  osiris_log:format_status(S2)),
     ok.
 
@@ -1411,20 +1413,16 @@ init_empty_last_files(Config) ->
     osiris_log:close(Log),
 
     % we should have 2 segments for this test
-    IdxFiles =
-    filelib:wildcard(
-      filename:join(LDir, "*.index")),
+    IdxFiles = filelib:wildcard(filename:join(LDir, "*.index")),
     ?assertEqual(2, length(IdxFiles)),
-    SegFiles =
-    filelib:wildcard(
-      filename:join(LDir, "*.segment")),
+    SegFiles = filelib:wildcard(filename:join(LDir, "*.segment")),
     ?assertEqual(2, length(SegFiles)),
 
     % truncate both files (by opening with "write" but without "read")
     LastIdxFile = lists:last(IdxFiles),
     LastSegFile = lists:last(SegFiles),
     {ok, IdxFd} = file:open(LastIdxFile, [raw, binary, write]),
-    _ =file:close(IdxFd),
+    _ = file:close(IdxFd),
     {ok, SegFd} = file:open(LastSegFile, [raw, binary, write]),
     _ = file:close(SegFd),
 
@@ -1791,6 +1789,62 @@ run_scenario(Config, NumChunks, MsgSize, Scenario) ->
     dump_segment(SegPath),
     delete_dir(LDir),
 
+    ok.
+
+overview_with_missing_segment(Config) ->
+    Data = crypto:strong_rand_bytes(1500),
+    EpochChunks =
+        [begin {1, [Data || _ <- lists:seq(1, 50)]} end
+         || _ <- lists:seq(1, 20)],
+    Dir = ?config(dir, Config),
+    Log = seed_log(Dir, EpochChunks, Config),
+    osiris_log:close(Log),
+    Segments =
+        filelib:wildcard(
+            filename:join(?config(dir, Config), "*.segment")),
+    Indexes =
+        filelib:wildcard(
+            filename:join(?config(dir, Config), "*.index")),
+    ?assertEqual(2, length(Segments)),
+    SegDelete = hd(lists:reverse(lists:sort(Segments))),
+    ok = file:delete(SegDelete),
+    %% empty index file (this case was reported by user:
+    %% https://github.com/rabbitmq/rabbitmq-server/issues/12036)
+    truncate_at(lists:last(Indexes), 0),
+    %% init should delete any index files without corresponding segments
+    _ = osiris_log:init(?config(osiris_conf, Config)),
+    ?assertEqual(1, length(
+                      filelib:wildcard(
+                        filename:join(?config(dir, Config), "*.segment")))),
+    ?assertEqual(1, length(
+                      filelib:wildcard(
+                        filename:join(?config(dir, Config), "*.index")))),
+    ok.
+
+overview_with_missing_segment_at_start(Config) ->
+    Data = crypto:strong_rand_bytes(1500),
+    EpochChunks =
+        [begin {1, [Data || _ <- lists:seq(1, 50)]} end
+         || _ <- lists:seq(1, 20)],
+    Dir = ?config(dir, Config),
+    Log = seed_log(Dir, EpochChunks, Config),
+    osiris_log:close(Log),
+    Indexes =
+        filelib:wildcard(
+            filename:join(?config(dir, Config), "*.index")),
+    ?assertEqual(2, length(Indexes)),
+    IdxDelete = hd(lists:sort(Indexes)),
+    ok = file:delete(IdxDelete),
+    %% missing segment file due to crash during retention deletion
+    %% https://github.com/rabbitmq/rabbitmq-server/issues/12036)
+    %% init should delete any index files without corresponding segments
+    _ = osiris_log:init(?config(osiris_conf, Config)),
+    ?assertEqual(1, length(
+                      filelib:wildcard(
+                        filename:join(?config(dir, Config), "*.segment")))),
+    ?assertEqual(1, length(
+                      filelib:wildcard(
+                        filename:join(?config(dir, Config), "*.index")))),
     ok.
 
 %% Utility

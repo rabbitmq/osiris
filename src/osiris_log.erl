@@ -61,7 +61,8 @@
 -export([
          sorted_index_files/1,
          index_files_unsorted/1,
-         make_chunk/7
+         make_chunk/7,
+         orphaned_segments/1
         ]).
 
 % maximum size of a segment in bytes
@@ -75,8 +76,8 @@
 -define(C_SEGMENTS, 5).
 -define(COUNTER_FIELDS,
         [
-         {offset, ?C_OFFSET, counter, "The last offset (not chunk id) in the log for writers. The last offset read for readers"
-         },
+         {offset, ?C_OFFSET, counter,
+          "The last offset (not chunk id) in the log for writers. The last offset read for readers" },
          {first_offset, ?C_FIRST_OFFSET, counter, "First offset, not updated for readers"},
          {first_timestamp, ?C_FIRST_TIMESTAMP, counter, "First timestamp, not updated for readers"},
          {chunks, ?C_CHUNKS, counter, "Number of chunks read or written, incremented even if a reader only reads the header"},
@@ -599,6 +600,7 @@ init(#{dir := Dir,
             {ok, SegFd} = open(Filename, ?FILE_OPTS_WRITE),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, _} = file:position(SegFd, ?LOG_HEADER_SIZE),
+            counters:put(Cnt, ?C_SEGMENTS, 1),
             %% the segment could potentially have trailing data here so we'll
             %% do a truncate just in case. The index would have been truncated
             %% earlier
@@ -618,7 +620,16 @@ init(#{dir := Dir,
 maybe_fix_corrupted_files([]) ->
     ok;
 maybe_fix_corrupted_files(#{dir := Dir}) ->
-    ok = maybe_fix_corrupted_files(sorted_index_files(Dir));
+    ok = maybe_fix_corrupted_files(sorted_index_files(Dir)),
+    %% dangling segments can be left behind if the server process crashes
+    %% after the retention evaluator process deleted the index but
+    %% before it deleted the corresponding segment
+    [begin
+         ?INFO("deleting left over segment '~s' in directory ~s",
+               [F, Dir]),
+         ok = prim_file:delete(filename:join(Dir, F))
+     end|| F <- orphaned_segments(Dir)],
+    ok;
 maybe_fix_corrupted_files([IdxFile]) ->
     SegFile = segment_from_index_file(IdxFile),
     ok = truncate_invalid_idx_records(IdxFile, file_size_or_zero(SegFile)),
@@ -656,7 +667,8 @@ maybe_fix_corrupted_files(IdxFiles) ->
             ok = truncate_invalid_idx_records(LastIdxFile, LastSegFileSize)
     catch missing_file ->
             % if the last segment is missing, just delete its index
-            ?WARNING("deleting index of the missing last segment file: ~0p", [LastSegFile]),
+            ?WARNING("deleting index of the missing last segment file: ~0p",
+                     [LastSegFile]),
             ok = prim_file:delete(LastIdxFile),
             maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile])
     end.
@@ -1785,8 +1797,7 @@ sorted_index_files(#{index_files := IdxFiles}) ->
 sorted_index_files(#{dir := Dir}) ->
     sorted_index_files(Dir);
 sorted_index_files(Dir) when ?IS_STRING(Dir) ->
-    Files = index_files_unsorted(Dir),
-    lists:sort(Files).
+    index_files(Dir, fun lists:sort/1).
 
 sorted_index_files_rev(#{index_files := IdxFiles}) ->
     %% cached
@@ -1794,19 +1805,31 @@ sorted_index_files_rev(#{index_files := IdxFiles}) ->
 sorted_index_files_rev(#{dir := Dir}) ->
     sorted_index_files_rev(Dir);
 sorted_index_files_rev(Dir) ->
-    Files = index_files_unsorted(Dir),
-    lists:sort(fun erlang:'>'/2, Files).
+    index_files(Dir, fun (Files) ->
+                             lists:sort(fun erlang:'>'/2, Files)
+                     end).
 
 index_files_unsorted(Dir) ->
-    case prim_file:list_dir(Dir) of
-        {error, enoent} ->
-            [];
-        {ok, Files} ->
-            [filename:join(Dir, F)
-             || F <- Files,
-                filename:extension(F) == ".index" orelse
-                filename:extension(F) == <<".index">>]
-    end.
+    index_files(Dir, fun (X) -> X end).
+
+index_files(Dir, SortFun) ->
+    [filename:join(Dir, F)
+     || <<_:20/binary, ".index">> = F <- SortFun(list_dir(Dir))].
+
+orphaned_segments(Dir) ->
+    orphaned_segments(lists:sort(list_dir(Dir)), []).
+
+orphaned_segments([], Acc) ->
+    Acc;
+orphaned_segments([<<_:20/binary, ".index">>], Acc) ->
+    Acc;
+orphaned_segments([<<Name:20/binary, ".index">>,
+                   <<Name:20/binary, ".segment">> | _Rem],
+                  Acc) ->
+    %% when we find a matching pair we can return
+    Acc;
+orphaned_segments([<<_:20/binary, ".segment">> = Dangler | Rem], Acc) ->
+    orphaned_segments(Rem, [Dangler | Acc]).
 
 first_and_last_seginfos(#{index_files := IdxFiles}) ->
     first_and_last_seginfos0(IdxFiles);
@@ -1998,9 +2021,15 @@ build_segment_info(SegFile, LastChunkPos, IdxFile) ->
             end
     end.
 
--spec overview(term()) -> {range(), [{epoch(), offset()}]}.
+-spec overview(file:filename_all()) ->
+    {range(), [{epoch(), offset()}]}.
 overview(Dir) ->
-    case sorted_index_files(Dir) of
+    Files = list_dir(Dir),
+    %% index files with matching segment
+    %% init/1 would repair this situation however as overview may
+    %% be called before init/1 happens on a system we need to
+    %% explicitly filter these out
+    case index_files_with_segment(lists:sort(Files), Dir, []) of
         [] ->
             {empty, []};
         IdxFiles ->
@@ -2008,6 +2037,18 @@ overview(Dir) ->
             EpochOffsets = last_epoch_chunk_ids(<<>>, IdxFiles),
             {Range, EpochOffsets}
     end.
+
+index_files_with_segment([<<_:20/binary, ".segment">> | Rem], Dir, Acc) ->
+    %% orphaned segment file, ignore
+    index_files_with_segment(Rem, Dir, Acc);
+index_files_with_segment([<<Name:20/binary, ".index">> = I,
+                          <<Name:20/binary, ".segment">>
+                           | Rem], Dir, Acc) ->
+    index_files_with_segment(Rem, Dir, [filename:join(Dir, I) | Acc]);
+index_files_with_segment(_, _, Acc) ->
+    lists:reverse(Acc).
+
+
 
 -spec format_status(state()) -> map().
 format_status(#?MODULE{cfg = #cfg{directory = Dir,
@@ -3166,6 +3207,14 @@ iter_read_ahead(Fd, Pos, _ChunkId, _Crc, Credit0, DataSize, NumEntries) ->
     Size = DataSize div NumEntries * Credit,
     {ok, Data} = file:pread(Fd, Pos, Size + ?ITER_READ_AHEAD_B),
     Data.
+
+list_dir(Dir) ->
+    case prim_file:list_dir(Dir) of
+        {error, enoent} ->
+            [];
+        {ok, Files} ->
+            [list_to_binary(F) || F <- Files]
+    end.
 
 -ifdef(TEST).
 
