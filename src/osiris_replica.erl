@@ -416,7 +416,7 @@ handle_cast({register_offset_listener, Pid, EvtFormatter, Offset},
             #?MODULE{offset_listeners = Listeners} = State0) ->
     State1 =
         State0#?MODULE{offset_listeners =
-                           [{Pid, Offset, EvtFormatter} | Listeners]},
+                       [{Pid, Offset, EvtFormatter} | Listeners]},
     State = notify_offset_listeners(State1),
     {noreply, State};
 handle_cast(Msg, #?MODULE{cfg = #cfg{name = Name}} = State) ->
