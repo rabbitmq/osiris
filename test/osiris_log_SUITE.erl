@@ -89,8 +89,9 @@ all_tests() ->
      small_chunk_overview,
      overview,
      init_partial_writes,
+     init_with_unexpected_file,
      overview_with_missing_segment,
-     overview_with_missing_segment_at_start
+     overview_with_missing_index_at_start
     ].
 
 groups() ->
@@ -1791,6 +1792,23 @@ run_scenario(Config, NumChunks, MsgSize, Scenario) ->
 
     ok.
 
+init_with_unexpected_file(Config) ->
+    Data = crypto:strong_rand_bytes(1500),
+    EpochChunks =
+        [begin {1, [Data || _ <- lists:seq(1, 50)]} end
+         || _ <- lists:seq(1, 20)],
+    Dir = ?config(dir, Config),
+    Log = seed_log(Dir, EpochChunks, Config),
+    osiris_log:close(Log),
+    Segments = filelib:wildcard(filename:join(Dir, "*.segment")),
+    Indexes = filelib:wildcard(filename:join(Dir, "*.index")),
+    ?assertEqual(2, length(Segments)),
+    ?assertEqual(2, length(Indexes)),
+    ok = file:write_file(filename:join(Dir, ".nfs000000000000000000"), <<"bananas">>),
+    _ = osiris_log:init(?config(osiris_conf, Config)),
+    ?assertEqual({{0,999},[{1,950}]}, osiris_log:overview(Dir)),
+    ok.
+
 overview_with_missing_segment(Config) ->
     Data = crypto:strong_rand_bytes(1500),
     EpochChunks =
@@ -1821,7 +1839,7 @@ overview_with_missing_segment(Config) ->
                         filename:join(?config(dir, Config), "*.index")))),
     ok.
 
-overview_with_missing_segment_at_start(Config) ->
+overview_with_missing_index_at_start(Config) ->
     Data = crypto:strong_rand_bytes(1500),
     EpochChunks =
         [begin {1, [Data || _ <- lists:seq(1, 50)]} end
