@@ -1829,7 +1829,10 @@ orphaned_segments([<<Name:20/binary, ".index">>,
     %% when we find a matching pair we can return
     Acc;
 orphaned_segments([<<_:20/binary, ".segment">> = Dangler | Rem], Acc) ->
-    orphaned_segments(Rem, [Dangler | Acc]).
+    orphaned_segments(Rem, [Dangler | Acc]);
+orphaned_segments([_Unexpected | Rem], Acc) ->
+    %% just ignore unexpected files
+    orphaned_segments(Rem, Acc).
 
 first_and_last_seginfos(#{index_files := IdxFiles}) ->
     first_and_last_seginfos0(IdxFiles);
@@ -2038,15 +2041,15 @@ overview(Dir) ->
             {Range, EpochOffsets}
     end.
 
-index_files_with_segment([<<_:20/binary, ".segment">> | Rem], Dir, Acc) ->
-    %% orphaned segment file, ignore
-    index_files_with_segment(Rem, Dir, Acc);
+index_files_with_segment([], _, Acc) ->
+    lists:reverse(Acc);
 index_files_with_segment([<<Name:20/binary, ".index">> = I,
                           <<Name:20/binary, ".segment">>
                            | Rem], Dir, Acc) ->
     index_files_with_segment(Rem, Dir, [filename:join(Dir, I) | Acc]);
-index_files_with_segment(_, _, Acc) ->
-    lists:reverse(Acc).
+index_files_with_segment([_OrphanedOrUnexpected | Rem], Dir, Acc) ->
+    %% orphaned segment file or unexpected file, ignore
+    index_files_with_segment(Rem, Dir, Acc).
 
 
 
