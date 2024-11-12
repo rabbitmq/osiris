@@ -1,6 +1,6 @@
 {application,osiris,
     [{description,"Foundation of the log-based streaming subsystem for RabbitMQ"},
-    {vsn,"1.8.2"},
+    {vsn,"1.8.4"},
     {licenses,["Apache-2.0","MPL-2.0"]},
     {links,[{"github","https://github.com/rabbitmq/osiris"}]},
     {modules,[]},
