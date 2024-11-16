@@ -19,15 +19,15 @@ jobs:
         - "26"
         - "27"
     steps:
-    - name: CHECKOUT
+    - name: Clone the repository
       uses: actions/checkout@v2
-    - name: CONFIGURE ERLANG
+    - name: Set up Erlang/OTP
       uses: erlef/setup-beam@v1
       with:
         otp-version: ${{ matrix.erlang_version }}
-    - name: BUILD
+    - name: Build
       run: make
-    - name: CHECK
+    - name: Run tests
       run: make check
 
   build-bazel:
@@ -38,8 +38,8 @@ jobs:
         otp_major:
         - "26"
     steps:
-    - name: CHECKOUT
+    - name: Clone the repository
       uses: actions/checkout@v2
-    - name: TEST
+    - name: Run tests
       run: |
         bazelisk test //... --config=rbe-${{ matrix.otp_major }}
