@@ -17,6 +17,7 @@ jobs:
       matrix:
         erlang_version:
         - "26"
+        - "27"
     steps:
     - name: CHECKOUT
       uses: actions/checkout@v2
@@ -35,7 +36,6 @@ jobs:
       fail-fast: false
       matrix:
         otp_major:
-        - "25"
         - "26"
     steps:
     - name: CHECKOUT
