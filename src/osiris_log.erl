@@ -36,7 +36,9 @@
          read_chunk_parsed/1,
          read_chunk_parsed/2,
          committed_offset/1,
+         committed_chunk_id/1,
          set_committed_chunk_id/2,
+         last_chunk_id/1,
          get_current_epoch/1,
          get_directory/1,
          get_name/1,
@@ -538,6 +540,7 @@ init(#{dir := Dir,
     case first_and_last_seginfos(Config) of
         none ->
             osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
+            osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
             open_new_segment(#?MODULE{cfg = Cfg,
                                       mode =
                                           #write{type = WriterType,
@@ -607,6 +610,7 @@ init(#{dir := Dir,
             ok = file:truncate(SegFd),
             {ok, _} = file:position(IdxFd, ?IDX_HEADER_SIZE),
             osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
+            osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
@@ -1333,7 +1337,11 @@ last_user_chunk_id_in_index(NextPos, IdxFd) ->
     end.
 
 -spec committed_offset(state()) -> integer().
-committed_offset(#?MODULE{cfg = #cfg{shared = Ref}}) ->
+committed_offset(State) ->
+    committed_chunk_id(State).
+
+-spec committed_chunk_id(state()) -> integer().
+committed_chunk_id(#?MODULE{cfg = #cfg{shared = Ref}}) ->
     osiris_log_shared:committed_chunk_id(Ref).
 
 -spec set_committed_chunk_id(state(), offset()) -> ok.
@@ -1341,6 +1349,10 @@ set_committed_chunk_id(#?MODULE{mode = #write{},
                                 cfg = #cfg{shared = Ref}}, ChunkId)
   when is_integer(ChunkId) ->
     osiris_log_shared:set_committed_chunk_id(Ref, ChunkId).
+
+-spec last_chunk_id(state()) -> integer().
+last_chunk_id(#?MODULE{cfg = #cfg{shared = Ref}}) ->
+    osiris_log_shared:last_chunk_id(Ref).
 
 -spec get_current_epoch(state()) -> non_neg_integer().
 get_current_epoch(#?MODULE{mode = #write{current_epoch = Epoch}}) ->

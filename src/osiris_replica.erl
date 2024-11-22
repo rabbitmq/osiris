@@ -59,7 +59,7 @@
         {cfg :: #cfg{},
          parse_state :: parse_state(),
          log :: osiris_log:state(),
-         committed_offset = -1 :: -1 | osiris:offset(),
+         committed_chunk_id = -1 :: -1 | osiris:offset(),
          offset_listeners = [] ::
              [{pid(), osiris:offset(), mfa() | undefined}]
         }).
@@ -364,7 +364,7 @@ handle_call(get_reader_context, _From,
                               directory = Dir,
                               reference = Ref,
                               counter = CntRef},
-                     committed_offset = COffs,
+                     committed_chunk_id = COffs,
                      log = Log} =
                 State) ->
     Shared = osiris_log:get_shared(Log),
@@ -397,28 +397,43 @@ handle_call(Unknown, _From,
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast({committed_offset, Offs},
+handle_cast({committed_offset, CommittedChId},
             #?MODULE{cfg = #cfg{counter = Cnt},
                      log = Log,
-                     committed_offset = Last} =
+                     committed_chunk_id = LastCommittedChId} =
                 State) ->
-    case Offs > Last of
+    case CommittedChId > LastCommittedChId of
         true ->
             %% notify offset listeners
-            counters:put(Cnt, ?C_COMMITTED_OFFSET, Offs),
-            ok = osiris_log:set_committed_chunk_id(Log, Offs),
+            counters:put(Cnt, ?C_COMMITTED_OFFSET, CommittedChId),
+            ok = osiris_log:set_committed_chunk_id(Log, CommittedChId),
             {noreply,
-             notify_offset_listeners(State#?MODULE{committed_offset = Offs})};
+             notify_offset_listeners(
+               State#?MODULE{committed_chunk_id = CommittedChId})};
         false ->
             State
     end;
 handle_cast({register_offset_listener, Pid, EvtFormatter, Offset},
-            #?MODULE{offset_listeners = Listeners} = State0) ->
-    State1 =
-        State0#?MODULE{offset_listeners =
-                       [{Pid, Offset, EvtFormatter} | Listeners]},
-    State = notify_offset_listeners(State1),
-    {noreply, State};
+            #?MODULE{cfg = #cfg{reference = Ref,
+                                event_formatter = DefaultFmt},
+                     log = Log,
+                     offset_listeners = Listeners} = State) ->
+    Max = max_readable_chunk_id(Log),
+    case Offset =< Max of
+        true ->
+            %% only evaluate the request, the rest will be evaluated
+            %% when data is written or committed
+            Evt = wrap_osiris_event(
+                    select_formatter(EvtFormatter, DefaultFmt),
+                    {osiris_offset, Ref, Max}),
+            Pid ! Evt,
+            {noreply, State};
+        false ->
+            %% queue the offset listener for later
+            {noreply,
+             State#?MODULE{offset_listeners = [{Pid, Offset, EvtFormatter} |
+                                               Listeners]}}
+    end;
 handle_cast(Msg, #?MODULE{cfg = #cfg{name = Name}} = State) ->
     ?DEBUG_(Name, "osiris_replica unhandled cast ~w", [Msg]),
     {noreply, State}.
@@ -521,14 +536,14 @@ handle_info({'EXIT', Ref, Info},
     {stop, unexpected_exit, State}.
 
 handle_incoming_data(Socket, Bin,
-            #?MODULE{cfg =
-                         #cfg{socket = Socket,
-                              leader_pid = LeaderPid,
-                              transport = Transport,
-                              counter = Cnt},
-                     parse_state = ParseState0,
-                     log = Log0} =
-                State0) ->
+                     #?MODULE{cfg =
+                              #cfg{socket = Socket,
+                                   leader_pid = LeaderPid,
+                                   transport = Transport,
+                                   counter = Cnt},
+                              parse_state = ParseState0,
+                              log = Log0} =
+                     State0) ->
     counters:add(Cnt, ?C_PACKETS, 1),
     %% deliberately ignoring return value here as it would fail if the
     %% tcp connection has been closed and we still want to try to process
@@ -547,8 +562,8 @@ handle_incoming_data(Socket, Bin,
         undefined ->
             {noreply, State1};
         _ ->
-            State = notify_offset_listeners(State1),
             ok = osiris_writer:ack(LeaderPid, OffsetTimestamp),
+            State = notify_offset_listeners(State1),
             {noreply, State}
     end.
 
@@ -594,7 +609,7 @@ format_status(#{state := #?MODULE{cfg = #cfg{name = Name,
                                   log = Log,
                                   parse_state = ParseState,
                                   offset_listeners = OffsetListeners,
-                                  committed_offset = CommittedOffset}} = Status) ->
+                                  committed_chunk_id = CommittedOffset}} = Status) ->
     maps:update(state,
                 #{name => Name,
                   external_reference => ExtRef,
@@ -670,34 +685,28 @@ parse_chunk(Bin, {FirstOffsetTs, IOData, RemSize}, Acc) ->
     {{FirstOffsetTs, [Bin | IOData], RemSize - byte_size(Bin)},
      lists:reverse(Acc)}.
 
-notify_offset_listeners(#?MODULE{cfg =
-                                     #cfg{reference = Ref,
-                                          event_formatter = EvtFmt},
-                                 committed_offset = COffs,
+notify_offset_listeners(#?MODULE{cfg = #cfg{reference = Ref,
+                                            event_formatter = EvtFmt},
+                                 committed_chunk_id = CommittedChId,
                                  log = Log,
-                                 offset_listeners = L0} =
-                            State) ->
-    case osiris_log:tail_info(Log) of
-        {_NextOffs, {_, LastChId, _LastTs}} ->
-            Max = min(COffs, LastChId),
-            %% do not notify offset listeners if the committed offset isn't
-            %% available locally yet
-            {Notify, L} =
-                lists:splitwith(fun({_Pid, O, _}) -> O =< Max end, L0),
-            _ = [begin
-                     Evt =
-                         %% the per offset listener event formatter takes precedence of
-                         %% the process scoped one
-                         wrap_osiris_event(
-                           select_formatter(Fmt, EvtFmt),
-                           {osiris_offset, Ref, COffs}),
-                     P ! Evt
-                 end
-                 || {P, _, Fmt} <- Notify],
-            State#?MODULE{offset_listeners = L};
-        _ ->
-            State
-    end.
+                                 offset_listeners = L0} = State) ->
+    Max = max_readable_chunk_id(Log),
+    {Notify, L} =
+        lists:partition(fun({_Pid, O, _}) -> O =< Max end, L0),
+    _ = [begin
+             Evt =
+             %% the per offset listener event formatter takes precedence of
+             %% the process scoped one
+                 wrap_osiris_event(
+                   select_formatter(Fmt, EvtFmt),
+                   {osiris_offset, Ref, CommittedChId}),
+             P ! Evt
+         end
+         || {P, _, Fmt} <- Notify],
+    State#?MODULE{offset_listeners = L}.
+
+max_readable_chunk_id(Log) ->
+    min(osiris_log:committed_offset(Log), osiris_log:last_chunk_id(Log)).
 
 %% INTERNAL
 
