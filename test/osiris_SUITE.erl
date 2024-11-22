@@ -535,6 +535,7 @@ cluster_offset_listener(Config) ->
           replica_nodes => Replicas},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     {ok, Log0} = osiris:init_reader(Leader, 0, {test, []}),
+    0 = osiris_log:next_offset(Log0),
     osiris:register_offset_listener(Leader, 0),
     ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
     receive
@@ -572,6 +573,9 @@ replica_offset_listener(Config) ->
               fun() ->
                  {ok, Log0} = osiris:init_reader(R, 0, {test, []}),
                  osiris:register_offset_listener(R, 0),
+                 %% gh 172 - ensure a higher offset listener does not block
+                 %% a lower one
+                 osiris:register_offset_listener(R, 1),
                  receive
                      {osiris_offset, _Name, O} when O > -1 ->
                          ct:pal("got offset ~w", [O]),
@@ -585,6 +589,7 @@ replica_offset_listener(Config) ->
                      exit(osiris_offset_timeout)
                  end
               end),
+    timer:sleep(100),
     ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
 
     receive
