@@ -160,8 +160,17 @@ handle_continue(#{name := Name0,
         {error, no_process} ->
             ?INFO_(Name, "Writer process not alive, exiting...", []),
             {stop, {shutdown, writer_unavailable}, undefined};
+        missing_file ->
+            ?INFO_(Name, "missing file returned from writer, exiting...", []),
+            {stop, {shutdown, missing_file}, undefined};
         {error, _} = Err ->
             {stop, Err, undefined};
+        {badrpc, {'EXIT', shutdown}} ->
+            ?INFO_(Name, "Writer process shutting down, exiting...", []),
+            {stop, {shutdown, writer_unavailable}, undefined};
+        {badrpc, nodedown} ->
+            ?INFO_(Name, "Writer process node is down, exiting...", []),
+            {stop, {shutdown, writer_unavailable}, undefined};
         {badrpc, Reason} ->
             {stop, {badrpc, Reason}, undefined};
         {ok, {LeaderRange, LeaderEpochOffs}} ->
