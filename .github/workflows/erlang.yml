@@ -29,17 +29,3 @@ jobs:
       run: make
     - name: Run tests
       run: make check
-
-  build-bazel:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        otp_major:
-        - "26"
-    steps:
-    - name: Clone the repository
-      uses: actions/checkout@v2
-    - name: Run tests
-      run: |
-        bazelisk test //... --config=rbe-${{ matrix.otp_major }}
