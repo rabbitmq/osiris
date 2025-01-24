@@ -206,6 +206,7 @@ handle_continue(#{name := Name,
   when ?IS_STRING(Name) ->
     process_flag(trap_exit, true),
     process_flag(message_queue_data, off_heap),
+    process_flag(fullsweep_after, 0),
     Log = osiris_log:init(Config),
     %% reader context can only be cached _after_ log init as we need to ensure
     %% there is at least 1 segment/index pair and also that the log has been
