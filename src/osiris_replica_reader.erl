@@ -330,7 +330,9 @@ do_sendfile0(#state{name = Name,
         {ok, Log} ->
             do_sendfile0(State#state{log = Log});
         {error, _Err} ->
-            ok = setopts(Transport, Sock, [{nopush, false}]),
+            %% ignore return value here as we've already hit an error
+            %% and it is likely we'll get another one when setting opts
+            _ = setopts(Transport, Sock, [{nopush, false}]),
             ?DEBUG_(Name, "sendfile err ~w", [_Err]),
             State;
         {end_of_stream, Log} ->
