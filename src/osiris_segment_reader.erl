@@ -9,6 +9,7 @@
          sorted_index_files/1,
          offset_range_from_idx_files/1,
          build_seg_info/1,
+         maybe_fix_corrupted_files/1,
          find_segment_for_offset/2,
          first_and_last_seginfos/1]).
 
@@ -1025,3 +1026,101 @@ next_location(#chunk_info{id = Id,
                           pos = Pos,
                           size = Size}) ->
     {Id + Num, Pos + Size + ?HEADER_SIZE_B}.
+
+maybe_fix_corrupted_files([]) ->
+    ok;
+maybe_fix_corrupted_files(#{dir := Dir}) ->
+    ok = maybe_fix_corrupted_files(sorted_index_files(Dir)),
+    %% dangling segments can be left behind if the server process crashes
+    %% after the retention evaluator process deleted the index but
+    %% before it deleted the corresponding segment
+    [begin
+         ?INFO("deleting left over segment '~s' in directory ~s",
+               [F, Dir]),
+         ok = prim_file:delete(filename:join(Dir, F))
+     end|| F <- orphaned_segments(Dir)],
+    ok;
+maybe_fix_corrupted_files([IdxFile]) ->
+    SegFile = osiris_log:segment_from_index_file(IdxFile),
+    ok = truncate_invalid_idx_records(IdxFile, file_size_or_zero(SegFile)),
+    case file_size(IdxFile) =< ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B of
+        true ->
+            % the only index doesn't contain a single valid record
+            % make sure it has a valid header
+            {ok, IdxFd} = file:open(IdxFile, ?FILE_OPTS_WRITE),
+            ok = file:write(IdxFd, ?IDX_HEADER),
+            ok = file:close(IdxFd);
+        false ->
+            ok
+    end,
+    case file_size_or_zero(SegFile) =< ?LOG_HEADER_SIZE + ?HEADER_SIZE_B of
+        true ->
+            % the only segment doesn't contain a single valid chunk
+            % make sure it has a valid header
+            {ok, SegFd} = file:open(SegFile, ?FILE_OPTS_WRITE),
+            ok = file:write(SegFd, ?LOG_HEADER),
+            ok = file:close(SegFd);
+        false ->
+            ok
+    end;
+maybe_fix_corrupted_files(IdxFiles) ->
+    LastIdxFile = lists:last(IdxFiles),
+    LastSegFile = osiris_log:segment_from_index_file(LastIdxFile),
+    try file_size(LastSegFile) of
+        N when N =< ?HEADER_SIZE_B ->
+            % if the segment doesn't contain any chunks, just delete it
+            ?WARNING("deleting an empty segment file: ~0p", [LastSegFile]),
+            ok = prim_file:delete(LastIdxFile),
+            ok = prim_file:delete(LastSegFile),
+            maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile]);
+        LastSegFileSize ->
+            ok = truncate_invalid_idx_records(LastIdxFile, LastSegFileSize)
+    catch missing_file ->
+            % if the last segment is missing, just delete its index
+            ?WARNING("deleting index of the missing last segment file: ~0p",
+                     [LastSegFile]),
+            ok = prim_file:delete(LastIdxFile),
+            maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile])
+    end.
+
+truncate_invalid_idx_records(IdxFile, SegSize) ->
+    % TODO currently, if we have no valid index records,
+    % we truncate the segment, even though it could theoretically
+    % contain valid chunks. This should never happen in normal
+    % operations, since we write to the index first
+    % and fsync it first. However, it feels wrong, since we can
+    % reconstruct the index from a segment. We should probably
+    % add an option to perform a full segment scan and reconstruct
+    % the index for the valid chunks.
+    SegFile = osiris_log:segment_from_index_file(IdxFile),
+    {ok, IdxFd} = osiris_log:open(IdxFile, [raw, binary, write, read]),
+    {ok, Pos} = position_at_idx_record_boundary(IdxFd, eof),
+    ok = skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
+    ok = file:truncate(IdxFd),
+    file:close(IdxFd).
+
+orphaned_segments(Dir) ->
+    orphaned_segments(lists:sort(list_dir(Dir)), []).
+
+orphaned_segments([], Acc) ->
+    Acc;
+orphaned_segments([<<_:20/binary, ".index">>], Acc) ->
+    Acc;
+orphaned_segments([<<Name:20/binary, ".index">>,
+                   <<Name:20/binary, ".segment">> | _Rem],
+                  Acc) ->
+    %% when we find a matching pair we can return
+    Acc;
+orphaned_segments([<<_:20/binary, ".segment">> = Dangler | Rem], Acc) ->
+    orphaned_segments(Rem, [Dangler | Acc]);
+orphaned_segments([_Unexpected | Rem], Acc) ->
+    %% just ignore unexpected files
+    orphaned_segments(Rem, Acc).
+
+file_size_or_zero(Path) ->
+    case prim_file:read_file_info(Path) of
+        {ok, #file_info{size = Size}} ->
+            Size;
+        {error, enoent} ->
+            0
+    end.
