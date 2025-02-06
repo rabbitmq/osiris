@@ -1,0 +1,68 @@
+%% This Source Code Form is subject to the terms of the Mozilla Public
+%% License, v. 2.0. If a copy of the MPL was not distributed with this
+%% file, You can obtain one at https://mozilla.org/MPL/2.0/.
+%%
+%% Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
+%%
+
+% maximum size of a segment in bytes
+-define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
+% maximum number of chunks per segment
+-define(DEFAULT_MAX_SEGMENT_SIZE_C, 256_000).
+-define(C_OFFSET, 1).
+-define(C_FIRST_OFFSET, 2).
+-define(C_FIRST_TIMESTAMP, 3).
+-define(C_CHUNKS, 4).
+-define(C_SEGMENTS, 5).
+-define(COUNTER_FIELDS,
+        [
+         {offset, ?C_OFFSET, counter,
+          "The last offset (not chunk id) in the log for writers. The last offset read for readers" },
+         {first_offset, ?C_FIRST_OFFSET, counter, "First offset, not updated for readers"},
+         {first_timestamp, ?C_FIRST_TIMESTAMP, counter, "First timestamp, not updated for readers"},
+         {chunks, ?C_CHUNKS, counter, "Number of chunks read or written, incremented even if a reader only reads the header"},
+         {segments, ?C_SEGMENTS, counter, "Number of segments"}
+        ]
+       ).
+
+-define(ZERO_IDX_MATCH(Rem),
+        <<0:64/unsigned,
+          0:64/signed,
+          0:64/unsigned,
+          0:32/unsigned,
+          0:8/unsigned,
+         Rem/binary>>).
+
+-define(IDX_MATCH(ChId, Epoch, FilePos),
+        <<ChId:64/unsigned,
+          _:64/signed,
+          Epoch:64/unsigned,
+          FilePos:32/unsigned,
+          _:8/unsigned,
+        _/binary>>).
+
+-define(SKIP_SEARCH_JUMP, 2048).
+
+-type chunk_type() ::
+    ?CHNK_USER |
+    ?CHNK_TRK_DELTA |
+    ?CHNK_TRK_SNAPSHOT.
+
+%% record chunk_info does not map exactly to an index record (field 'num' differs)
+-record(chunk_info,
+        {id :: osiris:offset(),
+         timestamp :: non_neg_integer(),
+         epoch :: osiris:epoch(),
+         num :: non_neg_integer(),
+         type :: chunk_type(),
+         %% size of data + filter + trailer
+         size :: non_neg_integer(),
+         %% position in segment file
+         pos :: integer()
+        }).
+-record(seg_info,
+        {file :: file:filename_all(),
+         size = 0 :: non_neg_integer(),
+         index :: file:filename_all(),
+         first :: undefined | #chunk_info{},
+         last :: undefined | #chunk_info{}}).
