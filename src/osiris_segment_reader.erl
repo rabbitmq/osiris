@@ -5,6 +5,7 @@
 -include_lib("kernel/include/file.hrl").
 
 -export([init_offset_reader/3,
+         init_data_reader/2,
          sorted_index_files/1,
          offset_range_from_idx_files/1,
          build_seg_info/1,
@@ -52,8 +53,101 @@
          fd :: undefined | file:io_device()
         }).
 
+init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir,
+                                            name := Name} = Config) ->
+    IdxFiles = sorted_index_files(Dir),
+    Range = offset_range_from_idx_files(IdxFiles),
+    ?DEBUG_(Name, " at ~b prev ~w local range: ~w",
+           [StartChunkId, PrevEOT, Range]),
+    %% Invariant:  there is always at least one segment left on disk
+    case Range of
+        {FstOffs, LastOffs}
+          when StartChunkId < FstOffs
+               orelse StartChunkId > LastOffs + 1 ->
+            {error, {offset_out_of_range, Range}};
+        empty when StartChunkId > 0 ->
+            {error, {offset_out_of_range, Range}};
+        _ when PrevEOT == empty ->
+            %% this assumes the offset is in range
+            %% first we need to validate PrevEO
+            init_data_reader_from(StartChunkId,
+                                  find_segment_for_offset(StartChunkId,
+                                                          IdxFiles),
+                                  Config);
+        _ ->
+            {PrevEpoch, PrevChunkId, _PrevTs} = PrevEOT,
+            case check_chunk_has_expected_epoch(Name, PrevChunkId,
+                                                PrevEpoch, IdxFiles) of
+                ok ->
+                    init_data_reader_from(StartChunkId,
+                                          find_segment_for_offset(StartChunkId,
+                                                                  IdxFiles),
+                                          Config);
+                {error, _} = Err ->
+                    Err
+            end
+    end.
+
+check_chunk_has_expected_epoch(Name, ChunkId, Epoch, IdxFiles) ->
+    case find_segment_for_offset(ChunkId, IdxFiles) of
+        {not_found, _} ->
+            %% this is unexpected and thus an error
+            {error,
+             {invalid_last_offset_epoch, Epoch, unknown}};
+        {found, #seg_info{} = SegmentInfo} ->
+            %% prev segment exists, does it have the correct
+            %% epoch?
+            case offset_idx_scan(Name, ChunkId, SegmentInfo) of
+                {ChunkId, Epoch, _PrevPos} ->
+                    ok;
+                {ChunkId, OtherEpoch, _} ->
+                    {error,
+                     {invalid_last_offset_epoch, Epoch, OtherEpoch}}
+            end
+    end.
 
 
+init_data_reader_at(ChunkId, FilePos, File,
+                    #{dir := Dir, name := Name,
+                      shared := Shared,
+                      readers_counter_fun := CountersFun} = Config) ->
+    case file:open(File, [raw, binary, read]) of
+        {ok, Fd} ->
+            Cnt = osiris_log:make_counter(Config),
+            counters:put(Cnt, ?C_OFFSET, ChunkId - 1),
+            CountersFun(1),
+            {ok,
+             #?MODULE_TODO{cfg =
+                      #cfg{directory = Dir,
+                           counter = Cnt,
+                           counter_id = osiris_log:counter_id(Config),
+                           name = Name,
+                           readers_counter_fun = CountersFun,
+                           shared = Shared
+                          },
+                      mode =
+                      #read{type = data,
+                            next_offset = ChunkId,
+                            chunk_selector = all,
+                            position = FilePos,
+                            transport = maps:get(transport, Config, tcp)},
+                      fd = Fd}};
+        Err ->
+            Err
+    end.
+
+init_data_reader_from(ChunkId,
+                      {end_of_log, #seg_info{file = File,
+                                             last = LastChunk}},
+                      Config) ->
+    {ChunkId, AttachPos} = next_location(LastChunk),
+    init_data_reader_at(ChunkId, AttachPos, File, Config);
+init_data_reader_from(ChunkId,
+                      {found, #seg_info{file = File} = SegInfo},
+                      Config) ->
+    Name = maps:get(name, Config, <<>>),
+    {ChunkId, _Epoch, FilePos} = offset_idx_scan(Name, ChunkId, SegInfo),
+    init_data_reader_at(ChunkId, FilePos, File, Config).
 
 init_offset_reader(_OffsetSpec, _Conf, 0) ->
     {error, retries_exhausted};
@@ -138,7 +232,7 @@ init_offset_reader0(next, #{} = Conf) ->
             case build_seg_info(LastIdxFile) of
                 {ok, #seg_info{file = File,
                                last = LastChunk}} ->
-                    {NextChunkId, FilePos} = osiris_log:next_location(LastChunk),
+                    {NextChunkId, FilePos} = next_location(LastChunk),
                     open_offset_reader_at(File, NextChunkId, FilePos, Conf);
                 Err ->
                     exit(Err)
@@ -183,7 +277,7 @@ init_offset_reader0(OffsetSpec, #{} = Conf)
                     throw({retry_with, next, Conf});
                 {end_of_log, #seg_info{file = SegmentFile,
                                        last = LastChunk}} ->
-                    {ChunkId, FilePos} = osiris_log:next_location(LastChunk),
+                    {ChunkId, FilePos} = next_location(LastChunk),
                     open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
                 {found, #seg_info{file = SegmentFile} = SegmentInfo} ->
                     {ChunkId, _Epoch, FilePos} =
@@ -589,7 +683,7 @@ find_segment_for_offset(Offset, IdxFiles) ->
                    Offset >= index_file_first_offset(IdxFile)
            end, lists:reverse(IdxFiles)) of
         {value, File} ->
-            case osiris_segment_reader:build_seg_info(File) of
+            case build_seg_info(File) of
                 {ok, #seg_info{first = undefined,
                                last = undefined} = Info} ->
                     {end_of_log, Info};
@@ -923,3 +1017,11 @@ index_file_first_offset(IdxFile) when is_list(IdxFile) ->
     list_to_integer(filename:basename(IdxFile, ".index"));
 index_file_first_offset(IdxFile) when is_binary(IdxFile) ->
     binary_to_integer(filename:basename(IdxFile, <<".index">>)).
+
+next_location(undefined) ->
+    {0, ?LOG_HEADER_SIZE};
+next_location(#chunk_info{id = Id,
+                          num = Num,
+                          pos = Pos,
+                          size = Size}) ->
+    {Id + Num, Pos + Size + ?HEADER_SIZE_B}.
