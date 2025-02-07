@@ -20,7 +20,8 @@
          chunk_iterator/2,
          read_chunk/1,
          read_chunk_parsed/2,
-         iterator_next/1
+         iterator_next/1,
+         send_file/3
         ]).
 
 %% TODO? for TESTS
@@ -1641,3 +1642,96 @@ parse_subbatch(Offs,
                  Rem/binary>>,
                Acc) ->
     parse_subbatch(Offs + 1, Rem, [{Offs, Data} | Acc]).
+
+send_file(Sock,
+          #?MODULE_TODO{mode = #read{type = RType,
+                                chunk_selector = Selector,
+                                transport = Transport}} = State0,
+          Callback) ->
+    case catch read_header0(State0) of
+        {ok, #{type := ChType,
+               chunk_id := ChId,
+               num_records := NumRecords,
+               filter_size := FilterSize,
+               data_size := DataSize,
+               trailer_size := TrailerSize,
+               position := Pos,
+               next_position := NextPos,
+               header_data := HeaderData} = Header,
+         #?MODULE_TODO{fd = Fd,
+                       mode = #read{next_offset = ChId} = Read0} = State1} ->
+            %% read header
+            %% used to write frame headers to socket
+            %% and return the number of bytes to sendfile
+            %% this allow users of this api to send all the data
+            %% or just header and entry data
+            {ToSkip, ToSend} =
+                case RType of
+                    offset ->
+                        select_amount_to_send(Selector, ChType, FilterSize,
+                                              DataSize, TrailerSize);
+                    data ->
+                        {0, FilterSize + DataSize + TrailerSize}
+                end,
+
+            Read = Read0#read{next_offset = ChId + NumRecords,
+                              position = NextPos},
+            %% only sendfile if either the reader is a data reader
+            %% or the chunk is a user type (for offset readers)
+            case needs_handling(RType, Selector, ChType) of
+                true ->
+                    _ = Callback(Header, ToSend + byte_size(HeaderData)),
+                    case send(Transport, Sock, HeaderData) of
+                        ok ->
+                            case sendfile(Transport, Fd, Sock,
+                                          Pos + ?HEADER_SIZE_B + ToSkip, ToSend) of
+                                ok ->
+                                    State = State1#?MODULE_TODO{mode = Read},
+                                    {ok, State};
+                                Err ->
+                                    %% reset the position to the start of the current
+                                    %% chunk so that subsequent reads won't error
+                                    Err
+                            end;
+                        Err ->
+                            Err
+                    end;
+                false ->
+                    State = State1#?MODULE_TODO{mode = Read},
+                    %% skip chunk and recurse
+                    send_file(Sock, State, Callback)
+            end;
+        Other ->
+            Other
+    end.
+
+%% There could be many more selectors in the future
+select_amount_to_send(user_data, ?CHNK_USER, FilterSize, DataSize, _TrailerSize) ->
+    {FilterSize, DataSize};
+select_amount_to_send(_, _, FilterSize, DataSize, TrailerSize) ->
+    {FilterSize, DataSize + TrailerSize}.
+
+sendfile(_Transport, _Fd, _Sock, _Pos, 0) ->
+    ok;
+sendfile(tcp = Transport, Fd, Sock, Pos, ToSend) ->
+    case file:sendfile(Fd, Sock, Pos, ToSend, []) of
+        {ok, 0} ->
+            %% TODO add counter for this?
+            sendfile(Transport, Fd, Sock, Pos, ToSend);
+        {ok, BytesSent} ->
+            sendfile(Transport, Fd, Sock, Pos + BytesSent, ToSend - BytesSent);
+        {error, _} = Err ->
+            Err
+    end;
+sendfile(ssl, Fd, Sock, Pos, ToSend) ->
+    case file:pread(Fd, Pos, ToSend) of
+        {ok, Data} ->
+            ssl:send(Sock, Data);
+        {error, _} = Err ->
+            Err
+    end.
+
+send(tcp, Sock, Data) ->
+    gen_tcp:send(Sock, Data);
+send(ssl, Sock, Data) ->
+    ssl:send(Sock, Data).
