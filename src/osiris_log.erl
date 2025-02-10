@@ -367,22 +367,6 @@
       next_position => non_neg_integer()}.
 -type transport() :: tcp | ssl.
 
-%% holds static or rarely changing fields
--record(cfg,
-        {directory :: file:filename_all(),
-         name :: osiris:name(),
-         max_segment_size_bytes = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer(),
-         max_segment_size_chunks = ?DEFAULT_MAX_SEGMENT_SIZE_C :: non_neg_integer(),
-         tracking_config = #{} :: osiris_tracking:config(),
-         retention = [] :: [osiris:retention_spec()],
-         counter :: counters:counters_ref(),
-         counter_id :: term(),
-         %% the maximum number of active writer deduplication sessions
-         %% that will be included in snapshots written to new segments
-         readers_counter_fun = fun(_) -> ok end :: function(),
-         shared :: atomics:atomics_ref(),
-         filter_size = ?DEFAULT_FILTER_SIZE :: osiris_bloom:filter_size()
-         }).
 -record(read,
         {type :: data | offset,
          next_offset = 0 :: offset(),
@@ -476,7 +460,7 @@ init(#{dir := Dir,
                counter_id = counter_id(Config),
                shared = Shared,
                filter_size = FilterSize},
-    ok = osiris_segment_reader:maybe_fix_corrupted_files(Config),
+    ok = osiris_log_read:maybe_fix_corrupted_files(Config),
     DefaultNextOffset = case Config of
                             #{initial_offset := IO}
                               when WriterType == acceptor ->
@@ -484,7 +468,7 @@ init(#{dir := Dir,
                             _ ->
                                 0
                         end,
-    case osiris_segment_reader:first_and_last_seginfos(Config) of
+    case osiris_log_read:first_and_last_seginfos(Config) of
         none ->
             osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
             osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
@@ -729,9 +713,9 @@ init_acceptor(Range, EpochOffsets0,
             lists:sort(EpochOffsets0)),
 
     %% then truncate to
-    IdxFiles = osiris_segment_reader:sorted_index_files(Dir),
+    IdxFiles = osiris_log_read:sorted_index_files(Dir),
     ?DEBUG_(Name, "from epoch offsets: ~w range ~w", [EpochOffsets, Range]),
-    RemIdxFiles = osiris_segment_reader:truncate_to(Name, Range, EpochOffsets, IdxFiles),
+    RemIdxFiles = osiris_log_read:truncate_to(Name, Range, EpochOffsets, IdxFiles),
     %% after truncation we can do normal init
     InitOffset = case Range  of
                      empty -> 0;
@@ -746,7 +730,7 @@ init_acceptor(Range, EpochOffsets0,
     {error, {invalid_last_offset_epoch, epoch(), offset()}} |
     {error, file:posix()}.
 init_data_reader(TailInfo, Config) ->
-    osiris_segment_reader:init_data_reader(TailInfo, Config).
+    osiris_log_read:init_data_reader(TailInfo, Config).
 
 
 %% @doc Initialise a new offset reader
@@ -774,7 +758,7 @@ init_data_reader(TailInfo, Config) ->
                             {error, no_index_file} |
                             {error, retries_exhausted}.
 init_offset_reader(OffsetSpec, Conf) ->
-    osiris_segment_reader:init_offset_reader(OffsetSpec, Conf, _Attemps = 3).
+    osiris_log_read:init_offset_reader(OffsetSpec, Conf, _Attemps = 3).
 
 -spec committed_offset(state()) -> integer().
 committed_offset(State) ->
@@ -822,7 +806,7 @@ counters_ref(#?MODULE{cfg = #cfg{counter = C}}) ->
     {ok, header_map(), state()} | {end_of_stream, state()} |
     {error, {invalid_chunk_header, term()}}.
 read_header(State) ->
-    osiris_segment_reader:read_header(State).
+    osiris_log_read:read_header(State).
 
 -record(iterator, {fd :: file:io_device(),
                    next_offset :: offset(),
@@ -858,19 +842,19 @@ chunk_iterator(State) ->
     {end_of_stream, state()} |
     {error, {invalid_chunk_header, term()}}.
 chunk_iterator(State, CreditHint) ->
-    osiris_segment_reader:chunk_iterator(State, CreditHint).
+    osiris_log_read:chunk_iterator(State, CreditHint).
 
 -spec iterator_next(chunk_iterator()) ->
     end_of_chunk | {offset_entry(), chunk_iterator()}.
 iterator_next(Iter) ->
-    osiris_segment_reader:iterator_next(Iter).
+    osiris_log_read:iterator_next(Iter).
 
 -spec read_chunk(state()) ->
     {ok, binary(), state()} |
     {end_of_stream, state()} |
     {error, {invalid_chunk_header, term()}}.
 read_chunk(State) ->
-    osiris_segment_reader:read_chunk(State).
+    osiris_log_read:read_chunk(State).
 
 -spec read_chunk_parsed(state()) ->
                            {[record()], state()} |
@@ -886,7 +870,7 @@ read_chunk_parsed(State) ->
     {error, {invalid_chunk_header, term()}}.
 read_chunk_parsed(State,
                   HeaderOrNot) ->
-    osiris_segment_reader:read_chunk_parsed(State, HeaderOrNot).
+    osiris_log_read:read_chunk_parsed(State, HeaderOrNot).
 
 is_valid_chunk_on_disk(SegFile, Pos) ->
     %% read a chunk from a specified location in the segment
@@ -944,7 +928,7 @@ send_file(Sock, State) ->
 send_file(Sock,
           State,
           Callback) ->
-    osiris_segment_reader:send_file(Sock, State, Callback).
+    osiris_log_read:send_file(Sock, State, Callback).
 
 -spec close(state()) -> ok.
 close(#?MODULE{cfg = #cfg{counter_id = CntId,
@@ -987,13 +971,13 @@ delete_dir(Dir) ->
 
 %% TODO Here due to tests, will update test later
 sorted_index_files(C) ->
-    osiris_segment_reader:sorted_index_files(C).
+    osiris_log_read:sorted_index_files(C).
 
 index_files_unsorted(Dir) ->
-    osiris_segment_reader:index_files_unsorted(Dir).
+    osiris_log_read:index_files_unsorted(Dir).
 
 orphaned_segments(Dir) ->
-    osiris_segment_reader:orphaned_segments(Dir).
+    osiris_log_read:orphaned_segments(Dir).
 
 last_idx_record(IdxFd) ->
     nth_last_idx_record(IdxFd, 1).
@@ -1068,7 +1052,7 @@ overview(Dir) ->
         [] ->
             {empty, []};
         IdxFiles ->
-            Range = osiris_segment_reader:offset_range_from_idx_files(IdxFiles),
+            Range = osiris_log_read:offset_range_from_idx_files(IdxFiles),
             EpochOffsets = last_epoch_chunk_ids(<<>>, IdxFiles),
             {Range, EpochOffsets}
     end.
@@ -1138,9 +1122,9 @@ evaluate_retention(Dir, Specs) when is_binary(Dir) ->
 
     {Time, Result} = timer:tc(
                        fun() ->
-                               IdxFiles0 = osiris_segment_reader:sorted_index_files(Dir),
+                               IdxFiles0 = osiris_log_read:sorted_index_files(Dir),
                                IdxFiles = evaluate_retention0(IdxFiles0, Specs),
-                               OffsetRange = osiris_segment_reader:offset_range_from_idx_files(IdxFiles),
+                               OffsetRange = osiris_log_read:offset_range_from_idx_files(IdxFiles),
                                FirstTs = first_timestamp_from_index_files(IdxFiles),
                                {OffsetRange, FirstTs, length(IdxFiles)}
                        end),
@@ -1167,7 +1151,7 @@ eval_age([IdxFile | IdxFiles] = AllIdxFiles, Age) ->
                     %% the oldest timestamp is older than retention
                     %% and there are other segments available
                     %% we can delete
-                    ok = osiris_segment_reader:delete_segment_from_index(IdxFile),
+                    ok = osiris_log_read:delete_segment_from_index(IdxFile),
                     eval_age(IdxFiles, Age);
                 false ->
                     AllIdxFiles
@@ -1199,7 +1183,7 @@ eval_max_bytes([IdxFile | Rest], Limit, Acc) ->
         true ->
             eval_max_bytes(Rest, Limit - Size, [IdxFile | Acc]);
         false ->
-            [ok = osiris_segment_reader:delete_segment_from_index(Seg) || Seg <- [IdxFile | Rest]],
+            [ok = osiris_log_read:delete_segment_from_index(Seg) || Seg <- [IdxFile | Rest]],
             Acc
     end.
 
@@ -1510,7 +1494,7 @@ first_timestamp_from_index_files([]) ->
 
 -spec can_read_next(state()) -> boolean().
 can_read_next(State) ->
-    osiris_segment_reader:can_read_next(State).
+    osiris_log_read:can_read_next(State).
 
 make_file_name(N, Suff) ->
     lists:flatten(

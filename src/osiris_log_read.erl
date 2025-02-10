@@ -1,4 +1,4 @@
--module(osiris_segment_reader).
+-module(osiris_log_read).
 
 -include("osiris.hrl").
 -include("osiris_log.hrl").
@@ -29,23 +29,6 @@
 
 -export_type([chunk_iterator/0]).
 
-
-%% TODO temporary copy of cfg record from osiris_log.
--record(cfg,
-        {directory :: file:filename_all(),
-         name :: osiris:name(),
-         max_segment_size_bytes = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer(),
-         max_segment_size_chunks = ?DEFAULT_MAX_SEGMENT_SIZE_C :: non_neg_integer(),
-         tracking_config = #{} :: osiris_tracking:config(),
-         retention = [] :: [osiris:retention_spec()],
-         counter :: counters:counters_ref(),
-         counter_id :: term(),
-         %% the maximum number of active writer deduplication sessions
-         %% that will be included in snapshots written to new segments
-         readers_counter_fun = fun(_) -> ok end :: function(),
-         shared :: atomics:atomics_ref(),
-         filter_size = ?DEFAULT_FILTER_SIZE :: osiris_bloom:filter_size()
-         }).
 %% TODO - read record. Make into opaque?
 -record(read,
         {type :: data | offset,
@@ -54,18 +37,11 @@
          chunk_selector :: all | user_data,
          position = 0 :: non_neg_integer(),
          filter :: undefined | osiris_bloom:mstate()}).
-%% Todo - remove not needed in this module
--record(write,
-        {type = writer :: writer | acceptor,
-         segment_size = {?LOG_HEADER_SIZE, 0} :: {non_neg_integer(), non_neg_integer()},
-         current_epoch :: non_neg_integer(),
-         tail_info = {0, empty} :: osiris:tail_info()
-        }).
 %% TODO - tmp copy of osiris_log state
 -define(MODULE_TODO, osiris_log).
 -record(?MODULE_TODO,
         {cfg :: #cfg{},
-         mode :: #read{} | #write{},
+         mode :: #read{},
          current_file :: undefined | file:filename_all(),
          index_fd :: undefined | file:io_device(),
          fd :: undefined | file:io_device()
@@ -1150,12 +1126,12 @@ truncate_to(_Name, _Range, [], IdxFiles) ->
     [begin ok = delete_segment_from_index(I) end || I <- IdxFiles],
     [];
 truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
-    case osiris_segment_reader:find_segment_for_offset(ChId, IdxFiles) of
+    case find_segment_for_offset(ChId, IdxFiles) of
         {Result, _} when Result == not_found orelse
                          Result == end_of_log ->
             %% both not_found and end_of_log needs to be treated as not found
             %% as they are...
-            case osiris_segment_reader:build_seg_info(lists:last(IdxFiles)) of
+            case build_seg_info(lists:last(IdxFiles)) of
                 {ok, #seg_info{last = #chunk_info{epoch = E,
                                                   id = LastChId,
                                                   num = Num}}}

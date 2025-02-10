@@ -48,6 +48,22 @@
     ?CHNK_TRK_DELTA |
     ?CHNK_TRK_SNAPSHOT.
 
+%% holds static or rarely changing fields
+-record(cfg,
+        {directory :: file:filename_all(),
+         name :: osiris:name(),
+         max_segment_size_bytes = ?DEFAULT_MAX_SEGMENT_SIZE_B :: non_neg_integer(),
+         max_segment_size_chunks = ?DEFAULT_MAX_SEGMENT_SIZE_C :: non_neg_integer(),
+         tracking_config = #{} :: osiris_tracking:config(),
+         retention = [] :: [osiris:retention_spec()],
+         counter :: counters:counters_ref(),
+         counter_id :: term(),
+         %% the maximum number of active writer deduplication sessions
+         %% that will be included in snapshots written to new segments
+         readers_counter_fun = fun(_) -> ok end :: function(),
+         shared :: atomics:atomics_ref(),
+         filter_size = ?DEFAULT_FILTER_SIZE :: osiris_bloom:filter_size()
+         }).
 %% record chunk_info does not map exactly to an index record (field 'num' differs)
 -record(chunk_info,
         {id :: osiris:offset(),
