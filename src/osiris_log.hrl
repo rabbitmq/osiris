@@ -64,6 +64,30 @@
          shared :: atomics:atomics_ref(),
          filter_size = ?DEFAULT_FILTER_SIZE :: osiris_bloom:filter_size()
          }).
+%% TODO should this be a opaque instead? Maybe a map {read, ReadMap},
+%% and let the backend have its own version of it.
+
+-record(read,
+        {type :: data | offset,
+         next_offset = 0 :: osiris:offset(),
+         transport :: osiris_log:transport(),
+         chunk_selector :: all | user_data,
+         position = 0 :: non_neg_integer(),
+         filter :: undefined | osiris_bloom:mstate()}).
+-record(write,
+        {type = writer :: writer | acceptor,
+         segment_size = {?LOG_HEADER_SIZE, 0} :: {non_neg_integer(), non_neg_integer()},
+         current_epoch :: non_neg_integer(),
+         tail_info = {0, empty} :: osiris:tail_info()
+        }).
+-record(osiris_log,
+        {cfg :: #cfg{},
+         mode :: #read{} | #write{},
+         current_file :: undefined | file:filename_all(),
+         index_fd :: undefined | file:io_device(),
+%% Should the FDs be moved to the write and read config?
+         fd :: undefined | file:io_device()
+        }).
 %% record chunk_info does not map exactly to an index record (field 'num' differs)
 -record(chunk_info,
         {id :: osiris:offset(),

@@ -30,22 +30,8 @@
 -export_type([chunk_iterator/0]).
 
 %% TODO - read record. Make into opaque?
--record(read,
-        {type :: data | offset,
-         next_offset = 0 :: osiris:offset(),
-         transport :: osiris:transport(),
-         chunk_selector :: all | user_data,
-         position = 0 :: non_neg_integer(),
-         filter :: undefined | osiris_bloom:mstate()}).
 %% TODO - tmp copy of osiris_log state
--define(MODULE_TODO, osiris_log).
--record(?MODULE_TODO,
-        {cfg :: #cfg{},
-         mode :: #read{},
-         current_file :: undefined | file:filename_all(),
-         index_fd :: undefined | file:io_device(),
-         fd :: undefined | file:io_device()
-        }).
+-define(LOGSTATE, osiris_log).
 
 init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir,
                                             name := Name} = Config) ->
@@ -111,7 +97,7 @@ init_data_reader_at(ChunkId, FilePos, File,
             counters:put(Cnt, ?C_OFFSET, ChunkId - 1),
             CountersFun(1),
             {ok,
-             #?MODULE_TODO{cfg =
+             #?LOGSTATE{cfg =
                       #cfg{directory = Dir,
                            counter = Cnt,
                            counter_id = osiris_log:counter_id(Config),
@@ -311,7 +297,7 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                     end,
     %% TODO this returns a osiris_log module config. Can it just return the data instead?
     %% Can read and (perhaps write) just be an opaque?
-    {ok, #?MODULE_TODO{cfg = #cfg{directory = Dir,
+    {ok, #?LOGSTATE{cfg = #cfg{directory = Dir,
                              counter = Cnt,
                              counter_id = osiris_log:counter_id(Conf),
                              name = Name,
@@ -456,7 +442,7 @@ timestamp_idx_scan(Fd, Ts) ->
 first_last_timestamps(IdxFile) ->
     case file:open(IdxFile, [raw, read, binary]) of
         {ok, Fd} ->
-	    _ = file:advise(Fd, 0, 0, random),
+            _ = file:advise(Fd, 0, 0, random),
             case first_idx_record(Fd) of
                 {ok, <<_:64/unsigned,
                        FirstTs:64/signed,
@@ -1243,7 +1229,7 @@ next_chunk_pos(Fd, Pos) ->
            _Reserved:24>>} = file:pread(Fd, Pos, ?HEADER_SIZE_B),
     Pos + ?HEADER_SIZE_B + FSize + Size + TSize.
 
-read_header(#?MODULE_TODO{cfg = #cfg{}} = State0) ->
+read_header(#?LOGSTATE{cfg = #cfg{}} = State0) ->
     %% reads the next chunk of entries, parsed
     %% NB: this may return records before the requested index,
     %% that is fine - the reading process can do the appropriate filtering
@@ -1253,10 +1239,10 @@ read_header(#?MODULE_TODO{cfg = #cfg{}} = State0) ->
          #{num_records := NumRecords,
            next_position := NextPos} =
              Header,
-         #?MODULE_TODO{mode = #read{next_offset = ChId} = Read} = State} ->
+         #?LOGSTATE{mode = #read{next_offset = ChId} = Read} = State} ->
             %% skip data portion
             {ok, Header,
-             State#?MODULE_TODO{mode = Read#read{next_offset = ChId + NumRecords,
+             State#?LOGSTATE{mode = Read#read{next_offset = ChId + NumRecords,
                                                  position = NextPos}}};
         {end_of_stream, _} = EOF ->
             EOF;
@@ -1264,7 +1250,7 @@ read_header(#?MODULE_TODO{cfg = #cfg{}} = State0) ->
             Err
     end.
 
-read_header0(#?MODULE_TODO{cfg = #cfg{directory = Dir,
+read_header0(#?LOGSTATE{cfg = #cfg{directory = Dir,
                                  shared = Shared,
                                  counter = CntRef},
                       mode = #read{next_offset = NextChId0,
@@ -1334,10 +1320,10 @@ read_header0(#?MODULE_TODO{cfg = #cfg{directory = Dir,
                         false ->
                             Read = Read0#read{next_offset = NextChId0 + NumRecords,
                                               position = NextPos},
-                            read_header0(State#?MODULE_TODO{mode = Read});
+                            read_header0(State#?LOGSTATE{mode = Read});
                         {retry_with, NewFilter} ->
                             Read = Read0#read{filter = NewFilter},
-                            read_header0(State#?MODULE_TODO{mode = Read})
+                            read_header0(State#?LOGSTATE{mode = Read})
                     end;
                 {ok, Bin} when byte_size(Bin) < ?HEADER_SIZE_B ->
                     %% partial header read
@@ -1366,7 +1352,7 @@ read_header0(#?MODULE_TODO{cfg = #cfg{directory = Dir,
                                     Read = Read0#read{next_offset = NextChId,
                                                       position = ?LOG_HEADER_SIZE},
                                     read_header0(
-                                      State#?MODULE_TODO{current_file = SegFile,
+                                      State#?LOGSTATE{current_file = SegFile,
                                                     fd = Fd2,
                                                     mode = Read});
                                 {error, enoent} ->
@@ -1397,12 +1383,12 @@ read_header0(#?MODULE_TODO{cfg = #cfg{directory = Dir,
     end.
 
 
-can_read_next(#?MODULE_TODO{mode = #read{type = offset,
+can_read_next(#?LOGSTATE{mode = #read{type = offset,
                                     next_offset = NextOffset},
                        cfg = #cfg{shared = Ref}}) ->
     osiris_log_shared:last_chunk_id(Ref) >= NextOffset andalso
     osiris_log_shared:committed_chunk_id(Ref) >= NextOffset;
-can_read_next(#?MODULE_TODO{mode = #read{type = data,
+can_read_next(#?LOGSTATE{mode = #read{type = data,
                                     next_offset = NextOffset},
                        cfg = #cfg{shared = Ref}}) ->
     osiris_log_shared:last_chunk_id(Ref) >= NextOffset.
@@ -1418,7 +1404,7 @@ can_read_next(#?MODULE_TODO{mode = #read{type = data,
                    next_record_pos :: non_neg_integer()}).
 -opaque chunk_iterator() :: #iterator{}.
 
-chunk_iterator(#?MODULE_TODO{cfg = #cfg{},
+chunk_iterator(#?LOGSTATE{cfg = #cfg{},
                              mode = #read{type = RType,
                                           chunk_selector = Selector}
                             } = State0, CreditHint)
@@ -1436,8 +1422,8 @@ chunk_iterator(#?MODULE_TODO{cfg = #cfg{},
            filter_size := FilterSize,
            position := Pos,
            next_position := NextPos} = Header,
-         #?MODULE_TODO{fd = Fd, mode = #read{next_offset = ChId} = Read} = State1} ->
-            State = State1#?MODULE_TODO{mode = Read#read{next_offset = ChId + NumRecords,
+         #?LOGSTATE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State1} ->
+            State = State1#?LOGSTATE{mode = Read#read{next_offset = ChId + NumRecords,
                                                          position = NextPos}},
             case needs_handling(RType, Selector, ChType) of
                 true ->
@@ -1458,7 +1444,7 @@ chunk_iterator(#?MODULE_TODO{cfg = #cfg{},
             Other
     end.
 
-read_chunk(#?MODULE_TODO{cfg = #cfg{}} = State0) ->
+read_chunk(#?LOGSTATE{cfg = #cfg{}} = State0) ->
     %% reads the next chunk of unparsed chunk data
     case catch read_header0(State0) of
         {ok,
@@ -1473,7 +1459,7 @@ read_chunk(#?MODULE_TODO{cfg = #cfg{}} = State0) ->
            position := Pos,
            next_position := NextPos,
            trailer_size := TrailerSize},
-         #?MODULE_TODO{fd = Fd, mode = #read{next_offset = ChId} = Read} = State} ->
+         #?LOGSTATE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State} ->
             ToRead = ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
             {ok, ChData} = file:pread(Fd, Pos, ToRead),
             <<_:?HEADER_SIZE_B/binary,
@@ -1482,13 +1468,13 @@ read_chunk(#?MODULE_TODO{cfg = #cfg{}} = State0) ->
               _/binary>> = ChData,
             osiris_log:validate_crc(ChId, Crc, RecordData),
             {ok, ChData,
-             State#?MODULE_TODO{mode = Read#read{next_offset = ChId + NumRecords,
+             State#?LOGSTATE{mode = Read#read{next_offset = ChId + NumRecords,
                                                  position = NextPos}}};
         Other ->
             Other
     end.
 
-read_chunk_parsed(#?MODULE_TODO{mode = #read{}} = State0,
+read_chunk_parsed(#?LOGSTATE{mode = #read{}} = State0,
                   HeaderOrNot) ->
     %% the Header parameter isn't used anywhere in RabbitMQ so is ignored
     case chunk_iterator(State0, all) of
@@ -1620,7 +1606,7 @@ parse_subbatch(Offs,
     parse_subbatch(Offs + 1, Rem, [{Offs, Data} | Acc]).
 
 send_file(Sock,
-          #?MODULE_TODO{mode = #read{type = RType,
+          #?LOGSTATE{mode = #read{type = RType,
                                 chunk_selector = Selector,
                                 transport = Transport}} = State0,
           Callback) ->
@@ -1634,7 +1620,7 @@ send_file(Sock,
                position := Pos,
                next_position := NextPos,
                header_data := HeaderData} = Header,
-         #?MODULE_TODO{fd = Fd,
+         #?LOGSTATE{fd = Fd,
                        mode = #read{next_offset = ChId} = Read0} = State1} ->
             %% read header
             %% used to write frame headers to socket
@@ -1662,7 +1648,7 @@ send_file(Sock,
                             case sendfile(Transport, Fd, Sock,
                                           Pos + ?HEADER_SIZE_B + ToSkip, ToSend) of
                                 ok ->
-                                    State = State1#?MODULE_TODO{mode = Read},
+                                    State = State1#?LOGSTATE{mode = Read},
                                     {ok, State};
                                 Err ->
                                     %% reset the position to the start of the current
@@ -1673,7 +1659,7 @@ send_file(Sock,
                             Err
                     end;
                 false ->
-                    State = State1#?MODULE_TODO{mode = Read},
+                    State = State1#?LOGSTATE{mode = Read},
                     %% skip chunk and recurse
                     send_file(Sock, State, Callback)
             end;

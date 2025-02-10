@@ -367,28 +367,7 @@
       next_position => non_neg_integer()}.
 -type transport() :: tcp | ssl.
 
--record(read,
-        {type :: data | offset,
-         next_offset = 0 :: offset(),
-         transport :: transport(),
-         chunk_selector :: all | user_data,
-         position = 0 :: non_neg_integer(),
-         filter :: undefined | osiris_bloom:mstate()}).
--record(write,
-        {type = writer :: writer | acceptor,
-         segment_size = {?LOG_HEADER_SIZE, 0} :: {non_neg_integer(), non_neg_integer()},
-         current_epoch :: non_neg_integer(),
-         tail_info = {0, empty} :: osiris:tail_info()
-        }).
--record(?MODULE,
-        {cfg :: #cfg{},
-         mode :: #read{} | #write{},
-         current_file :: undefined | file:filename_all(),
-         index_fd :: undefined | file:io_device(),
-         fd :: undefined | file:io_device()
-        }).
-
--opaque state() :: #?MODULE{}.
+-opaque state() :: #osiris_log{}.
 
 -export_type([state/0,
               chunk_iterator/0,
