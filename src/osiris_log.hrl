@@ -66,7 +66,6 @@
          }).
 %% TODO should this be a opaque instead? Maybe a map {read, ReadMap},
 %% and let the backend have its own version of it.
-
 -record(read,
         {type :: data | offset,
          next_offset = 0 :: osiris:offset(),

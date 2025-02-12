@@ -1251,14 +1251,14 @@ read_header(#?LOGSTATE{cfg = #cfg{}} = State0) ->
     end.
 
 read_header0(#?LOGSTATE{cfg = #cfg{directory = Dir,
-                                 shared = Shared,
-                                 counter = CntRef},
-                      mode = #read{next_offset = NextChId0,
-                                   position = Pos,
-                                   filter = Filter} = Read0,
-                      current_file = CurFile,
-                      fd = Fd} =
-             State) ->
+                                   shared = Shared,
+                                   counter = CntRef},
+                        mode = #read{next_offset = NextChId0,
+                                     position = Pos,
+                                     filter = Filter} = Read0,
+                        current_file = CurFile,
+                        fd = Fd} =
+                 State) ->
     %% reads the next header if permitted
     case can_read_next(State) of
         true ->
