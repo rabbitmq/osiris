@@ -83,9 +83,9 @@
         {cfg :: #cfg{},
          mode :: #read{} | #write{},
          current_file :: undefined | file:filename_all(),
-         index_fd :: undefined | file:io_device(),
+         index_io :: undefined | {fd, file:io_device()} | {callback, function()},
          %% Should the FDs be moved to the write and read config?
-         fd :: undefined | file:io_device()
+         segment_io :: undefined | {fd, file:io_device()} | {callback, function()}
         }).
 %% record chunk_info does not map exactly to an index record (field 'num' differs)
 -record(chunk_info,

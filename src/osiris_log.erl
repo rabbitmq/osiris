@@ -504,8 +504,8 @@ init(#{dir := Dir,
                                 segment_size = {Size, NumChunks},
                                 current_epoch = Epoch},
                      current_file = filename:basename(Filename),
-                     fd = SegFd,
-                     index_fd = IdxFd};
+                     segment_io = {fd, SegFd},
+                     index_io = {fd, IdxFd}};
         {1, #seg_info{file = Filename,
                       index = IdxFilename,
                       last = undefined}, _} ->
@@ -527,37 +527,8 @@ init(#{dir := Dir,
                                 tail_info = {DefaultNextOffset, empty},
                                 current_epoch = Epoch},
                      current_file = filename:basename(Filename),
-                     fd = SegFd,
-                     index_fd = IdxFd}
-    end.
-
-skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos) ->
-    case Pos >= ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B of
-        true ->
-            {ok, _} = file:position(IdxFd, Pos - ?INDEX_RECORD_SIZE_B),
-            case file:read(IdxFd, ?INDEX_RECORD_SIZE_B) of
-                {ok, ?ZERO_IDX_MATCH(_)} ->
-                    % trailing zeros found
-                    skip_invalid_idx_records(IdxFd, SegFile, SegSize,
-                                             Pos - ?INDEX_RECORD_SIZE_B);
-                {ok, ?IDX_MATCH(_, _, ChunkPos)} ->
-                    % a non-zero index record
-                    case ChunkPos < SegSize andalso
-                         is_valid_chunk_on_disk(SegFile, ChunkPos) of
-                        true ->
-                            ok;
-                        false ->
-                            % this chunk doesn't exist in the segment or is invalid
-                            skip_invalid_idx_records(IdxFd, SegFile, SegSize,
-                                                     Pos - ?INDEX_RECORD_SIZE_B)
-                    end;
-                Err ->
-                    Err
-            end;
-        false ->
-            %% TODO should we validate the correctness of index/segment headers?
-            {ok, _} = file:position(IdxFd, ?IDX_HEADER_SIZE),
-            ok
+                     segment_io = {fd, SegFd},
+                     index_io = {fd, IdxFd}}
     end.
 
 -spec write([osiris:data()], state()) -> state().
@@ -851,47 +822,6 @@ read_chunk_parsed(State,
                   HeaderOrNot) ->
     osiris_log_read:read_chunk_parsed(State, HeaderOrNot).
 
-is_valid_chunk_on_disk(SegFile, Pos) ->
-    %% read a chunk from a specified location in the segment
-    %% then checks the CRC
-    case open(SegFile, [read, raw, binary]) of
-        {ok, SegFd} ->
-            IsValid = case file:pread(SegFd, Pos, ?HEADER_SIZE_B) of
-                          {ok,
-                           <<?MAGIC:4/unsigned,
-                             ?VERSION:4/unsigned,
-                             _ChType:8/unsigned,
-                             _NumEntries:16/unsigned,
-                             _NumRecords:32/unsigned,
-                             _Timestamp:64/signed,
-                             _Epoch:64/unsigned,
-                             _NextChId0:64/unsigned,
-                             Crc:32/integer,
-                             DataSize:32/unsigned,
-                             _TrailerSize:32/unsigned,
-                             FilterSize:8/unsigned,
-                             _Reserved:24>>} ->
-                              DataPos = Pos + FilterSize + ?HEADER_SIZE_B,
-                              case file:pread(SegFd, DataPos, DataSize) of
-                                  {ok, Data} ->
-                                      case erlang:crc32(Data) of
-                                          Crc ->
-                                              true;
-                                          _ ->
-                                              false
-                                      end;
-                                  eof ->
-                                      false
-                              end;
-                          _ ->
-                              false
-                      end,
-            _ = file:close(SegFd),
-            IsValid;
-       _Err ->
-            false
-    end.
-
 -spec send_file(gen_tcp:socket(), state()) ->
                    {ok, state()} |
                    {error, term()} |
@@ -912,10 +842,10 @@ send_file(Sock,
 -spec close(state()) -> ok.
 close(#?MODULE{cfg = #cfg{counter_id = CntId,
                           readers_counter_fun = Fun},
-               fd = SegFd,
-               index_fd = IdxFd}) ->
-    close_fd(IdxFd),
-    close_fd(SegFd),
+               segment_io = SegIO,
+               index_io = IndexIO}) ->
+    close_fd(SegIO),
+    close_fd(IndexIO),
     Fun(-1),
     case CntId of
         undefined ->
@@ -958,51 +888,6 @@ index_files_unsorted(Dir) ->
 orphaned_segments(Dir) ->
     osiris_log_read:orphaned_segments(Dir).
 
-last_valid_idx_record(IdxFile) ->
-    {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
-    case position_at_idx_record_boundary(IdxFd, eof) of
-        {ok, Pos} ->
-            SegFile = segment_from_index_file(IdxFile),
-            SegSize = file_size(SegFile),
-            ok = skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
-            case file:position(IdxFd, {cur, -?INDEX_RECORD_SIZE_B}) of
-                {ok, _} ->
-                    IdxRecord = file:read(IdxFd, ?INDEX_RECORD_SIZE_B),
-                    _ = file:close(IdxFd),
-                    IdxRecord;
-                _ ->
-                    _ = file:close(IdxFd),
-                    undefined
-            end;
-        Err ->
-            _ = file:close(IdxFd),
-            Err
-    end.
-
-first_idx_record(IdxFd) ->
-    idx_read_at(IdxFd, ?IDX_HEADER_SIZE).
-
-idx_read_at(Fd, Pos) when is_integer(Pos) ->
-    case file:pread(Fd, Pos, ?INDEX_RECORD_SIZE_B) of
-        {ok, ?ZERO_IDX_MATCH(_)} ->
-            {error, empty_idx_record};
-        Ret ->
-            Ret
-    end.
-
-%% Some file:position/2 operations are subject to race conditions. In particular, `eof` may position the Fd
-%% in the middle of a record being written concurrently. If that happens, we need to re-position at the nearest
-%% record boundry. See https://github.com/rabbitmq/osiris/issues/73
-position_at_idx_record_boundary(IdxFd, At) ->
-    case file:position(IdxFd, At) of
-        {ok, Pos} ->
-            case (Pos - ?IDX_HEADER_SIZE) rem ?INDEX_RECORD_SIZE_B of
-                0 -> {ok, Pos};
-                N -> file:position(IdxFd, {cur, -N})
-            end;
-        Error -> Error
-    end.
-
 -spec overview(file:filename_all()) ->
     {range(), [{epoch(), offset()}]}.
 overview(Dir) ->
@@ -1016,7 +901,7 @@ overview(Dir) ->
             {empty, []};
         IdxFiles ->
             Range = osiris_log_read:offset_range_from_idx_files(IdxFiles),
-            EpochOffsets = last_epoch_chunk_ids(<<>>, IdxFiles),
+            EpochOffsets = osiris_log_read:last_epoch_chunk_ids(<<>>, IdxFiles),
             {Range, EpochOffsets}
     end.
 
@@ -1083,141 +968,6 @@ evaluate_retention(Dir, Specs) when is_list(Dir) ->
     evaluate_retention(unicode:characters_to_binary(Dir), Specs);
 evaluate_retention(Dir, Specs) when is_binary(Dir) ->
     osiris_log_read:evaluate_retention(Dir, Specs).
-
-file_size(Path) ->
-    case prim_file:read_file_info(Path) of
-        {ok, #file_info{size = Size}} ->
-            Size;
-        {error, enoent} ->
-            throw(missing_file)
-    end.
-
-last_epoch_chunk_ids(Name, IdxFiles) ->
-    T1 = erlang:monotonic_time(),
-    %% no need to filter out empty index files as
-    %% that will be done by last_epoch_chunk_ids0/2
-    Return = last_epoch_chunk_ids0(IdxFiles, undefined),
-    T2 = erlang:monotonic_time(),
-    Time = erlang:convert_time_unit(T2 - T1, native, microsecond),
-    ?DEBUG_(Name, " completed in ~bms", [Time div 1000]),
-    Return.
-
-last_epoch_chunk_ids0([], {LastE, LastO, Res}) ->
-    lists:reverse([{LastE, LastO} | Res]);
-last_epoch_chunk_ids0([], undefined) ->
-    %% the empty stream
-    [];
-last_epoch_chunk_ids0([IdxFile | _] = Files, undefined) ->
-    {ok, Fd} = open(IdxFile, [read, raw, binary]),
-    case first_idx_record(Fd) of
-        {ok, ?IDX_MATCH(FstChId, FstEpoch, _)} ->
-            ok = file:close(Fd),
-            last_epoch_chunk_ids0(Files, {FstEpoch, FstChId, []});
-        _ ->
-            ok = file:close(Fd),
-            []
-    end;
-last_epoch_chunk_ids0([IdxFile | Rem], {PrevE, _PrevChId, EOs} = Acc0) ->
-    %% TODO: make last_valid_idx_record/1 take a file handle
-    case last_valid_idx_record(IdxFile) of
-        {ok, ?IDX_MATCH(_LstChId, LstEpoch, _)}
-          when LstEpoch > PrevE ->
-            {ok, Fd} = open(IdxFile, [read, raw, binary]),
-            Acc = idx_skip_search(Fd, ?IDX_HEADER_SIZE,
-                                  fun leo_search_fun/3,
-                                  Acc0),
-            ok = file:close(Fd),
-            last_epoch_chunk_ids0(Rem, Acc);
-        {ok, ?IDX_MATCH(LstChId, LstEpoch, _)} ->
-            %% no scan needed, just pass last epoch chunk id pair
-            Acc = {LstEpoch, LstChId, EOs},
-            last_epoch_chunk_ids0(Rem, Acc);
-        undefined ->
-            %% this means the index had a header but no entries
-            %% we assume there are no further valid index files
-            last_epoch_chunk_ids0([], Acc0);
-        eof ->
-            %% last index file must have been empty
-            last_epoch_chunk_ids0([], Acc0)
-    end.
-
-
-leo_search_fun(_Type, ?IDX_MATCH(ChId, Epoch, _), {Epoch, _, Prev}) ->
-    {continue, {Epoch, ChId, Prev}};
-leo_search_fun(peek, ?IDX_MATCH(_ChId, Epoch, _), {CurEpoch, _, _} = Acc)
-  when Epoch > CurEpoch ->
-    {scan, Acc};
-leo_search_fun(scan, ?IDX_MATCH(ChId, Epoch, _), {CurEpoch, CurChId, Prev})
-  when Epoch > CurEpoch ->
-    {continue, {Epoch, ChId, [{CurEpoch, CurChId} | Prev]}};
-leo_search_fun(scan, ?IDX_MATCH(ChId, Epoch, _), undefined) ->
-    {continue, {Epoch, ChId, []}};
-leo_search_fun(_Type, _, Acc) ->
-    %% invalid index record
-    {continue, Acc}.
-
-idx_skip_search(Fd, ?IDX_HEADER_SIZE = Pos0, Fun, Acc0) ->
-    %% avoid skipping on very first record
-    case idx_read_at(Fd, Pos0) of
-        {ok, IdxRecordBin} ->
-            case Fun(scan, IdxRecordBin, Acc0) of
-                {continue, Acc} ->
-                    Pos = Pos0 + ?INDEX_RECORD_SIZE_B,
-                    idx_skip_search(Fd, Pos, Fun, Acc);
-                {return, Acc} ->
-                    Acc
-            end;
-        _ ->
-            Acc0
-    end;
-idx_skip_search(Fd, Pos, Fun, Acc0) ->
-    SkipSize = ?SKIP_SEARCH_JUMP * ?INDEX_RECORD_SIZE_B,
-    PeekPos = Pos + SkipSize,
-    case idx_read_at(Fd, PeekPos) of
-        {ok, IdxRecordBin} ->
-            case Fun(peek, IdxRecordBin, Acc0) of
-                {continue, Acc} ->
-                    idx_skip_search(Fd, PeekPos + ?INDEX_RECORD_SIZE_B, Fun, Acc);
-                {return, Acc} ->
-                    Acc;
-                {scan, Acc1} ->
-                    {ok, Data} = file:pread(Fd, Pos, SkipSize + ?INDEX_RECORD_SIZE_B),
-                    case idx_lin_scan(Data, Fun, Acc1) of
-                        {continue, Acc} ->
-                            idx_skip_search(Fd, PeekPos + ?INDEX_RECORD_SIZE_B,
-                                            Fun, Acc);
-                        {return, Acc} ->
-                            Acc
-                    end
-            end;
-        _ ->
-            %% eof or invalid index record
-            case file:pread(Fd, Pos, SkipSize + ?INDEX_RECORD_SIZE_B) of
-                {ok, Data} ->
-                    case idx_lin_scan(Data, Fun, Acc0) of
-                        {continue, Acc} ->
-                            %% eof so can't continue
-                            Acc;
-                        {return, Acc} ->
-                            Acc
-                    end;
-                eof ->
-                    Acc0
-            end
-    end.
-
-
-idx_lin_scan(<<>>, _Fun, Acc) ->
-    {continue, Acc};
-idx_lin_scan(?ZERO_IDX_MATCH(_), _Fun, Acc0) ->
-    {continue, Acc0};
-idx_lin_scan(<<IdxRecordBin:?INDEX_RECORD_SIZE_B/binary, Rem/binary>>, Fun, Acc0) ->
-    case Fun(scan, IdxRecordBin, Acc0) of
-        {continue, Acc} ->
-            idx_lin_scan(Rem, Fun, Acc);
-        {return, _} = Ret ->
-            Ret
-    end.
 
 segment_from_index_file(IdxFile) when is_list(IdxFile) ->
     unicode:characters_to_list(string:replace(IdxFile, ".index", ".segment", trailing));
@@ -1287,8 +1037,8 @@ write_chunk(Chunk,
             NumRecords,
             #?MODULE{cfg = #cfg{counter = CntRef,
                                 shared = Shared} = Cfg,
-                     fd = Fd,
-                     index_fd = IdxFd,
+                     segment_io = {fd, Fd},
+                     index_io = {fd, IdxFd},
                      mode =
                          #write{segment_size = {SegSizeBytes, SegSizeChunks},
                                 tail_info = {Next, _}} =
@@ -1352,13 +1102,13 @@ make_file_name(N, Suff) ->
 open_new_segment(#?MODULE{cfg = #cfg{name = Name,
                                      directory = Dir,
                                      counter = Cnt},
-                          fd = OldFd,
-                          index_fd = OldIdxFd,
+                          segment_io = SegmentIO,
+                          index_io = IndexIO,
                           mode = #write{type = _WriterType,
                                         tail_info = {NextOffset, _}} = Write} =
                  State0) ->
-    _ = close_fd(OldFd),
-    _ = close_fd(OldIdxFd),
+    _ = close_fd(SegmentIO),
+    _ = close_fd(IndexIO),
     Filename = make_file_name(NextOffset, "segment"),
     IdxFilename = make_file_name(NextOffset, "index"),
     ?DEBUG_(Name, "~ts", [Filename]),
@@ -1376,9 +1126,9 @@ open_new_segment(#?MODULE{cfg = #cfg{name = Name,
     counters:add(Cnt, ?C_SEGMENTS, 1),
 
     State0#?MODULE{current_file = Filename,
-                   fd = Fd,
+                   segment_io = {fd, Fd},
                    %% reset segment_size counter
-                   index_fd = IdxFd,
+                   index_io = {fd, IdxFd},
                    mode = Write#write{segment_size = {?LOG_HEADER_SIZE, 0}}}.
 
 throw_missing({error, enoent}) ->
@@ -1514,6 +1264,9 @@ trigger_retention_eval(#?MODULE{cfg =
 
 close_fd(undefined) ->
     ok;
+close_fd({fd, Fd}) ->
+    close_fd(Fd);
+%%TODO when is_record(IoDevice, file_descriptor)?
 close_fd(Fd) ->
     _ = file:close(Fd),
     ok.

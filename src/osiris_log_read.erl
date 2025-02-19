@@ -22,6 +22,7 @@
          read_chunk/1,
          read_chunk_parsed/2,
          iterator_next/1,
+         last_epoch_chunk_ids/2,
          send_file/3
         ]).
 
@@ -112,7 +113,7 @@ init_data_reader_at(ChunkId, FilePos, File,
                             chunk_selector = all,
                             position = FilePos,
                             transport = maps:get(transport, Config, tcp)},
-                      fd = Fd}};
+                        segment_io = {fd, Fd}}};
         Err ->
             Err
     end.
@@ -312,7 +313,7 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                                next_offset = NextChunkId,
                                transport = maps:get(transport, Options, tcp),
                                filter = FilterMatcher},
-                  fd = Fd}}.
+                    segment_io = {fd, Fd}}}.
 
 %% Searches the index files backwards for the ID of the last user chunk.
 last_user_chunk_location(Name, RevdIdxFiles)
@@ -786,6 +787,20 @@ idx_lin_scan(<<IdxRecordBin:?INDEX_RECORD_SIZE_B/binary, Rem/binary>>, Fun, Acc0
             Ret
     end.
 
+leo_search_fun(_Type, ?IDX_MATCH(ChId, Epoch, _), {Epoch, _, Prev}) ->
+    {continue, {Epoch, ChId, Prev}};
+leo_search_fun(peek, ?IDX_MATCH(_ChId, Epoch, _), {CurEpoch, _, _} = Acc)
+  when Epoch > CurEpoch ->
+    {scan, Acc};
+leo_search_fun(scan, ?IDX_MATCH(ChId, Epoch, _), {CurEpoch, CurChId, Prev})
+  when Epoch > CurEpoch ->
+    {continue, {Epoch, ChId, [{CurEpoch, CurChId} | Prev]}};
+leo_search_fun(scan, ?IDX_MATCH(ChId, Epoch, _), undefined) ->
+    {continue, {Epoch, ChId, []}};
+leo_search_fun(_Type, _, Acc) ->
+    %% invalid index record
+    {continue, Acc}.
+
 offset_search_fun(scan, ?IDX_MATCH(ChId, _Epoch, _Pos), {Offset, _} = State)
   when Offset < ChId ->
     {return, State};
@@ -1258,7 +1273,7 @@ read_header0(#?LOGSTATE{cfg = #cfg{directory = Dir,
                                      position = Pos,
                                      filter = Filter} = Read0,
                         current_file = CurFile,
-                        fd = Fd} =
+                        segment_io = {fd, Fd}} =
                  State) ->
     %% reads the next header if permitted
     case can_read_next(State) of
@@ -1354,7 +1369,7 @@ read_header0(#?LOGSTATE{cfg = #cfg{directory = Dir,
                                                       position = ?LOG_HEADER_SIZE},
                                     read_header0(
                                       State#?LOGSTATE{current_file = SegFile,
-                                                    fd = Fd2,
+                                                    segment_io = {fd, Fd2},
                                                     mode = Read});
                                 {error, enoent} ->
                                     {end_of_stream, State}
@@ -1423,7 +1438,7 @@ chunk_iterator(#?LOGSTATE{cfg = #cfg{},
            filter_size := FilterSize,
            position := Pos,
            next_position := NextPos} = Header,
-         #?LOGSTATE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State1} ->
+         #?LOGSTATE{segment_io = {fd, Fd}, mode = #read{next_offset = ChId} = Read} = State1} ->
             State = State1#?LOGSTATE{mode = Read#read{next_offset = ChId + NumRecords,
                                                          position = NextPos}},
             case needs_handling(RType, Selector, ChType) of
@@ -1460,7 +1475,7 @@ read_chunk(#?LOGSTATE{cfg = #cfg{}} = State0) ->
            position := Pos,
            next_position := NextPos,
            trailer_size := TrailerSize},
-         #?LOGSTATE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State} ->
+         #?LOGSTATE{segment_io = {fd, Fd}, mode = #read{next_offset = ChId} = Read} = State} ->
             ToRead = ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
             {ok, ChData} = file:pread(Fd, Pos, ToRead),
             <<_:?HEADER_SIZE_B/binary,
@@ -1621,7 +1636,7 @@ send_file(Sock,
                position := Pos,
                next_position := NextPos,
                header_data := HeaderData} = Header,
-         #?LOGSTATE{fd = Fd,
+         #?LOGSTATE{segment_io = {fd, Fd},
                        mode = #read{next_offset = ChId} = Read0} = State1} ->
             %% read header
             %% used to write frame headers to socket
@@ -1805,4 +1820,53 @@ last_timestamp_in_index_file(IdxFile) ->
             end;
         Err ->
             Err
+    end.
+
+last_epoch_chunk_ids(Name, IdxFiles) ->
+    T1 = erlang:monotonic_time(),
+    %% no need to filter out empty index files as
+    %% that will be done by last_epoch_chunk_ids0/2
+    Return = last_epoch_chunk_ids0(IdxFiles, undefined),
+    T2 = erlang:monotonic_time(),
+    Time = erlang:convert_time_unit(T2 - T1, native, microsecond),
+    ?DEBUG_(Name, " completed in ~bms", [Time div 1000]),
+    Return.
+
+last_epoch_chunk_ids0([], {LastE, LastO, Res}) ->
+    lists:reverse([{LastE, LastO} | Res]);
+last_epoch_chunk_ids0([], undefined) ->
+    %% the empty stream
+    [];
+last_epoch_chunk_ids0([IdxFile | _] = Files, undefined) ->
+    {ok, Fd} = osiris_log:open(IdxFile, [read, raw, binary]),
+    case first_idx_record(Fd) of
+        {ok, ?IDX_MATCH(FstChId, FstEpoch, _)} ->
+            ok = file:close(Fd),
+            last_epoch_chunk_ids0(Files, {FstEpoch, FstChId, []});
+        _ ->
+            ok = file:close(Fd),
+            []
+    end;
+last_epoch_chunk_ids0([IdxFile | Rem], {PrevE, _PrevChId, EOs} = Acc0) ->
+    %% TODO: make last_valid_idx_record/1 take a file handle
+    case last_valid_idx_record(IdxFile) of
+        {ok, ?IDX_MATCH(_LstChId, LstEpoch, _)}
+          when LstEpoch > PrevE ->
+            {ok, Fd} = osiris_log:open(IdxFile, [read, raw, binary]),
+            Acc = idx_skip_search(Fd, ?IDX_HEADER_SIZE,
+                                  fun leo_search_fun/3,
+                                  Acc0),
+            ok = file:close(Fd),
+            last_epoch_chunk_ids0(Rem, Acc);
+        {ok, ?IDX_MATCH(LstChId, LstEpoch, _)} ->
+            %% no scan needed, just pass last epoch chunk id pair
+            Acc = {LstEpoch, LstChId, EOs},
+            last_epoch_chunk_ids0(Rem, Acc);
+        undefined ->
+            %% this means the index had a header but no entries
+            %% we assume there are no further valid index files
+            last_epoch_chunk_ids0([], Acc0);
+        eof ->
+            %% last index file must have been empty
+            last_epoch_chunk_ids0([], Acc0)
     end.
