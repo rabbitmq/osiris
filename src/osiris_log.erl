@@ -958,22 +958,6 @@ index_files_unsorted(Dir) ->
 orphaned_segments(Dir) ->
     osiris_log_read:orphaned_segments(Dir).
 
-last_idx_record(IdxFd) ->
-    nth_last_idx_record(IdxFd, 1).
-
-nth_last_idx_record(IdxFile, N) when ?IS_STRING(IdxFile) ->
-    {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
-    IdxRecord = nth_last_idx_record(IdxFd, N),
-    _ = file:close(IdxFd),
-    IdxRecord;
-nth_last_idx_record(IdxFd, N) ->
-    case position_at_idx_record_boundary(IdxFd, {eof, -?INDEX_RECORD_SIZE_B * N}) of
-        {ok, _} ->
-            file:read(IdxFd, ?INDEX_RECORD_SIZE_B);
-        Err ->
-            Err
-    end.
-
 last_valid_idx_record(IdxFile) ->
     {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
     case position_at_idx_record_boundary(IdxFd, eof) of
@@ -1098,73 +1082,7 @@ evaluate_retention(Dir, Specs) when is_list(Dir) ->
     % mostly in segment_from_index_file/1
     evaluate_retention(unicode:characters_to_binary(Dir), Specs);
 evaluate_retention(Dir, Specs) when is_binary(Dir) ->
-
-    {Time, Result} = timer:tc(
-                       fun() ->
-                               IdxFiles0 = osiris_log_read:sorted_index_files(Dir),
-                               IdxFiles = evaluate_retention0(IdxFiles0, Specs),
-                               OffsetRange = osiris_log_read:offset_range_from_idx_files(IdxFiles),
-                               FirstTs = first_timestamp_from_index_files(IdxFiles),
-                               {OffsetRange, FirstTs, length(IdxFiles)}
-                       end),
-    ?DEBUG_(<<>>," (~w) completed in ~fms", [Specs, Time/1_000]),
-    Result.
-
-evaluate_retention0(IdxFiles, []) ->
-    IdxFiles;
-evaluate_retention0(IdxFiles, [{max_bytes, MaxSize} | Specs]) ->
-    RemIdxFiles = eval_max_bytes(IdxFiles, MaxSize),
-    evaluate_retention0(RemIdxFiles, Specs);
-evaluate_retention0(IdxFiles, [{max_age, Age} | Specs]) ->
-    RemIdxFiles = eval_age(IdxFiles, Age),
-    evaluate_retention0(RemIdxFiles, Specs).
-
-eval_age([_] = IdxFiles, _Age) ->
-    IdxFiles;
-eval_age([IdxFile | IdxFiles] = AllIdxFiles, Age) ->
-    case last_timestamp_in_index_file(IdxFile) of
-        {ok, Ts} ->
-            Now = erlang:system_time(millisecond),
-            case Ts < Now - Age of
-                true ->
-                    %% the oldest timestamp is older than retention
-                    %% and there are other segments available
-                    %% we can delete
-                    ok = osiris_log_read:delete_segment_from_index(IdxFile),
-                    eval_age(IdxFiles, Age);
-                false ->
-                    AllIdxFiles
-            end;
-        _Err ->
-            AllIdxFiles
-    end;
-eval_age([], _Age) ->
-    %% this could happen if retention is evaluated whilst
-    %% a stream is being deleted
-    [].
-
-eval_max_bytes([], _) -> [];
-eval_max_bytes(IdxFiles, MaxSize) ->
-    [Latest|Older] = lists:reverse(IdxFiles),
-    eval_max_bytes(Older,
-                   %% for retention eval it is ok to use a file size function
-                   %% that implicitly return 0 when file is not found
-                   MaxSize - file_size_or_zero(
-                               segment_from_index_file(Latest)),
-                   [Latest]).
-
-eval_max_bytes([], _, Acc) ->
-    Acc;
-eval_max_bytes([IdxFile | Rest], Limit, Acc) ->
-    SegFile = segment_from_index_file(IdxFile),
-    Size = file_size(SegFile),
-    case Size =< Limit of
-        true ->
-            eval_max_bytes(Rest, Limit - Size, [IdxFile | Acc]);
-        false ->
-            [ok = osiris_log_read:delete_segment_from_index(Seg) || Seg <- [IdxFile | Rest]],
-            Acc
-    end.
+    osiris_log_read:evaluate_retention(Dir, Specs).
 
 file_size(Path) ->
     case prim_file:read_file_info(Path) of
@@ -1172,14 +1090,6 @@ file_size(Path) ->
             Size;
         {error, enoent} ->
             throw(missing_file)
-    end.
-
-file_size_or_zero(Path) ->
-    case prim_file:read_file_info(Path) of
-        {ok, #file_info{size = Size}} ->
-            Size;
-        {error, enoent} ->
-            0
     end.
 
 last_epoch_chunk_ids(Name, IdxFiles) ->
@@ -1430,46 +1340,6 @@ max_segment_size_reached(
                       max_segment_size_chunks = MaxSizeChunks}}) ->
     CurrentSizeBytes >= MaxSizeBytes orelse
     CurrentSizeChunks >= MaxSizeChunks.
-
-last_timestamp_in_index_file(IdxFile) ->
-    case file:open(IdxFile, [raw, binary, read]) of
-        {ok, IdxFd} ->
-            case last_idx_record(IdxFd) of
-                {ok, <<_O:64/unsigned,
-                       LastTimestamp:64/signed,
-                       _E:64/unsigned,
-                       _ChunkPos:32/unsigned,
-                       _ChType:8/unsigned>>} ->
-                    _ = file:close(IdxFd),
-                    {ok, LastTimestamp};
-                Err ->
-                    _ = file:close(IdxFd),
-                    Err
-            end;
-        Err ->
-            Err
-    end.
-
-first_timestamp_from_index_files([IdxFile | _]) ->
-    case file:open(IdxFile, [raw, binary, read]) of
-        {ok, IdxFd} ->
-            case first_idx_record(IdxFd) of
-                {ok, <<_FstO:64/unsigned,
-                       FstTimestamp:64/signed,
-                       _FstE:64/unsigned,
-                       _FstChunkPos:32/unsigned,
-                       _FstChType:8/unsigned>>} ->
-                    _ = file:close(IdxFd),
-                    FstTimestamp;
-                _ ->
-                    _ = file:close(IdxFd),
-                    0
-            end;
-        _Err ->
-            0
-    end;
-first_timestamp_from_index_files([]) ->
-    0.
 
 -spec can_read_next(state()) -> boolean().
 can_read_next(State) ->

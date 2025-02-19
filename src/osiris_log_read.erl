@@ -7,6 +7,7 @@
 -export([init_offset_reader/3,
          init_data_reader/2,
          sorted_index_files/1,
+         evaluate_retention/2,
          offset_range_from_idx_files/1,
          build_seg_info/1,
          maybe_fix_corrupted_files/1,
@@ -1384,10 +1385,10 @@ read_header0(#?LOGSTATE{cfg = #cfg{directory = Dir,
 
 
 can_read_next(#?LOGSTATE{mode = #read{type = offset,
-                                    next_offset = NextOffset},
-                       cfg = #cfg{shared = Ref}}) ->
+                                      next_offset = NextOffset},
+                         cfg = #cfg{shared = Ref}}) ->
     osiris_log_shared:last_chunk_id(Ref) >= NextOffset andalso
-    osiris_log_shared:committed_chunk_id(Ref) >= NextOffset;
+        osiris_log_shared:committed_chunk_id(Ref) >= NextOffset;
 can_read_next(#?LOGSTATE{mode = #read{type = data,
                                     next_offset = NextOffset},
                        cfg = #cfg{shared = Ref}}) ->
@@ -1697,3 +1698,111 @@ send(tcp, Sock, Data) ->
     gen_tcp:send(Sock, Data);
 send(ssl, Sock, Data) ->
     ssl:send(Sock, Data).
+
+evaluate_retention(Dir, Specs) ->
+    {Time, Result} = timer:tc(
+                       fun() ->
+                               IdxFiles0 = osiris_log_read:sorted_index_files(Dir),
+                               IdxFiles = evaluate_retention0(IdxFiles0, Specs),
+                               OffsetRange = osiris_log_read:offset_range_from_idx_files(IdxFiles),
+                               FirstTs = first_timestamp_from_index_files(IdxFiles),
+                               {OffsetRange, FirstTs, length(IdxFiles)}
+                       end),
+    ?DEBUG_(<<>>," (~w) completed in ~fms", [Specs, Time/1_000]),
+    Result.
+
+evaluate_retention0(IdxFiles, []) ->
+    IdxFiles;
+evaluate_retention0(IdxFiles, [{max_bytes, MaxSize} | Specs]) ->
+    RemIdxFiles = eval_max_bytes(IdxFiles, MaxSize),
+    evaluate_retention0(RemIdxFiles, Specs);
+evaluate_retention0(IdxFiles, [{max_age, Age} | Specs]) ->
+    RemIdxFiles = eval_age(IdxFiles, Age),
+    evaluate_retention0(RemIdxFiles, Specs).
+
+eval_age([_] = IdxFiles, _Age) ->
+    IdxFiles;
+eval_age([IdxFile | IdxFiles] = AllIdxFiles, Age) ->
+    case last_timestamp_in_index_file(IdxFile) of
+        {ok, Ts} ->
+            Now = erlang:system_time(millisecond),
+            case Ts < Now - Age of
+                true ->
+                    %% the oldest timestamp is older than retention
+                    %% and there are other segments available
+                    %% we can delete
+                    ok = osiris_log_read:delete_segment_from_index(IdxFile),
+                    eval_age(IdxFiles, Age);
+                false ->
+                    AllIdxFiles
+            end;
+        _Err ->
+            AllIdxFiles
+    end;
+eval_age([], _Age) ->
+    %% this could happen if retention is evaluated whilst
+    %% a stream is being deleted
+    [].
+
+eval_max_bytes([], _) -> [];
+eval_max_bytes(IdxFiles, MaxSize) ->
+    [Latest|Older] = lists:reverse(IdxFiles),
+    eval_max_bytes(Older,
+                   %% for retention eval it is ok to use a file size function
+                   %% that implicitly return 0 when file is not found
+                   MaxSize - file_size_or_zero(
+                               osiris_log:segment_from_index_file(Latest)),
+                   [Latest]).
+
+eval_max_bytes([], _, Acc) ->
+    Acc;
+eval_max_bytes([IdxFile | Rest], Limit, Acc) ->
+    SegFile = osiris_log:segment_from_index_file(IdxFile),
+    Size = file_size(SegFile),
+    case Size =< Limit of
+        true ->
+            eval_max_bytes(Rest, Limit - Size, [IdxFile | Acc]);
+        false ->
+            [ok = osiris_log_read:delete_segment_from_index(Seg) || Seg <- [IdxFile | Rest]],
+            Acc
+    end.
+
+first_timestamp_from_index_files([IdxFile | _]) ->
+    case file:open(IdxFile, [raw, binary, read]) of
+        {ok, IdxFd} ->
+            case first_idx_record(IdxFd) of
+                {ok, <<_FstO:64/unsigned,
+                       FstTimestamp:64/signed,
+                       _FstE:64/unsigned,
+                       _FstChunkPos:32/unsigned,
+                       _FstChType:8/unsigned>>} ->
+                    _ = file:close(IdxFd),
+                    FstTimestamp;
+                _ ->
+                    _ = file:close(IdxFd),
+                    0
+            end;
+        _Err ->
+            0
+    end;
+first_timestamp_from_index_files([]) ->
+    0.
+
+last_timestamp_in_index_file(IdxFile) ->
+    case file:open(IdxFile, [raw, binary, read]) of
+        {ok, IdxFd} ->
+            case last_idx_record(IdxFd) of
+                {ok, <<_O:64/unsigned,
+                       LastTimestamp:64/signed,
+                       _E:64/unsigned,
+                       _ChunkPos:32/unsigned,
+                       _ChType:8/unsigned>>} ->
+                    _ = file:close(IdxFd),
+                    {ok, LastTimestamp};
+                Err ->
+                    _ = file:close(IdxFd),
+                    Err
+            end;
+        Err ->
+            Err
+    end.
