@@ -351,6 +351,7 @@
 -type offset_entry() :: {offset(), osiris:entry()}.
 -type offset_spec() :: osiris:offset_spec().
 -type retention_spec() :: osiris:retention_spec().
+-type chunk_iterator() :: osiris_log_read:chunk_iterator().
 -type header_map() ::
     #{chunk_id => offset(),
       epoch => epoch(),
@@ -758,15 +759,6 @@ counters_ref(#?MODULE{cfg = #cfg{counter = C}}) ->
 read_header(State) ->
     osiris_log_read:read_header(State).
 
--record(iterator, {fd :: file:io_device(),
-                   next_offset :: offset(),
-                   %% entries left
-                   num_left :: non_neg_integer(),
-                   %% any trailing data from last read
-                   %% we try to capture at least the size of the next record
-                   data :: undefined | binary(),
-                   next_record_pos :: non_neg_integer()}).
--opaque chunk_iterator() :: #iterator{}.
 -define(REC_MATCH_SIMPLE(Len, Rem),
         <<0:1, Len:31/unsigned, Rem/binary>>).
 -define(REC_MATCH_SUBBATCH(CompType, NumRec, UncompLen, Len, Rem),
@@ -781,21 +773,21 @@ read_header(State) ->
 
 
 -spec chunk_iterator(state()) ->
-    {ok, header_map(), chunk_iterator(), state()} |
+    {ok, header_map(), osiris_log_read:chunk_iterator(), state()} |
     {end_of_stream, state()} |
     {error, {invalid_chunk_header, term()}}.
 chunk_iterator(State) ->
     chunk_iterator(State, 1).
 
 -spec chunk_iterator(state(), pos_integer() | all) ->
-    {ok, header_map(), chunk_iterator(), state()} |
+    {ok, header_map(), osiris_log_read:chunk_iterator(), state()} |
     {end_of_stream, state()} |
     {error, {invalid_chunk_header, term()}}.
 chunk_iterator(State, CreditHint) ->
     osiris_log_read:chunk_iterator(State, CreditHint).
 
--spec iterator_next(chunk_iterator()) ->
-    end_of_chunk | {offset_entry(), chunk_iterator()}.
+-spec iterator_next(osiris_log_read:chunk_iterator()) ->
+    end_of_chunk | {offset_entry(), osiris_log_read:chunk_iterator()}.
 iterator_next(Iter) ->
     osiris_log_read:iterator_next(Iter).
 

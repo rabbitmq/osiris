@@ -405,6 +405,7 @@ chunk_id_range_from_idx_files(FstIdxFile, LstIdxFile) ->
 
 chunk_location_for_timestamp(Idx, Ts) ->
     %% TODO: optimise using skip search approach
+    %%TODO GEN_IO SOLUTION
     Fd = open_index_read(Idx),
     %% scan index file for nearest timestamp
     {ChunkId, _Timestamp, _Epoch, FilePos} = timestamp_idx_scan(Fd, Ts),
@@ -579,6 +580,8 @@ build_seg_info(IdxFile) ->
 build_segment_info(SegFile, LastChunkPos, IdxFile) ->
     {ok, Fd} = osiris_log:open(SegFile, [read, binary, raw]),
     %% we don't want to read blocks into page cache we are unlikely to need
+
+    %%TODO GEN_IO SOLUTION
     _ = file:advise(Fd, 0, 0, random),
     case file:pread(Fd, ?LOG_HEADER_SIZE, ?HEADER_SIZE_B) of
         eof ->
@@ -1128,6 +1131,7 @@ truncate_to(_Name, _Range, [], IdxFiles) ->
     [begin ok = delete_segment_from_index(I) end || I <- IdxFiles],
     [];
 truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
+    %%TODO GEN_IO SOLUTION
     case find_segment_for_offset(ChId, IdxFiles) of
         {Result, _} when Result == not_found orelse
                          Result == end_of_log ->
