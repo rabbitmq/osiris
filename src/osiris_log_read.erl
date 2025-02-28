@@ -113,7 +113,7 @@ init_data_reader_at(ChunkId, FilePos, File,
                             chunk_selector = all,
                             position = FilePos,
                             transport = maps:get(transport, Config, tcp)},
-                        segment_io = {fd, Fd}}};
+                        segment_io = Fd}};
         Err ->
             Err
     end.
@@ -313,7 +313,7 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                                next_offset = NextChunkId,
                                transport = maps:get(transport, Options, tcp),
                                filter = FilterMatcher},
-                    segment_io = {fd, Fd}}}.
+                    segment_io = Fd}}.
 
 %% Searches the index files backwards for the ID of the last user chunk.
 last_user_chunk_location(Name, RevdIdxFiles)
@@ -1277,7 +1277,7 @@ read_header0(#?LOGSTATE{cfg = #cfg{directory = Dir,
                                      position = Pos,
                                      filter = Filter} = Read0,
                         current_file = CurFile,
-                        segment_io = {fd, Fd}} =
+                        segment_io = Fd} =
                  State) ->
     %% reads the next header if permitted
     case can_read_next(State) of
@@ -1373,7 +1373,7 @@ read_header0(#?LOGSTATE{cfg = #cfg{directory = Dir,
                                                       position = ?LOG_HEADER_SIZE},
                                     read_header0(
                                       State#?LOGSTATE{current_file = SegFile,
-                                                    segment_io = {fd, Fd2},
+                                                    segment_io = Fd2,
                                                     mode = Read});
                                 {error, enoent} ->
                                     {end_of_stream, State}
@@ -1442,7 +1442,7 @@ chunk_iterator(#?LOGSTATE{cfg = #cfg{},
            filter_size := FilterSize,
            position := Pos,
            next_position := NextPos} = Header,
-         #?LOGSTATE{segment_io = {fd, Fd}, mode = #read{next_offset = ChId} = Read} = State1} ->
+         #?LOGSTATE{segment_io = Fd, mode = #read{next_offset = ChId} = Read} = State1} ->
             State = State1#?LOGSTATE{mode = Read#read{next_offset = ChId + NumRecords,
                                                          position = NextPos}},
             case needs_handling(RType, Selector, ChType) of
@@ -1479,7 +1479,7 @@ read_chunk(#?LOGSTATE{cfg = #cfg{}} = State0) ->
            position := Pos,
            next_position := NextPos,
            trailer_size := TrailerSize},
-         #?LOGSTATE{segment_io = {fd, Fd}, mode = #read{next_offset = ChId} = Read} = State} ->
+         #?LOGSTATE{segment_io =  Fd, mode = #read{next_offset = ChId} = Read} = State} ->
             ToRead = ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
             {ok, ChData} = file:pread(Fd, Pos, ToRead),
             <<_:?HEADER_SIZE_B/binary,
@@ -1640,7 +1640,7 @@ send_file(Sock,
                position := Pos,
                next_position := NextPos,
                header_data := HeaderData} = Header,
-         #?LOGSTATE{segment_io = {fd, Fd},
+         #?LOGSTATE{segment_io = Fd,
                        mode = #read{next_offset = ChId} = Read0} = State1} ->
             %% read header
             %% used to write frame headers to socket

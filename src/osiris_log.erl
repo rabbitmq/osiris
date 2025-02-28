@@ -505,8 +505,8 @@ init(#{dir := Dir,
                                 segment_size = {Size, NumChunks},
                                 current_epoch = Epoch},
                      current_file = filename:basename(Filename),
-                     segment_io = {fd, SegFd},
-                     index_io = {fd, IdxFd}};
+                     segment_io = SegFd,
+                     index_io = IdxFd};
         {1, #seg_info{file = Filename,
                       index = IdxFilename,
                       last = undefined}, _} ->
@@ -528,8 +528,8 @@ init(#{dir := Dir,
                                 tail_info = {DefaultNextOffset, empty},
                                 current_epoch = Epoch},
                      current_file = filename:basename(Filename),
-                     segment_io = {fd, SegFd},
-                     index_io = {fd, IdxFd}}
+                     segment_io = SegFd,
+                     index_io = IdxFd}
     end.
 
 -spec write([osiris:data()], state()) -> state().
@@ -1029,8 +1029,8 @@ write_chunk(Chunk,
             NumRecords,
             #?MODULE{cfg = #cfg{counter = CntRef,
                                 shared = Shared} = Cfg,
-                     segment_io = {fd, Fd},
-                     index_io = {fd, IdxFd},
+                     segment_io = Fd,
+                     index_io = IdxFd,
                      mode =
                          #write{segment_size = {SegSizeBytes, SegSizeChunks},
                                 tail_info = {Next, _}} =
@@ -1118,9 +1118,9 @@ open_new_segment(#?MODULE{cfg = #cfg{name = Name,
     counters:add(Cnt, ?C_SEGMENTS, 1),
 
     State0#?MODULE{current_file = Filename,
-                   segment_io = {fd, Fd},
+                   segment_io = Fd,
                    %% reset segment_size counter
-                   index_io = {fd, IdxFd},
+                   index_io = IdxFd,
                    mode = Write#write{segment_size = {?LOG_HEADER_SIZE, 0}}}.
 
 throw_missing({error, enoent}) ->
@@ -1256,9 +1256,7 @@ trigger_retention_eval(#?MODULE{cfg =
 
 close_fd(undefined) ->
     ok;
-close_fd({fd, Fd}) ->
-    close_fd(Fd);
-%%TODO when is_record(IoDevice, file_descriptor)?
+%%TODO when is_record(IoDevice, file_descriptor)? Or have io type?
 close_fd(Fd) ->
     _ = file:close(Fd),
     ok.
