@@ -120,8 +120,19 @@ init_per_testcase(TestCase, Config) ->
      | Config].
 
 extra_init(cluster_write_replication_tls) ->
+    Make = case os:getenv("MAKE") of
+               Value when is_list(Value) ->
+                   Value;
+               false ->
+                   case os:find_executable("gmake") of
+                       Value when is_list(Value) ->
+                           "gmake";
+                       false ->
+                           "make"
+                   end
+           end,
     TlsGenDir = os:getenv("DEPS_DIR") ++ "/tls_gen/basic",
-    TlsGenCmd = "make -C " ++ TlsGenDir ++ " CN=$(hostname -s) CLIENT_ALT_NAME=$(hostname -s) SERVER_ALT_NAME=$(hostname -s)",
+    TlsGenCmd = Make ++ " -C " ++ TlsGenDir ++ " CN=$(hostname -s) CLIENT_ALT_NAME=$(hostname -s) SERVER_ALT_NAME=$(hostname -s)",
     TlsGenBasicOutput = os:cmd(TlsGenCmd),
     Hostname = string:trim(os:cmd("hostname -s"), both, "\n"),
     ct:pal(?LOW_IMPORTANCE, "~ts: ~ts", [TlsGenCmd, TlsGenBasicOutput]),
