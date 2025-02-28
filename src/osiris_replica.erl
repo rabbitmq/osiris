@@ -534,10 +534,14 @@ handle_info({'EXIT', RRPid, Info},
     ?ERROR_(Name, "replica reader ~w exited with ~w", [RRPid, Info]),
     {stop, {shutdown, Info}, State};
 handle_info({'EXIT', Ref, normal},
-            #?MODULE{cfg = #cfg{name = Name}} = State) ->
+            #?MODULE{cfg = #cfg{name = Name}} = State) when is_port(Ref) ->
     %% we assume any 'normal' EXIT is fine to ignore (port etc)
     ?DEBUG_(Name, "EXIT received for ~w with 'normal'", [Ref]),
     {noreply, State};
+handle_info({'EXIT', Ref, normal},
+            #?MODULE{cfg = #cfg{name = Name}} = State) ->
+    ?DEBUG_(Name, "EXIT received for ~w with 'normal'", [Ref]),
+    {stop, normal, State};
 handle_info({'EXIT', Ref, Info},
             #?MODULE{cfg = #cfg{name = Name}} = State) ->
     ?WARN_(Name, "unexpected linked process or port ~w exited with ~w",
