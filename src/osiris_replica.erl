@@ -747,7 +747,7 @@ listener_opts(tcp) ->
     Linger = application:get_env(osiris, replica_linger, true),
     LingerTimeout = application:get_env(osiris, replica_linger_timeout, 0),
 
-    IPAddrFamily = osiris_util:get_inet_address_family(),
+    IPAddrFamily = osiris_util:get_replica_listener_inet_address_family(),
 
     [binary,
      IPAddrFamily,

@@ -371,7 +371,7 @@ close(ssl, Socket) ->
 connect_options() ->
     SndBuf = application:get_env(osiris, replica_sndbuf, ?DEF_SND_BUF),
     KeepAlive = application:get_env(osiris, replica_keepalive, false),
-    IPAddrFamily = osiris_util:get_inet_address_family(),
+    IPAddrFamily = osiris_util:get_replica_listener_inet_address_family(),
     [binary,
      IPAddrFamily,
      {packet, 0},
