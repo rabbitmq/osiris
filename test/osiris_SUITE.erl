@@ -27,7 +27,10 @@
 %%%===================================================================
 
 all() ->
-    [{group, tests}].
+    [
+        {group, tests},
+        {group, ipv6}
+    ].
 
 all_tests() ->
     [single_node_write,
@@ -84,10 +87,20 @@ all_tests() ->
      combine_ips_hosts_test,
      empty_last_segment].
 
+%% Isolated to avoid test interference
+ipv6_tests() ->
+    [
+        cluster_write_replication_plain_ipv6,
+        cluster_write_replication_tls_ipv6
+    ].
+
 -define(BIN_SIZE, 800).
 
 groups() ->
-    [{tests, [], all_tests()}].
+    [
+        {tests, [], all_tests()},
+        {ipv6,  [], ipv6_tests()}
+    ].
 
 init_per_suite(Config) ->
     osiris:configure_logger(logger),
@@ -96,10 +109,18 @@ init_per_suite(Config) ->
 end_per_suite(_Config) ->
     ok.
 
+init_per_group(ipv6, Config) ->
+    application:set_env(kernel, prevent_overlapping_partitions, false),
+    application:set_env(osiris, replica_ip_address_family, inet6),
+    Config;
 init_per_group(_Group, Config) ->
     application:set_env(kernel, prevent_overlapping_partitions, false),
+    application:set_env(osiris, replica_ip_address_family, inet),
     Config.
 
+end_per_group(ipv6, _Config) ->
+    application:set_env(osiris, replica_ip_address_family, inet),
+    ok;
 end_per_group(_Group, _Config) ->
     ok.
 
@@ -153,6 +174,14 @@ extra_init(cluster_write_replication_tls) ->
         {secure_renegotiate, true},
         {verify,verify_peer}
     ]),
+    ok;
+extra_init(cluster_write_replication_tls_ipv6) ->
+    extra_init(cluster_write_replication_tls),
+    application:set_env(osiris, replica_ip_address_family, inet6),
+    ok;
+extra_init(cluster_write_replication_plain_ipv6) ->
+    application:set_env(osiris, replication_transport, tcp),
+    application:set_env(osiris, replica_ip_address_family, inet6),
     ok;
 extra_init(_) ->
     application:set_env(osiris, replication_transport, tcp),
@@ -298,7 +327,13 @@ start_many_clusters(Config) ->
 cluster_write_replication_plain(Config) ->
     cluster_write(Config, undefined).
 
+cluster_write_replication_plain_ipv6(Config) ->
+    cluster_write(Config, undefined).
+
 cluster_write_replication_tls(Config) ->
+    cluster_write(Config, undefined).
+
+cluster_write_replication_tls_ipv6(Config) ->
     cluster_write(Config, undefined).
 
 cluster_write_replication_plain_with_filter(Config) ->

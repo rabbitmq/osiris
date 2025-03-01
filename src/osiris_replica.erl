@@ -746,7 +746,11 @@ listener_opts(tcp) ->
     ReuseAddr = application:get_env(osiris, replica_reuseaddr, true),
     Linger = application:get_env(osiris, replica_linger, true),
     LingerTimeout = application:get_env(osiris, replica_linger_timeout, 0),
+
+    IPAddrFamily = osiris_util:get_inet_address_family(),
+
     [binary,
+     IPAddrFamily,
      {reuseaddr, ReuseAddr},
      {linger, {Linger, LingerTimeout}},
      {backlog, 0},

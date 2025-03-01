@@ -18,6 +18,7 @@
          get_replication_configuration_from_tls_dist/0,
          get_replication_configuration_from_tls_dist/1,
          get_replication_configuration_from_tls_dist/2,
+         get_inet_address_family/0,
          partition_parallel/3,
          normalise_name/1,
          get_reader_context/1,
@@ -238,6 +239,14 @@ eval_term(V) ->
     {ok, AbsForm} = erl_parse:parse_exprs(Tokens),
     {value, Term, _Bs} = erl_eval:exprs(AbsForm, erl_eval:new_bindings()),
     Term.
+
+-spec get_inet_address_family() -> inet | inet6.
+get_inet_address_family() ->
+    case application:get_env(osiris, replica_ip_address_family, inet) of
+        inet  -> inet;
+        inet6 -> inet6;
+        _     -> inet
+    end.
 
 inet_tls_enabled([]) ->
     false;
