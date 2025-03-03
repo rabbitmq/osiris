@@ -43,6 +43,8 @@
 
 -define(SKIP_SEARCH_JUMP, 2048).
 
+-define(DEFAULT_IO_MODULE, file).
+
 -type chunk_type() ::
     ?CHNK_USER |
     ?CHNK_TRK_DELTA |
@@ -83,6 +85,7 @@
         {cfg :: #cfg{},
          mode :: #read{} | #write{},
          current_file :: undefined | file:filename_all(),
+         io_open_module = ?DEFAULT_IO_MODULE :: module(),
          index_io :: undefined | file:io_device(),
          %% Should the FDs be moved to the write and read config?
          segment_io :: undefined | file:io_device()

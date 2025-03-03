@@ -58,6 +58,7 @@
 -export([segment_from_index_file/1,
          make_file_name/2,
          open/2,
+         open/3,
          counter_id/1,
          validate_crc/3]).
 
@@ -1105,11 +1106,11 @@ open_new_segment(#?MODULE{cfg = #cfg{name = Name,
     IdxFilename = make_file_name(NextOffset, "index"),
     ?DEBUG_(Name, "~ts", [Filename]),
     {ok, IdxFd} =
-        file:open(
+        open(
             filename:join(Dir, IdxFilename), ?FILE_OPTS_WRITE),
     ok = file:write(IdxFd, ?IDX_HEADER),
     {ok, Fd} =
-        file:open(
+        open(
             filename:join(Dir, Filename), ?FILE_OPTS_WRITE),
     ok = file:write(Fd, ?LOG_HEADER),
     %% we always move to the end of the file
@@ -1129,7 +1130,9 @@ throw_missing(Any) ->
     Any.
 
 open(File, Options) ->
-    throw_missing(file:open(File, Options)).
+    open(file, File, Options).
+open(Mod, File, Options) ->
+    throw_missing(Mod:open(File, Options)).
 
 validate_crc(ChunkId, Crc, IOData) ->
     case erlang:crc32(IOData) of
@@ -1263,12 +1266,12 @@ close_fd(Fd) ->
 
 
 dump_init(File) ->
-    {ok, Fd} = file:open(File, [raw, binary, read]),
+    {ok, Fd} = open(File, [raw, binary, read]),
     {ok, <<"OSIL", _V:4/binary>> } = file:read(Fd, ?LOG_HEADER_SIZE),
     Fd.
 
 dump_init_idx(File) ->
-    {ok, Fd} = file:open(File, [raw, binary, read]),
+    {ok, Fd} = open(File, [raw, binary, read]),
     {ok, <<"OSII", _V:4/binary>> } = file:read(Fd, ?IDX_HEADER_SIZE),
     Fd.
 
