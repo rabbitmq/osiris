@@ -177,7 +177,7 @@ init_offset_reader0({timestamp, Ts}, #{} = Conf) ->
                     SegmentFile = osiris_log:segment_from_index_file(IdxFile),
                     open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
                 {first_in, IdxFile} ->
-                    {ok, Fd} = open(IdxFile, [raw, binary, read]),
+                    {ok, Fd} = open_idx(IdxFile, [raw, binary, read]),
                     {ok, ?IDX_MATCH(ChunkId, _, FilePos)} = first_idx_record(Fd),
                     SegmentFile = osiris_log:segment_from_index_file(IdxFile),
                     open_offset_reader_at(SegmentFile, ChunkId, FilePos, Conf);
@@ -330,7 +330,7 @@ last_user_chunk_id0(_, []) ->
     not_found;
 last_user_chunk_id0(Name, [IdxFile | Rest]) ->
     %% Do not read-ahead since we read the index file backwards chunk by chunk.
-    {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
+    {ok, IdxFd} = open_idx(IdxFile, [read, raw, binary]),
     {ok, EofPos} = position_at_idx_record_boundary(IdxFd, eof),
     Last = last_user_chunk_id_in_index(EofPos - ?INDEX_RECORD_SIZE_B, IdxFd),
     _ = file:close(IdxFd),
@@ -380,14 +380,14 @@ chunk_id_range_from_idx_files(Files) ->
     end.
 
 chunk_id_range_from_idx_files(FstIdxFile, LstIdxFile) ->
-    {ok, LstFd} = open(LstIdxFile, [read, raw, binary]),
+    {ok, LstFd} = open_idx(LstIdxFile, [read, raw, binary]),
     case position_at_idx_record_boundary(LstFd, eof) of
         {ok, Pos} ->
             case file:pread(LstFd, Pos - ?INDEX_RECORD_SIZE_B,
                             ?INDEX_RECORD_SIZE_B) of
                 {ok, ?IDX_MATCH(LstChId, _, _)} ->
                     ok = file:close(LstFd),
-                    {ok, FstFd} = open(FstIdxFile, [read, raw, binary]),
+                    {ok, FstFd} = open_idx(FstIdxFile, [read, raw, binary]),
                     case file:pread(FstFd, ?IDX_HEADER_SIZE,
                                     ?INDEX_RECORD_SIZE_B) of
                         {ok, ?IDX_MATCH(FstChId, _, _)} ->
@@ -443,7 +443,7 @@ timestamp_idx_scan(Fd, Ts) ->
     end.
 
 first_last_timestamps(IdxFile) ->
-    case open(IdxFile, [raw, read, binary]) of
+    case open_idx(IdxFile, [raw, read, binary]) of
         {ok, Fd} ->
             _ = file:advise(Fd, 0, 0, random),
             case first_idx_record(Fd) of
@@ -709,7 +709,7 @@ offset_idx_scan(Name, Offset, #seg_info{index = IndexFile} = SegmentInfo) ->
                          true ->
                              offset_out_of_range;
                          false ->
-                             {ok, IdxFd} = open(IndexFile,
+                             {ok, IdxFd} = open_idx(IndexFile,
                                                 [read, raw, binary]),
                              _ = file:advise(IdxFd, 0, 0, random),
                              {Offset, SearchResult} =
@@ -827,7 +827,7 @@ position_at_idx_record_boundary(IdxFd, At) ->
     end.
 
 open_index_read(File) ->
-    {ok, Fd} = open(File, [read, raw, binary, read_ahead]),
+    {ok, Fd} = open_idx(File, [read, raw, binary, read_ahead]),
     %% We can't use the assertion that index header is correct because of a
     %% race condition between opening the file and writing the header
     %% It seems to happen when retention policies are applied
@@ -846,7 +846,7 @@ last_idx_record(IdxFd) ->
     nth_last_idx_record(IdxFd, 1).
 
 nth_last_idx_record(IdxFile, N) when ?IS_STRING(IdxFile) ->
-    {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
+    {ok, IdxFd} = open_idx(IdxFile, [read, raw, binary]),
     IdxRecord = nth_last_idx_record(IdxFd, N),
     _ = file:close(IdxFd),
     IdxRecord;
@@ -922,7 +922,7 @@ chunk_range_from_segment_infos(SegInfos) when is_list(SegInfos) ->
     {First, Last}.
 
 last_valid_idx_record(IdxFile) ->
-    {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
+    {ok, IdxFd} = open_idx(IdxFile, [read, raw, binary]),
     case position_at_idx_record_boundary(IdxFd, eof) of
         {ok, Pos} ->
             SegFile = osiris_log:segment_from_index_file(IdxFile),
@@ -1045,7 +1045,7 @@ maybe_fix_corrupted_files([IdxFile]) ->
         true ->
             % the only index doesn't contain a single valid record
             % make sure it has a valid header
-            {ok, IdxFd} = open(IdxFile, ?FILE_OPTS_WRITE),
+            {ok, IdxFd} = open_idx(IdxFile, ?FILE_OPTS_WRITE),
             ok = file:write(IdxFd, ?IDX_HEADER),
             ok = file:close(IdxFd);
         false ->
@@ -1091,7 +1091,7 @@ truncate_invalid_idx_records(IdxFile, SegSize) ->
     % add an option to perform a full segment scan and reconstruct
     % the index for the valid chunks.
     SegFile = osiris_log:segment_from_index_file(IdxFile),
-    {ok, IdxFd} = open(IdxFile, [raw, binary, write, read]),
+    {ok, IdxFd} = open_idx(IdxFile, [raw, binary, write, read]),
     {ok, Pos} = position_at_idx_record_boundary(IdxFd, eof),
     ok = skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
     ok = file:truncate(IdxFd),
@@ -1181,7 +1181,7 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
                     %% FilePos could be eof here which means the next offset
                     {ok, Fd} = open(File, [read, write, binary, raw]),
                     _ = file:advise(Fd, 0, 0, random),
-                    {ok, IdxFd} = open(IdxFile, [read, write, binary, raw]),
+                    {ok, IdxFd} = open_idx(IdxFile, [read, write, binary, raw]),
 
                     NextPos = next_chunk_pos(Fd, Pos),
                     {ok, _} = file:position(Fd, NextPos),
@@ -1787,7 +1787,7 @@ eval_max_bytes([IdxFile | Rest], Limit, Acc) ->
     end.
 
 first_timestamp_from_index_files([IdxFile | _]) ->
-    case open(IdxFile, [raw, binary, read]) of
+    case open_idx(IdxFile, [raw, binary, read]) of
         {ok, IdxFd} ->
             case first_idx_record(IdxFd) of
                 {ok, <<_FstO:64/unsigned,
@@ -1808,7 +1808,7 @@ first_timestamp_from_index_files([]) ->
     0.
 
 last_timestamp_in_index_file(IdxFile) ->
-    case open(IdxFile, [raw, binary, read]) of
+    case open_idx(IdxFile, [raw, binary, read]) of
         {ok, IdxFd} ->
             case last_idx_record(IdxFd) of
                 {ok, <<_O:64/unsigned,
@@ -1842,7 +1842,7 @@ last_epoch_chunk_ids0([], undefined) ->
     %% the empty stream
     [];
 last_epoch_chunk_ids0([IdxFile | _] = Files, undefined) ->
-    {ok, Fd} = open(IdxFile, [read, raw, binary]),
+    {ok, Fd} = open_idx(IdxFile, [read, raw, binary]),
     case first_idx_record(Fd) of
         {ok, ?IDX_MATCH(FstChId, FstEpoch, _)} ->
             ok = file:close(Fd),
@@ -1856,7 +1856,7 @@ last_epoch_chunk_ids0([IdxFile | Rem], {PrevE, _PrevChId, EOs} = Acc0) ->
     case last_valid_idx_record(IdxFile) of
         {ok, ?IDX_MATCH(_LstChId, LstEpoch, _)}
           when LstEpoch > PrevE ->
-            {ok, Fd} = open(IdxFile, [read, raw, binary]),
+            {ok, Fd} = open_idx(IdxFile, [read, raw, binary]),
             Acc = idx_skip_search(Fd, ?IDX_HEADER_SIZE,
                                   fun leo_search_fun/3,
                                   Acc0),
@@ -1875,6 +1875,8 @@ last_epoch_chunk_ids0([IdxFile | Rem], {PrevE, _PrevChId, EOs} = Acc0) ->
             last_epoch_chunk_ids0([], Acc0)
     end.
 
+open_idx(File, Options) ->
+    osiris_log:open(File, Options).
 open(File, Options) ->
     IOMod = application:get_env(osiris, io_open_module,
                                     ?DEFAULT_IO_MODULE),
