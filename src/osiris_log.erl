@@ -2733,8 +2733,6 @@ open_seg(File, Options) ->
 open_seg(IOMod, File, Options) ->
     open(IOMod, File, Options).
 
-open(File, Options) ->
-    open(file, File, Options).
 open(Mod, File, Options) ->
     throw_missing(Mod:open(File, Options)).
 
