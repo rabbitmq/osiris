@@ -30,5 +30,3 @@ DIALYZER_OPTS += --src -r test -Wunmatched_returns -Werror_handling
 PLT_APPS += seshat ssl eunit common_test
 EUNIT_OPTS = no_tty, {report, {eunit_progress, [colored, profile]}}
 include $(if $(ERLANG_MK_FILENAME),$(ERLANG_MK_FILENAME),erlang.mk)
-
-include mk/bazel.mk
