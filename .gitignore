@@ -21,7 +21,4 @@ osiris.d
 
 *.jar
 
-/user.bazelrc
-/bazel-*
-
 /.vscode/

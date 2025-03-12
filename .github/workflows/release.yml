@@ -15,23 +15,12 @@ jobs:
       id: versions
       working-directory: osiris
       run: |
-        sudo npm install --global --silent @bazel/buildozer
+        VERSION_ERLANG_MK="$(sed -ne 's/PROJECT_VERSION = \(.*\)/\1/p' Makefile)"
 
-        # VERSION_ERLANG_MK="$(sed -ne 's/PROJECT_VERSION = \(.*\)/\1/p' Makefile)"
-
-        # if [[ "${{ github.ref_name }}" != "v$VERSION_ERLANG_MK" ]]; then
-        #   echo "Version in Makefile ($VERSION_ERLANG_MK) does not match tag (${{ github.ref_name }})"
-        #   exit 1
-        # fi
-
-        VERSION_BAZEL="$(cat MODULE.bazel | buildozer 'print version' -:%module)"
-
-        if [[ "${{ github.ref_name }}" != "v$VERSION_BAZEL" ]]; then
-          echo "Version in MODULE.bazel ($VERSION_BAZEL) does not match tag (${{ github.ref_name }})"
+        if [[ "${{ github.ref_name }}" != "v$VERSION_ERLANG_MK" ]]; then
+          echo "Version in Makefile ($VERSION_ERLANG_MK) does not match tag (${{ github.ref_name }})"
           exit 1
         fi
-
-        echo "version=$VERSION_BAZEL" | tee -a $GITHUB_OUTPUT
     - name: FETCH THE SOURCE ARCHIVE
       run: |
         curl \
