@@ -531,7 +531,12 @@ handle_info({'EXIT', RRPid, Info},
                                 replica_reader_pid = RRPid}} = State) ->
     %% any replica reader exit is troublesome and requires the replica to also
     %% terminate
-    ?ERROR_(Name, "replica reader ~w exited with ~w", [RRPid, Info]),
+    case lists:member(Info, [normal, shutdown]) of
+        true ->
+            ?DEBUG_(Name, "replica reader ~w exited with ~w", [RRPid, Info]);
+        false ->
+            ?ERROR_(Name, "replica reader ~w exited with ~w", [RRPid, Info])
+    end,
     {stop, {shutdown, Info}, State};
 handle_info({'EXIT', Ref, normal},
             #?MODULE{cfg = #cfg{name = Name}} = State) ->
