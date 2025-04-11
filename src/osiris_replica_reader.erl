@@ -67,19 +67,26 @@ stop(Pid) ->
     gen_server:cast(Pid, stop).
 
 start(Node, ReplicaReaderConf) when is_map(ReplicaReaderConf) ->
-    supervisor:start_child({osiris_replica_reader_sup, Node},
-                           #{id => make_ref(),
-                             start =>
+    try
+        supervisor:start_child({osiris_replica_reader_sup, Node},
+                               #{id => make_ref(),
+                                 start =>
                                  {osiris_replica_reader, start_link,
                                   [ReplicaReaderConf]},
-                             %% replica readers should never be
-                             %% restarted by their sups
-                             %% instead they need to be re-started
-                             %% by their replica
-                             restart => temporary,
-                             shutdown => 5000,
-                             type => worker,
-                             modules => [osiris_replica_reader]}).
+                                 %% replica readers should never be
+                                 %% restarted by their sups
+                                 %% instead they need to be re-started
+                                 %% by their replica
+                                 restart => temporary,
+                                 shutdown => 5000,
+                                 type => worker,
+                                 modules => [osiris_replica_reader]})
+    catch
+        exit:{{nodedown, _} = Res, _Stack} ->
+              {error, Res};
+        exit:{noproc = Res, _Stack} ->
+              {error, Res}
+    end.
 
 %%%===================================================================
 %%% gen_server callbacks

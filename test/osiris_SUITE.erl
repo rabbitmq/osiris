@@ -85,7 +85,8 @@ all_tests() ->
      single_node_reader_counters,
      cluster_reader_counters,
      combine_ips_hosts_test,
-     empty_last_segment].
+     empty_last_segment,
+     replica_reader_nodedown_noproc].
 
 %% Isolated to avoid test interference
 ipv6_tests() ->
@@ -1893,6 +1894,16 @@ empty_last_segment(Config) ->
         osiris:start_cluster(Conf1),
     timer:sleep(100),
     ?assert(erlang:is_process_alive(Leader2)),
+    ok.
+
+replica_reader_nodedown_noproc(_Config) ->
+    %% unit test to ensure we handle down nodes gracefully.
+    {error, {nodedown, 'banana@fruit'}} =
+        osiris_replica_reader:start('banana@fruit', #{}),
+
+    _ = application:stop(osiris),
+    {error, noproc} =
+        osiris_replica_reader:start(node(), #{}),
     ok.
 
 %% Utility
