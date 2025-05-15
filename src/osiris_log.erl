@@ -778,13 +778,12 @@ accept_chunk([<<?MAGIC:4/unsigned,
                 _TrailerSize:32/unsigned,
                 FilterSize:8/unsigned,
                 _Reserved:24,
-                _Filter:FilterSize/binary,
                 Data/binary>>
               | DataParts] =
                  Chunk,
              #?MODULE{cfg = #cfg{}, mode = #write{tail_info = {Next, _}}} =
                  State0) ->
-    DataAndTrailer = [Data | DataParts],
+    DataAndTrailer = skip(FilterSize, [Data | DataParts]),
     validate_crc(Next, Crc, part(DataSize, DataAndTrailer)),
     %% assertion
     % true = iolist_size(DataAndTrailer) == (DataSize + TrailerSize),
@@ -2788,6 +2787,17 @@ part(Len, [B | L]) when Len > 0 ->
             [binary:part(B, {0, Len})]
     end.
 
+skip(0, L) ->
+    L;
+skip(Len, [B | L]) when Len > 0 ->
+    S = byte_size(B),
+    case Len < S of
+        true ->
+            [binary:part(B, {S, Len - S}) | L];
+        false ->
+            skip(Len - S, L)
+    end.
+
 -spec recover_tracking(state()) ->
     osiris_tracking:state().
 recover_tracking(#?MODULE{cfg = #cfg{directory = Dir,
@@ -3232,12 +3242,21 @@ list_dir(Dir) ->
     end.
 
 -ifdef(TEST).
+-include_lib("eunit/include/eunit.hrl").
 
 
 part_test() ->
     [<<"ABCD">>] = part(4, [<<"ABCDEF">>]),
     [<<"AB">>, <<"CD">>] = part(4, [<<"AB">>, <<"CDEF">>]),
     [<<"AB">>, <<"CDEF">>] = part(6, [<<"AB">>, <<"CDEF">>]),
+    ok.
+
+skip_test() ->
+    [<<"EF">>] = skip(4, [<<"ABCDEF">>]),
+    [<<"B">>, <<"CDEF">>] = skip(1, [<<"AB">>, <<"CDEF">>]),
+    [<<"CDEF">>] = skip(2, [<<"AB">>, <<"CDEF">>]),
+    [<<"DEF">>] = skip(3, [<<"AB">>, <<"CDEF">>]),
+    [<<"AB">>, <<"CDEF">>] = skip(0, [<<"AB">>, <<"CDEF">>]),
     ok.
 
 -endif.
