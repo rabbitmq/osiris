@@ -72,6 +72,7 @@ all_tests() ->
      % truncate_multi_segment,
      accept_chunk,
      accept_chunk_inital_offset,
+     accept_chunk_iolist_header_in_first_element,
      init_acceptor_truncates_tail,
      accept_chunk_truncates_tail,
      accept_chunk_does_not_truncate_tail_in_same_epoch,
@@ -1084,6 +1085,19 @@ accept_chunk_inital_offset(Config) ->
     X0 = osiris_log:init(Conf#{initial_offset => 200}, acceptor),
     ?assertEqual(200, osiris_log:next_offset(X0)),
 
+    ok.
+
+accept_chunk_iolist_header_in_first_element(Config) ->
+    ok = logger:set_primary_config(level, all),
+    Conf = ?config(osiris_conf, Config),
+
+
+    <<Head:48/binary, Res/binary>> = fake_chunk([{<<"filter">>, <<"blob1">>}],
+                                                ?LINE, 1, 100),
+    Ch1 = [Head, Res],
+    F0 = osiris_log:init(Conf#{initial_offset => 100}, acceptor),
+    %% this should not crash
+    _F1 = osiris_log:accept_chunk(Ch1, F0),
     ok.
 
 accept_chunk(Config) ->
