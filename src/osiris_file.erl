@@ -20,58 +20,6 @@
          write/2
         ]).
 
--callback advise(Handle :: term(), Offset :: non_neg_integer(),
-                 Length :: non_neg_integer(), Advise :: term()) ->
-    ok | {error, Reason :: term()}.
-
--callback close(Handle :: term()) ->
-    ok | {error, Reason :: term()}.
-
--callback copy(Source :: file:filename_all(), Destination :: file:filename_all()) ->
-    {ok, BytesCopied :: non_neg_integer()} | {error, Reason :: term()}.
-
--callback del_dir(Dir :: file:filename_all()) ->
-    ok | {error, Reason :: term()}.
-
--callback delete(File :: file:filename_all()) ->
-    ok | {error, Reason :: term()}.
-
--callback make_dir(Dir :: file:filename_all()) ->
-    ok | {error, Reason :: term()}.
-
--callback ensure_dir(Dir :: file:filename_all()) ->
-    ok | {error, Reason :: term()}.
-
--callback list_dir(Dir :: file:filename_all()) ->
-    {ok, [file:filename()]} | {error, Reason :: term()}.
-
--callback open(File :: file:filename_all(), Options :: list()) ->
-    {ok, Handle :: term()} | {error, Reason :: term()}.
-
--callback position(Handle :: term(), Position :: file:position()) ->
-    {ok, NewPosition :: non_neg_integer()} | {error, Reason :: term()}.
-
--callback pread(Handle :: term(), Position :: non_neg_integer(), Size :: non_neg_integer()) ->
-    {ok, Data :: binary()} | eof | {error, Reason :: term()}.
-
--callback read(Handle :: term(), Size :: non_neg_integer()) ->
-    {ok, Data :: binary()} | eof | {error, Reason :: term()}.
-
--callback read_file_info(File :: file:filename_all()) ->
-    {ok, file:file_info()} | {error, Reason :: term()}.
-
--callback sendfile(Handle :: term(), Socket :: term(),
-                   Offset :: non_neg_integer(), Length :: non_neg_integer(),
-                   Options :: list()) ->
-    {ok, BytesSent :: non_neg_integer()} | {error, Reason :: term()}.
-
--callback truncate(Handle :: term()) ->
-    ok | {error, Reason :: term()}.
-
--callback write(Handle :: term(), Data :: iodata()) ->
-    ok | {error, Reason :: term()}.
-
--optional_callbacks([write/2]).
 
 -type file_handle() :: {module(), term()} | file:io_device().
 
@@ -81,6 +29,99 @@
                              no_reuse |
                              will_need |
                              dont_need.
+
+-type sendfile_option() :: {chunk_size, non_neg_integer()}
+                         | {use_threads, boolean()}.
+
+
+-callback advise(Handle, Offset, Length, Advise) -> ok | {error, Reason} when
+      Handle :: file_handle(),
+      Offset :: integer(),
+      Length :: integer(),
+      Advise :: posix_file_advise(),
+      Reason :: file:posix() | badarg.
+
+-callback close(Handle) -> ok | {error, Reason} when
+      Handle :: file_handle(),
+      Reason :: file:posix() | badarg | terminated.
+
+-callback copy(Source, Destination) -> {ok, BytesCopied} | {error, Reason} when
+      Source :: file_handle() | Filename | {Filename, Modes},
+      Destination :: file_handle() | Filename | {Filename, Modes},
+      Filename :: file:name_all(),
+      Modes :: [file:mode()],
+      BytesCopied :: non_neg_integer(),
+      Reason :: file:posix() | badarg | terminated.
+
+-callback del_dir(Dir) -> ok | {error, Reason} when
+      Dir :: file:name_all(),
+      Reason :: file:posix() | badarg.
+
+-callback delete(Filename) -> ok | {error, Reason} when
+      Filename :: file:name_all(),
+      Reason :: file:posix() | badarg.
+
+-callback list_dir(Dir) -> {ok, Filenames} | {error, Reason} when
+      Dir :: file:name_all(),
+      Filenames :: [file:filename()],
+      Reason :: file:posix()
+              | badarg
+              | {no_translation, Filename :: unicode:latin1_binary()}.
+
+-callback open(File, Modes) -> {ok, file_handle()} | {error, Reason} when
+      File :: Filename | file:iodata(),
+      Filename :: file:name_all(),
+      Modes :: [file:mode() | ram | directory],
+      Reason :: file:posix() | badarg | system_limit.
+
+-callback position(Handle, Location) -> {ok, NewPosition} | {error, Reason} when
+      Handle :: file_handle(),
+      Location :: file:location(),
+      NewPosition :: integer(),
+      Reason :: file:posix() | badarg | terminated.
+
+-callback pread(Handle, Location, Number) ->
+          {ok, Data} | eof | {error, Reason} when
+      Handle :: file_handle(),
+      Location :: file:location(),
+      Number :: non_neg_integer(),
+      Data :: string() | binary(),
+      Reason :: file:posix() | badarg | terminated.
+
+-callback read(Handle, Number) -> {ok, Data} | eof | {error, Reason} when
+      Handle :: file_handle() | io:device(),
+      Number :: non_neg_integer(),
+      Data :: string() | binary(),
+      Reason :: file:posix()
+              | badarg
+              | terminated
+              | {no_translation, unicode, latin1}.
+
+-callback read_file_info(File) -> {ok, FileInfo} | {error, Reason} when
+      File :: file:name_all() | file_handle(),
+      FileInfo :: file:file_info(),
+      Reason :: file:posix() | badarg.
+
+-callback sendfile(Handle, Socket, Offset, Bytes, Opts) ->
+          {'ok', non_neg_integer()} | {'error', inet:posix() |
+                                       closed | badarg | not_owner} when
+      Handle :: file_handle(),
+      Socket :: inet:socket() | socket:socket() |
+                fun ((iolist()) -> ok | {error, inet:posix() | closed}),
+      Offset :: non_neg_integer(),
+      Bytes :: non_neg_integer(),
+      Opts :: [sendfile_option()].
+
+-callback truncate(Handle) -> ok | {error, Reason} when
+      Handle :: file_handle(),
+      Reason :: file:posix() | badarg | terminated.
+
+-callback write(Handle, Bytes) -> ok | {error, Reason} when
+      Handle :: file_handle() | io:device(),
+      Bytes :: iodata(),
+      Reason :: file:posix() | badarg | terminated.
+
+-optional_callbacks([write/2]).
 
 -spec advise(Handle, Offset, Length, Advise) -> ok | {error, Reason} when
       Handle :: file_handle(),
@@ -105,15 +146,20 @@ close(Handle) ->
     file:close(Handle).
 
 
--spec copy(file:filename_all(), file:filename_all()) ->
-          {ok, non_neg_integer()} | {error, term()}.
+-spec copy(Source, Destination) -> {ok, BytesCopied} | {error, Reason} when
+      Source :: file_handle() | Filename | {Filename, Modes},
+      Destination :: file_handle() | Filename | {Filename, Modes},
+      Filename :: file:name_all(),
+      Modes :: [file:mode()],
+      BytesCopied :: non_neg_integer(),
+      Reason :: file:posix() | badarg | terminated.
 %% TODO
 copy(Source, Destination) ->
     file:copy(Source, Destination).
 
-
--spec del_dir(file:filename_all()) ->
-          ok | {error, term()}.
+-spec del_dir(Dir) -> ok | {error, Reason} when
+      Dir :: file:name_all(),
+      Reason :: file:posix() | badarg.
 %% TODO
 %% Used when a queue is deleted, should perhaps move the entire osiris_log:delete_directory, and
 %% let the Mod handle deletion of storage on its side too.
@@ -122,8 +168,9 @@ del_dir(Dir) ->
     Mod:del_dir(Dir).
 
 
--spec delete(file:filename_all()) ->
-          ok | {error, term()}.
+-spec delete(Filename) -> ok | {error, Reason} when
+      Filename :: file:name_all(),
+      Reason :: file:posix() | badarg.
 %% Do we need the prim_* function calls?
 delete(File) ->
     Mod = get_mod(),
@@ -144,8 +191,12 @@ ensure_dir(Dir) ->
     filelib:ensure_dir(Dir).
 
 
--spec list_dir(file:filename_all()) ->
-          {ok, [file:filename()]} | {error, term()}.
+-spec list_dir(Dir) -> {ok, Filenames} | {error, Reason} when
+      Dir :: file:name_all(),
+      Filenames :: [file:filename()],
+      Reason :: file:posix()
+              | badarg
+              | {no_translation, Filename :: unicode:latin1_binary()}.
 %% TODO
 list_dir(Dir) ->
     Mod = get_mod(prim_file),
@@ -218,16 +269,16 @@ read(Handle, Size) ->
     file:read(Handle, Size).
 
 
--spec read_file_info(file:filename_all()) ->
-          {ok, file:file_info()} | {error, term()}.
+-spec read_file_info(File) -> {ok, FileInfo} | {error, Reason} when
+      File :: file:name_all() | file_handle(),
+      FileInfo :: file:file_info(),
+      Reason :: file:posix() | badarg.
 %% Todo
 read_file_info(File) ->
     Mod = get_mod(prim_file),
     Mod:read_file_info(File).
 
 
--type sendfile_option() :: {chunk_size, non_neg_integer()}
-                         | {use_threads, boolean()}.
 -spec sendfile(Handle, Socket, Offset, Bytes, Opts) ->
           {'ok', non_neg_integer()} | {'error', inet:posix() |
                                        closed | badarg | not_owner} when
