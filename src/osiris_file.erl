@@ -81,7 +81,7 @@
       Reason :: file:posix() | badarg | terminated.
 
 -callback pread(Handle, Location, Number) ->
-          {ok, Data} | eof | {error, Reason} when
+    {ok, Data} | eof | {error, Reason} when
       Handle :: file_handle(),
       Location :: file:location(),
       Number :: non_neg_integer(),
@@ -103,14 +103,14 @@
       Reason :: file:posix() | badarg.
 
 -callback sendfile(Handle, Socket, Offset, Bytes, Opts) ->
-          {'ok', non_neg_integer()} | {'error', inet:posix() |
-                                       closed | badarg | not_owner} when
+    {ok, non_neg_integer()} | {error, inet:posix() |
+                               closed | badarg | not_owner} when
       Handle :: file_handle(),
       Socket :: inet:socket() | socket:socket() |
                 fun ((iolist()) -> ok | {error, inet:posix() | closed}),
-      Offset :: non_neg_integer(),
-      Bytes :: non_neg_integer(),
-      Opts :: [sendfile_option()].
+                    Offset :: non_neg_integer(),
+                    Bytes :: non_neg_integer(),
+                    Opts :: [sendfile_option()].
 
 -callback truncate(Handle) -> ok | {error, Reason} when
       Handle :: file_handle(),
@@ -176,16 +176,19 @@ delete(File) ->
     Mod = get_mod(),
     Mod:delete(File).
 
--spec prim_delete(file:filename_all()) ->
-          ok | {error, term()}.
+
+-spec prim_delete(Filename) -> ok | {error, Reason} when
+      Filename :: file:name_all(),
+      Reason :: file:posix() | badarg.
 
 prim_delete(File) ->
-    Mod = get_mod(prim_file),
+    Mod = get_mod(prim_file, File),
     Mod:delete(File).
 
 
--spec ensure_dir(file:filename_all()) ->
-          ok | {error, term()}.
+-spec ensure_dir(Name) -> ok | {error, Reason} when
+      Name :: file:name_all(),
+      Reason :: file:posix().
 %% Only used for local files
 ensure_dir(Dir) ->
     filelib:ensure_dir(Dir).
@@ -203,8 +206,9 @@ list_dir(Dir) ->
     Mod:list_dir(Dir).
 
 
--spec make_dir(file:filename_all()) ->
-          ok | {error, term()}.
+-spec make_dir(Dir) -> ok | {error, Reason} when
+      Dir :: file:name(),
+      Reason :: file:posix() | badarg.
 %% Only used for the local segment file, no need to change it.
 make_dir(Dir) ->
     file:make_dir(Dir).
@@ -222,7 +226,7 @@ open(File, Options) ->
             file:open(File, Options);
         false ->
             %% Here we will get the correct Mod based on config/manifest file etc.
-            Mod = get_mod(),
+            Mod = get_mod(File),
             {ok, Fd} = Mod:open(File, Options),
             {ok, {Mod, Fd}}
     end.
@@ -275,13 +279,13 @@ read(Handle, Size) ->
       Reason :: file:posix() | badarg.
 %% Todo
 read_file_info(File) ->
-    Mod = get_mod(prim_file),
+    Mod = get_mod(prim_file, File),
     Mod:read_file_info(File).
 
 
 -spec sendfile(Handle, Socket, Offset, Bytes, Opts) ->
-          {'ok', non_neg_integer()} | {'error', inet:posix() |
-                                       closed | badarg | not_owner} when
+          {ok, non_neg_integer()} | {error, inet:posix() |
+                                     closed | badarg | not_owner} when
       Handle :: file_handle(),
       Socket :: inet:socket() | socket:socket() |
                 fun ((iolist()) -> ok | {error, inet:posix() | closed}),
@@ -337,4 +341,22 @@ get_mod(file) ->
 get_mod(prim_file) ->
     %% Just temporary solutin till I figure out why
     %% we even use prim_file?
-    prim_file.
+    prim_file;
+get_mod(File) ->
+    case filelib:is_file(File) of
+        true ->
+            file;
+        false ->
+            application:get_env(osiris, io_segment_module, file)
+    end.
+
+
+get_mod(prim_file, File) ->
+    %% Just temporary solutin till I figure out why
+    %% we even use prim_file?
+    case filelib:is_file(File) of
+        true ->
+            prim_file;
+        false ->
+            application:get_env(osiris, io_segment_module, prim_file)
+    end.
