@@ -2447,10 +2447,13 @@ max_segment_size_reached(
     CurrentSizeBytes >= MaxSizeBytes orelse
     CurrentSizeChunks >= MaxSizeChunks.
 
+%%TODO This should be fully up to the backend.
 sendfile(_Transport, _Fd, _Sock, _Pos, 0) ->
     ok;
 sendfile(tcp = Transport, Fd, Sock, Pos, ToSend) ->
     case osiris_file:sendfile(Fd, Sock, Pos, ToSend, []) of
+        ok ->
+            ok;
         {ok, 0} ->
             %% TODO add counter for this?
             sendfile(Transport, Fd, Sock, Pos, ToSend);
@@ -2806,8 +2809,7 @@ recover_tracking(#?MODULE{cfg = #cfg{directory = Dir,
     %% we need to open a new file handle here as we cannot use the one that is
     %% being used for appending to the segment as pread _may_ move the file
     %% position on some systems (such as windows)
-    {ok, {Mod, Fdn}} = open(filename:join(Dir, File), [read, raw, binary]),
-    Fd = {Mod, Fdn},
+    {ok, Fd} = open(filename:join(Dir, File), [read, raw, binary]),
     _ = osiris_file:advise(Fd, 0, 0, random),
     %% TODO: if the first chunk in the segment isn't a tracking snapshot and
     %% there are prior segments we could scan at least two segments increasing
