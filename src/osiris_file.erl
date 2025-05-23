@@ -123,6 +123,8 @@
 
 -optional_callbacks([write/2]).
 
+-define(DEFAULT_FILE, osiris_file_default).
+
 -spec advise(Handle, Offset, Length, Advise) -> ok | {error, Reason} when
       Handle :: file_handle(),
       Offset :: integer(),
@@ -133,7 +135,7 @@
 advise({Mod, Handle}, Offset, Length, Advise) ->
     Mod:advise(Handle, Offset, Length, Advise);
 advise(Handle, Offset, Length, Advise) ->
-    file:advise(Handle, Offset, Length, Advise).
+    ?DEFAULT_FILE:advise(Handle, Offset, Length, Advise).
 
 
 -spec close(Handle) -> ok | {error, Reason} when
@@ -143,7 +145,7 @@ advise(Handle, Offset, Length, Advise) ->
 close({Mod, Handle}) ->
     Mod:close(Handle);
 close(Handle) ->
-    file:close(Handle).
+    ?DEFAULT_FILE:close(Handle).
 
 
 -spec copy(Source, Destination) -> {ok, BytesCopied} | {error, Reason} when
@@ -155,7 +157,7 @@ close(Handle) ->
       Reason :: file:posix() | badarg | terminated.
 %% TODO
 copy(Source, Destination) ->
-    file:copy(Source, Destination).
+    ?DEFAULT_FILE:copy(Source, Destination).
 
 -spec del_dir(Dir) -> ok | {error, Reason} when
       Dir :: file:name_all(),
@@ -191,7 +193,7 @@ prim_delete(File) ->
       Reason :: file:posix().
 %% Only used for local files
 ensure_dir(Dir) ->
-    filelib:ensure_dir(Dir).
+    ?DEFAULT_FILE:ensure_dir(Dir).
 
 
 -spec list_dir(Dir) -> {ok, Filenames} | {error, Reason} when
@@ -211,7 +213,7 @@ list_dir(Dir) ->
       Reason :: file:posix() | badarg.
 %% Only used for the local segment file, no need to change it.
 make_dir(Dir) ->
-    file:make_dir(Dir).
+    ?DEFAULT_FILE:make_dir(Dir).
 
 
 -spec open(File, Modes) -> {ok, file_handle()} | {error, Reason} when
@@ -223,7 +225,7 @@ open(File, Options) ->
     case lists:member(write, Options) of
         true ->
             %% We do not use tiered storage for writes
-            file:open(File, Options);
+            ?DEFAULT_FILE:open(File, Options);
         false ->
             %% Here we will get the correct Mod based on config/manifest file etc.
             Mod = get_mod(File),
@@ -241,7 +243,7 @@ open(File, Options) ->
 position({Mod, Handle}, Position) ->
     Mod:position(Handle, Position);
 position(Handle, Position) ->
-    file:position(Handle, Position).
+    ?DEFAULT_FILE:position(Handle, Position).
 
 
 -spec pread(Handle, Location, Number) ->
@@ -270,7 +272,7 @@ pread(Handle, Position, Size) ->
 read({Mod, Handle}, Size) ->
     Mod:read(Handle, Size);
 read(Handle, Size) ->
-    file:read(Handle, Size).
+    ?DEFAULT_FILE:read(Handle, Size).
 
 
 -spec read_file_info(File) -> {ok, FileInfo} | {error, Reason} when
@@ -283,20 +285,20 @@ read_file_info(File) ->
     Mod:read_file_info(File).
 
 
--spec sendfile(Handle, Socket, Offset, Bytes, Opts) ->
-          {ok, non_neg_integer()} | {error, inet:posix() |
-                                     closed | badarg | not_owner} when
+-spec sendfile(Transport, Handle, Socket, Offset, Bytes) ->
+          ok | {error, inet:posix() |
+                closed | badarg | not_owner} when
+      Transport :: tcp | ssl,
       Handle :: file_handle(),
       Socket :: inet:socket() | socket:socket() |
                 fun ((iolist()) -> ok | {error, inet:posix() | closed}),
       Offset :: non_neg_integer(),
-      Bytes :: non_neg_integer(),
-      Opts :: [sendfile_option()].
+      Bytes :: non_neg_integer().
 
-sendfile({Mod, Handle}, Socket, Offset, Length, Options) ->
-    Mod:sendfile(Handle, Socket, Offset, Length, Options);
-sendfile(Handle, Socket, Offset, Length, Options) ->
-    file:sendfile(Handle, Socket, Offset, Length, Options).
+sendfile(Transport, {Mod, Handle}, Socket, Offset, Length) ->
+    Mod:sendfile(Transport, Handle, Socket, Offset, Length);
+sendfile(Transport, Handle, Socket, Offset, Length) ->
+    ?DEFAULT_FILE:sendfile(Transport, Handle, Socket, Offset, Length).
 
 
 -spec truncate(Handle) -> ok | {error, Reason} when
@@ -306,7 +308,7 @@ sendfile(Handle, Socket, Offset, Length, Options) ->
 truncate({Mod, Handle}) ->
     Mod:truncate(Handle);
 truncate(Handle) ->
-    file:truncate(Handle).
+    ?DEFAULT_FILE:truncate(Handle).
 
 
 -spec write(Handle, Bytes) -> ok | {error, Reason} when
@@ -316,7 +318,7 @@ truncate(Handle) ->
 write({Mod, Handle}, Data) ->
     Mod:write(Handle, Data);
 write(Handle, Data) ->
-    file:write(Handle, Data).
+    ?DEFAULT_FILE:write(Handle, Data).
 
 %% -spec try_write(module(), term(), iodata()) ->
 %%     ok | {error, term()}.
@@ -329,25 +331,23 @@ write(Handle, Data) ->
 %%     end.
 
 
+%% TODO code below just hack to make it work for now.
 -spec get_mod() -> module().
 
 get_mod() ->
-    get_mod(file).
+    ?DEFAULT_FILE;
 
-get_mod(file) ->
-    %% TODO. This will figure out the correct module to use, based on
-    %% info in the magical manifest file.
-    file;
 get_mod(prim_file) ->
     %% Just temporary solutin till I figure out why
     %% we even use prim_file?
-    prim_file;
+    %% prim_file;
+    ?DEFAULT_FILE;
 get_mod(File) ->
     case filelib:is_file(File) of
         true ->
-            file;
+            ?DEFAULT_FILE;
         false ->
-            application:get_env(osiris, io_segment_module, file)
+            application:get_env(osiris, io_segment_module, ?DEFAULT_FILE)
     end.
 
 
@@ -356,7 +356,7 @@ get_mod(prim_file, File) ->
     %% we even use prim_file?
     case filelib:is_file(File) of
         true ->
-            prim_file;
+            ?DEFAULT_FILE;
         false ->
-            application:get_env(osiris, io_segment_module, prim_file)
+            application:get_env(osiris, io_segment_module, ?DEFAULT_FILE)
     end.

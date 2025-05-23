@@ -1,3 +1,4 @@
+%% Really need a better name...
 -module(osiris_file_default).
 -behaviour(osiris_file).
 
@@ -61,8 +62,25 @@ read(Handle, Size) ->
 read_file_info(File) ->
     prim_file:read_file_info(File).
 
-sendfile(Handle, Socket, Offset, Length, Options) ->
-    file:sendfile(Handle, Socket, Offset, Length, Options).
+sendfile(_Transport, _Handle, _Sock, _Pos, 0) ->
+    ok;
+sendfile(tcp = Transport, Handle, Sock, Pos, ToSend) ->
+    case file:sendfile(Handle, Sock, Pos, ToSend, []) of
+        {ok, 0} ->
+            %% TODO add counter for this?
+            sendfile(Transport, Handle, Sock, Pos, ToSend);
+        {ok, BytesSent} ->
+            sendfile(Transport, Handle, Sock, Pos + BytesSent, ToSend - BytesSent);
+        {error, _} = Err ->
+            Err
+    end;
+sendfile(ssl, Handle, Sock, Pos, ToSend) ->
+    case file:pread(Handle, Pos, ToSend) of
+        {ok, Data} ->
+            ssl:send(Sock, Data);
+        {error, _} = Err ->
+            Err
+    end.
 
 truncate(Handle) ->
     file:truncate(Handle).

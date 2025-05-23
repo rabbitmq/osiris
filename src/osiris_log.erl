@@ -1696,7 +1696,7 @@ send_file(Sock,
                     _ = Callback(Header, ToSend + byte_size(HeaderData)),
                     case send(Transport, Sock, HeaderData) of
                         ok ->
-                            case sendfile(Transport, Fd, Sock,
+                            case osiris_file:sendfile(Transport, Fd, Sock,
                                           Pos + ?HEADER_SIZE_B + ToSkip, ToSend) of
                                 ok ->
                                     State = State1#?MODULE{mode = Read},
@@ -2446,29 +2446,6 @@ max_segment_size_reached(
                       max_segment_size_chunks = MaxSizeChunks}}) ->
     CurrentSizeBytes >= MaxSizeBytes orelse
     CurrentSizeChunks >= MaxSizeChunks.
-
-%%TODO This should be fully up to the backend.
-sendfile(_Transport, _Fd, _Sock, _Pos, 0) ->
-    ok;
-sendfile(tcp = Transport, Fd, Sock, Pos, ToSend) ->
-    case osiris_file:sendfile(Fd, Sock, Pos, ToSend, []) of
-        ok ->
-            ok;
-        {ok, 0} ->
-            %% TODO add counter for this?
-            sendfile(Transport, Fd, Sock, Pos, ToSend);
-        {ok, BytesSent} ->
-            sendfile(Transport, Fd, Sock, Pos + BytesSent, ToSend - BytesSent);
-        {error, _} = Err ->
-            Err
-    end;
-sendfile(ssl, Fd, Sock, Pos, ToSend) ->
-    case osiris_file:pread(Fd, Pos, ToSend) of
-        {ok, Data} ->
-            ssl:send(Sock, Data);
-        {error, _} = Err ->
-            Err
-    end.
 
 send(tcp, Sock, Data) ->
     gen_tcp:send(Sock, Data);
