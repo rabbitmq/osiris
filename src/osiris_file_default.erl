@@ -33,7 +33,7 @@ copy(Source, Destination) ->
     file:copy(Source, Destination).
 
 del_dir(Dir) ->
-    file:del_dir(Dir).
+    prim_file:del_dir(Dir).
 
 delete(File) ->
     prim_file:delete(File).

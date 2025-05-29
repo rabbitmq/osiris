@@ -631,7 +631,7 @@ maybe_fix_corrupted_files(#{dir := Dir}) ->
     [begin
          ?INFO("deleting left over segment '~s' in directory ~s",
                [F, Dir]),
-         ok = osiris_file:prim_delete(filename:join(Dir, F))
+         ok = osiris_file:delete(filename:join(Dir, F))
      end|| F <- orphaned_segments(Dir)],
     ok;
 maybe_fix_corrupted_files([IdxFile]) ->
@@ -664,8 +664,8 @@ maybe_fix_corrupted_files(IdxFiles) ->
         N when N =< ?HEADER_SIZE_B ->
             % if the segment doesn't contain any chunks, just delete it
             ?WARNING("deleting an empty segment file: ~0p", [LastSegFile]),
-            ok = osiris_file:prim_delete(LastIdxFile),
-            ok = osiris_file:prim_delete(LastSegFile),
+            ok = osiris_file:delete(LastIdxFile),
+            ok = osiris_file:delete(LastSegFile),
             maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile]);
         LastSegFileSize ->
             ok = truncate_invalid_idx_records(LastIdxFile, LastSegFileSize)
@@ -673,7 +673,7 @@ maybe_fix_corrupted_files(IdxFiles) ->
             % if the last segment is missing, just delete its index
             ?WARNING("deleting index of the missing last segment file: ~0p",
                      [LastSegFile]),
-            ok = osiris_file:prim_delete(LastIdxFile),
+            ok = osiris_file:delete(LastIdxFile),
             maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile])
     end.
 
@@ -896,8 +896,8 @@ chunk_id_index_scan0(Fd, ChunkId) ->
 delete_segment_from_index(Index) ->
     File = segment_from_index_file(Index),
     ?DEBUG("osiris_log: deleting segment ~ts", [File]),
-    ok = osiris_file:prim_delete(Index),
-    ok = osiris_file:prim_delete(File),
+    ok = osiris_file:delete(Index),
+    ok = osiris_file:delete(File),
     ok.
 
 truncate_to(_Name, _Range, _EpochOffsets, []) ->

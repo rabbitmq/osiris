@@ -12,7 +12,6 @@
          open/2,
          position/2,
          pread/3,
-         prim_delete/1,
          read/2,
          read_file_info/1,
          sendfile/5,
@@ -178,16 +177,6 @@ delete(File) ->
     Mod = get_mod(),
     Mod:delete(File).
 
-
--spec prim_delete(Filename) -> ok | {error, Reason} when
-      Filename :: file:name_all(),
-      Reason :: file:posix() | badarg.
-
-prim_delete(File) ->
-    Mod = get_mod(prim_file, File),
-    Mod:delete(File).
-
-
 -spec ensure_dir(Name) -> ok | {error, Reason} when
       Name :: file:name_all(),
       Reason :: file:posix().
@@ -204,7 +193,7 @@ ensure_dir(Dir) ->
               | {no_translation, Filename :: unicode:latin1_binary()}.
 %% TODO
 list_dir(Dir) ->
-    Mod = get_mod(prim_file),
+    Mod = get_mod(),
     Mod:list_dir(Dir).
 
 
@@ -281,7 +270,7 @@ read(Handle, Size) ->
       Reason :: file:posix() | badarg.
 %% Todo
 read_file_info(File) ->
-    Mod = get_mod(prim_file, File),
+    Mod = get_mod(File),
     Mod:read_file_info(File).
 
 
@@ -316,44 +305,30 @@ truncate(Handle) ->
       Bytes :: iodata(),
       Reason :: file:posix() | badarg | terminated.
 write({Mod, Handle}, Data) ->
-    Mod:write(Handle, Data);
+    Mod:write(Handle, Data),
+    try_write(Mod, Handle, Data);
 write(Handle, Data) ->
     ?DEFAULT_FILE:write(Handle, Data).
 
-%% -spec try_write(module(), term(), iodata()) ->
-%%     ok | {error, term()}.
-%% try_write(Mod, Handle, Data) ->
-%%     case erlang:function_exported(Mod, write, 2) of
-%%         true ->
-%%             Mod:write(Handle, Data);
-%%         false ->
-%%             file:write(Handle, Data)
-%%     end.
+
+-spec try_write(module(), term(), iodata()) ->
+    ok | {error, term()}.
+try_write(Mod, Handle, Data) ->
+    case erlang:function_exported(Mod, write, 2) of
+        true ->
+            Mod:write(Handle, Data);
+        false ->
+            ?DEFAULT_FILE:write(Handle, Data)
+    end.
 
 
 %% TODO code below just hack to make it work for now.
 -spec get_mod() -> module().
 
 get_mod() ->
-    ?DEFAULT_FILE;
+    ?DEFAULT_FILE.
 
-get_mod(prim_file) ->
-    %% Just temporary solutin till I figure out why
-    %% we even use prim_file?
-    %% prim_file;
-    ?DEFAULT_FILE;
 get_mod(File) ->
-    case filelib:is_file(File) of
-        true ->
-            ?DEFAULT_FILE;
-        false ->
-            application:get_env(osiris, io_segment_module, ?DEFAULT_FILE)
-    end.
-
-
-get_mod(prim_file, File) ->
-    %% Just temporary solutin till I figure out why
-    %% we even use prim_file?
     case filelib:is_file(File) of
         true ->
             ?DEFAULT_FILE;
