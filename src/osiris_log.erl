@@ -2583,13 +2583,21 @@ offset_range_from_chunk_range({#chunk_info{id = FirstChId},
                                            num = LastNumRecs}}) ->
     {FirstChId, LastChId + LastNumRecs - 1}.
 
-find_segment_for_offset(Offset, IdxFiles) ->
+find_segment_for_offset(Offset, IdxFiles0) ->
     %% we assume index files are in the default low-> high order here
-    case lists:search(
-           fun(IdxFile) ->
-                   Offset >= index_file_first_offset(IdxFile)
-           end, lists:reverse(IdxFiles)) of
-        {value, File} ->
+    IdxFiles = osiris_array:from_list(lists:reverse(IdxFiles0)),
+    %% Find the index file with the highest first offset where the first offset
+    %% is less than or equal to `Offset'.
+    %%
+    %% For example, given an offset of 19730 and index files where the first
+    %% offsets are [0,6579,13158,19737], this partition point will point to the
+    %% index file where the first offset is 13158.
+    PartPoint = osiris_array:partition_point(
+                  fun(IdxFile) ->
+                          index_file_first_offset(IdxFile) > Offset
+                  end, IdxFiles),
+    case osiris_array:get(PartPoint, IdxFiles) of
+        {ok, File} ->
             case build_seg_info(File) of
                 {ok, #seg_info{first = undefined,
                                last = undefined} = Info} ->
@@ -2616,7 +2624,7 @@ find_segment_for_offset(Offset, IdxFiles) ->
                 {error, _} = Err ->
                     Err
             end;
-        false ->
+        error ->
             {not_found, low}
     end.
 
