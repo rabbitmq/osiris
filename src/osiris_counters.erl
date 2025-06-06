@@ -38,8 +38,8 @@ delete(Name) ->
 
 -spec overview() -> #{name() => #{atom() => non_neg_integer()}}.
 overview() ->
-    seshat:overview(osiris).
+    seshat:counters(osiris).
 
 -spec overview(name()) -> #{atom() => non_neg_integer()} | undefined.
 overview(Name) ->
-    seshat:overview(osiris, Name).
+    seshat:counters(osiris, Name).
