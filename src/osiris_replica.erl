@@ -231,6 +231,7 @@ handle_continue(#{name := Name0,
             ?DEBUG_(Name, "replica listening on port '~b' using transport ~s",
                     [Port, Transport]),
             Acceptor = spawn_link(fun() -> accept(Name, Transport, LSock, Self) end),
+            ?DEBUG_(Name, "starting replica reader on node '~w'", [Node]),
 
             ReplicaReaderConf = #{hosts => IpsHosts,
                                   port => Port,
@@ -244,6 +245,7 @@ handle_continue(#{name := Name0,
             case osiris_replica_reader:start(Node, ReplicaReaderConf) of
                 {ok, RRPid} ->
                     true = link(RRPid),
+                    ?DEBUG_(Name, "started replica reader on node '~w'", [Node]),
                     GcInterval0 = application:get_env(osiris,
                                                       replica_forced_gc_default_interval,
                                                       4999),
@@ -280,7 +282,7 @@ handle_continue(#{name := Name0,
                               log = Log,
                               parse_state = undefined}};
                 {error, Reason} ->
-                    ?WARN_(Name, " failed to start replica reader. Reason ~0p", [Reason]),
+                    ?WARN_(Name, "failed to start replica reader. Reason ~0p", [Reason]),
                     {stop, {shutdown, Reason}, undefined}
             end
     end.
