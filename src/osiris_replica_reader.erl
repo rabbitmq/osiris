@@ -117,11 +117,10 @@ init(#{hosts := Hosts,
 
     ?DEBUG("~ts: trying to connect to replica at ~0p", [Name, Hosts]),
 
-    case maybe_connect(Name, Transport, Hosts, Port, connect_options())
-    of
+    case maybe_connect(Name, Transport, Hosts, Port, connect_options()) of
         {ok, Sock, Host} ->
-            ?DEBUG_(Name, "successfully connected to host ~0p port ~b",
-                    [Host, Port]),
+            ?INFO_(Name, "replica reader successfully connected to host ~0p port ~b",
+                   [Host, Port]),
             CntId = {?MODULE, ExtRef, Host, Port},
             CntSpec = {CntId, ?COUNTER_FIELDS},
             Config = #{counter_spec => CntSpec, transport => Transport},
@@ -177,7 +176,7 @@ init(#{hosts := Hosts,
         {error, Reason} ->
             ?WARN_(Name, "could not connect replica reader to replica at ~0p port ~b, Reason: ~0p",
                    [Hosts, Port, Reason]),
-            {stop, Reason}
+            {error, Reason}
     end.
 
 %%--------------------------------------------------------------------
@@ -391,9 +390,15 @@ setopts(tcp, Sock, Opts) ->
 setopts(ssl, Sock, Opts) ->
     ok = ssl:setopts(Sock, Opts).
 
-maybe_connect(_Name, _, [], _Port, _Options) ->
+
+maybe_connect(Name, T, Hosts, Port, Options) ->
+    maybe_connect(Name, T, Hosts, Port, Options, []).
+
+maybe_connect(Name, _, [], Port, _Options, Acc) ->
+    ?INFO_(Name, "could not connect replica reader to replica on port ~b, "
+           "reason(s): ~0p", [Port, Acc]),
     {error, connection_refused};
-maybe_connect(Name, tcp, [H | T], Port, Options) ->
+maybe_connect(Name, tcp, [H | T], Port, Options, Acc) ->
     ?DEBUG_(Name, "trying to connect to ~0p on port ~b", [H, Port]),
     case gen_tcp:connect(H, Port, Options) of
         {ok, Sock} ->
@@ -401,9 +406,9 @@ maybe_connect(Name, tcp, [H | T], Port, Options) ->
         {error, Reason} ->
             ?DEBUG_(Name, "connection refused, reason: ~w host:~0p - port: ~0p",
                     [Reason, H, Port]),
-            maybe_connect(Name, tcp, T, Port, Options)
+            maybe_connect(Name, tcp, T, Port, Options, [{H, Reason} | Acc])
     end;
-maybe_connect(Name, ssl, [H | T], Port, Options) ->
+maybe_connect(Name, ssl, [H | T], Port, Options, Acc) ->
     ?DEBUG_(Name, "trying to establish TLS connection to ~0p using port ~b", [H, Port]),
     Opts = Options ++
         application:get_env(osiris, replication_client_ssl_options, []) ++
@@ -411,14 +416,14 @@ maybe_connect(Name, ssl, [H | T], Port, Options) ->
     case ssl:connect(H, Port, Opts) of
         {ok, Sock} ->
             {ok, Sock, H};
-        {error, {tls_alert, {handshake_failure, _}}} ->
+        {error, {tls_alert, {handshake_failure = R, _}}} ->
             ?DEBUG_(Name, "TLS connection refused (handshake failure), host:~0p - port: ~0p",
                     [H, Port]),
-            maybe_connect(Name, ssl, T, Port, Options);
+            maybe_connect(Name, ssl, T, Port, Options, [{H, R} | Acc]);
         {error, E} ->
             ?DEBUG_(Name, "TLS connection refused, host:~0p - port: ~0p", [H, Port]),
             ?DEBUG_(Name, "error while trying to establish TLS connection ~0p", [E]),
-            maybe_connect(Name, ssl, T, Port, Options)
+            maybe_connect(Name, ssl, T, Port, Options, [{H, E} | Acc])
     end.
 
 maybe_add_sni_option(H) when is_binary(H) ->

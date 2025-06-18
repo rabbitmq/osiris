@@ -281,8 +281,15 @@ handle_continue(#{name := Name0,
                                        transport = Transport},
                               log = Log,
                               parse_state = undefined}};
+                {error, {connection_refused = R, _}} ->
+                    %% we don't log details for connection_refused,
+                    %% they are already in the logs of the other node
+                    ?WARN_(Name, "failed to start replica reader on node '~w'. "
+                           "Reason ~0p.", [Node, R]),
+                    {stop, {shutdown, R}, undefined};
                 {error, Reason} ->
-                    ?WARN_(Name, "failed to start replica reader. Reason ~0p", [Reason]),
+                    ?WARN_(Name, "failed to start replica reader on node '~w'. "
+                           "Reason ~0p.", [Node, Reason]),
                     {stop, {shutdown, Reason}, undefined}
             end
     end.
@@ -332,25 +339,31 @@ accept(Name, tcp, LSock, Process) ->
     end;
 accept(Name, ssl, LSock, Process) ->
     ?DEBUG_(Name, "Starting socket acceptor for replication over TLS", []),
-    {ok, Sock0} = ssl:transport_accept(LSock),
-    SslOptions = application:get_env(osiris, replication_server_ssl_options, []),
-    case ssl:handshake(Sock0, SslOptions) of
-        {ok, Sock} ->
+    case ssl:transport_accept(LSock) of
+        {ok, Sock0} ->
+            SslOpts = application:get_env(osiris, replication_server_ssl_options, []),
+            case ssl:handshake(Sock0, SslOpts) of
+                {ok, Sock} ->
+                    _ = ssl:close(LSock),
+                    ok = ssl:controlling_process(Sock, Process),
+                    Process ! {socket, Sock},
+                    ok;
+                {error, {tls_alert, {handshake_failure, _}}} ->
+                    ?DEBUG_(Name, "Handshake failure, restarting listener...",
+                            []),
+                    _ = spawn_link(fun() -> accept(Name, ssl, LSock, Process) end),
+                    ok;
+                {error, E} ->
+                    ?DEBUG_(Name, "Error during handshake ~w", [E]);
+                H ->
+                    ?DEBUG_(Name, "Unexpected result from TLS handshake ~w", [H])
+            end,
+            ok;
+        {error, Err} ->
+            ?DEBUG_(Name, "ssl:transport_accept/1 failed with ~0p", [Err]),
             _ = ssl:close(LSock),
-            ok = ssl:controlling_process(Sock, Process),
-            Process ! {socket, Sock},
-            ok;
-        {error, {tls_alert, {handshake_failure, _}}} ->
-            ?DEBUG_(Name, "Handshake failure, restarting listener...",
-                    []),
-            _ = spawn_link(fun() -> accept(Name, ssl, LSock, Process) end),
-            ok;
-        {error, E} ->
-            ?DEBUG_(Name, "Error during handshake ~w", [E]);
-        H ->
-            ?DEBUG_(Name, "Unexpected result from TLS handshake ~w", [H])
-    end,
-    ok.
+            ok
+    end.
 
 %%--------------------------------------------------------------------
 %% @private
