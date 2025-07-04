@@ -1649,10 +1649,10 @@ is_valid_chunk_on_disk(SegFile, Pos) ->
                    {error, term()} |
                    {end_of_stream, state()}.
 send_file(Sock, State) ->
-    send_file(Sock, State, fun(_, _) -> ok end).
+    send_file(Sock, State, fun(_, _) -> <<>> end).
 
 -spec send_file(gen_tcp:socket() | ssl:socket(), state(),
-                fun((header_map(), non_neg_integer()) -> term())) ->
+                fun((header_map(), non_neg_integer()) -> binary())) ->
     {ok, state()} |
     {error, term()} |
     {end_of_stream, state()}.
@@ -1693,8 +1693,8 @@ send_file(Sock,
             %% or the chunk is a user type (for offset readers)
             case needs_handling(RType, Selector, ChType) of
                 true ->
-                    _ = Callback(Header, ToSend + byte_size(HeaderData)),
-                    case send(Transport, Sock, HeaderData) of
+                    FrameHeader = Callback(Header, ToSend + byte_size(HeaderData)),
+                    case send(Transport, Sock, [FrameHeader, HeaderData]) of
                         ok ->
                             case sendfile(Transport, Fd, Sock,
                                           Pos + ?HEADER_SIZE_B + ToSkip, ToSend) of
