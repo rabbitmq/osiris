@@ -92,7 +92,9 @@ all_tests() ->
      init_partial_writes,
      init_with_unexpected_file,
      overview_with_missing_segment,
-     overview_with_missing_index_at_start
+     overview_with_missing_index_at_start,
+     read_header_ahead_offset_reader,
+     read_header_ahead_offset_reader_filter
     ].
 
 groups() ->
@@ -1071,7 +1073,7 @@ accept_chunk_inital_offset(Config) ->
     Conf = ?config(osiris_conf, Config),
 
 
-    Ch1 = fake_chunk([<<"blob1">>], ?LINE, 1, 100),
+    Ch1 = fake_chunk_bin([<<"blob1">>], ?LINE, 1, 100),
 
     F0 = osiris_log:init(Conf#{initial_offset => 100}, acceptor),
     F1 = osiris_log:accept_chunk(Ch1, F0),
@@ -1092,7 +1094,7 @@ accept_chunk_iolist_header_in_first_element(Config) ->
     Conf = ?config(osiris_conf, Config),
 
 
-    <<Head:48/binary, Res/binary>> = fake_chunk([{<<"filter">>, <<"blob1">>}],
+    <<Head:48/binary, Res/binary>> = fake_chunk_bin([{<<"filter">>, <<"blob1">>}],
                                                 ?LINE, 1, 100),
     Ch1 = [Head, Res],
     F0 = osiris_log:init(Conf#{initial_offset => 100}, acceptor),
@@ -1879,7 +1881,172 @@ overview_with_missing_index_at_start(Config) ->
                         filename:join(?config(dir, Config), "*.index")))),
     ok.
 
+read_header_ahead_offset_reader(Config) ->
+    RAL = 4096, %% read ahead limit
+    Tests =
+    [
+     fun(#{w := W0, r := R0}) ->
+             %% no previous chunk, so not reading ahead
+             {_, W1} = write_committed([<<"hi">>, <<"ho">>], W0),
+             {ok, H, Content, R1} = osiris_log:read_header0(R0),
+             ?assertEqual(undefined, Content),
+             {H, W1, R1}
+     end,
+     fun(#{w := W0, r := R0}) ->
+             %% previous chunk too large to read ahead
+             R1 = osiris_log:last_data_size(R0, RAL * 2),
+             {_, W1} = write_committed([<<"hi">>, <<"ho">>], W0),
+             {ok, H, Content, R2} = osiris_log:read_header0(R1),
+             ?assertEqual(undefined, Content),
+             {H, W1, R2}
+     end,
+     fun(#{w := W0, r := R0}) ->
+             %% trigger reading ahead by setting a small value for the
+             %% last chunk read.
+             %% this setting stays the same for the rest of the test
+             R1 = osiris_log:last_data_size(R0, 1),
+             Entries = [<<"foo">>, <<"bar">>],
+             {_, W1} = write_committed(Entries, W0),
+             {ok, H, Content, R2} = osiris_log:read_header0(R1),
+             [_, _, D, _] = fake_chunk(Entries, ?LINE, 1, 100),
+             ?assertEqual(iolist_to_binary(D), Content),
+             {H, W1, R2}
+     end,
+     fun(#{w := W0, r := R0}) ->
+             %% chunk data do not fit in the read ahead
+             Entries = [binary:copy(<<"a">>, RAL * 2)],
+             {_, W1} = write_committed(Entries, W0),
+             {ok, H, Content, R1} = osiris_log:read_header0(R0),
+             ?assertEqual(undefined, Content),
+             {H, W1, R1}
+     end,
+     fun(#{w := W0, r := R0, rtype := RType, fsize := FSize}) ->
+             %% chunk with a non-empty filter
+             %% data are small enough, they should be read with the header
+             Entries = [<<"ho">>, {<<"banana">>, <<"hi">>}],
+             {_, W1} = write_committed(Entries, W0),
+             {ok, H, Content, R1} = osiris_log:read_header0(R0),
+             [_, BloomD, ED, _] = fake_chunk(Entries, ?LINE, 1, 100, FSize),
+             Expected = case RType of
+                            data ->
+                                %% we expect the bloom filter data
+                                [BloomD, ED];
+                            offset ->
+                                ED
+                        end,
+             ?assertEqual(iolist_to_binary(Expected), Content),
+             {H, W1, R1}
+     end,
+     fun(#{w := W0, r := R0}) ->
+             Entries1 = [binary:copy(<<"a">>, 16)],
+             {_, W1} = write_committed(Entries1, W0),
+             Entries2 = [binary:copy(<<"b">>, 32)],
+             {_, W2} = write_committed(Entries2, W1),
+
+             {ok, H1, Content1, R1} = osiris_log:read_header0(R0),
+             [_, _, D1, _] = fake_chunk(Entries1, ?LINE, 1, 100),
+             ?assertEqual(iolist_to_binary(D1), Content1),
+
+             {ok, H2, Content2, R2} = osiris_log:read_header0(update_read(H1, R1)),
+             [_, _, D2, _] = fake_chunk(Entries2, ?LINE, 1, 100),
+             ?assertEqual(iolist_to_binary(D2), Content2),
+             {H2, W2, R2}
+     end
+    ],
+
+    FilterSizes = [?DEFAULT_FILTER_SIZE, ?DEFAULT_FILTER_SIZE * 2],
+    Conf0 = ?config(osiris_conf, Config),
+    #{dir := Dir0} = Conf0,
+    lists:foreach(fun({FSize, RType}) ->
+                          Dir1 = filename:join(Dir0, io_lib:format("~p~p", [FSize, RType])),
+                          Conf1 = Conf0#{dir => Dir1,
+                                         filter_size => FSize},
+                          Wr0 = osiris_log:init(Conf1),
+                          Shared = osiris_log:get_shared(Wr0),
+                          Conf = Conf1#{shared => Shared},
+                          {ok, Rd0} = init_reader(RType, Conf),
+                          #{w := Wr1, r := Rd1} = run_read_ahead_tests(Tests, RType,
+                                                                       FSize, Wr0, Rd0),
+                          osiris_log:close(Rd1),
+                          osiris_log:close(Wr1)
+                  end, [{FSize, RType} || FSize <- FilterSizes, RType <- [offset, data]]),
+    ok.
+
+read_header_ahead_offset_reader_filter(Config) ->
+    RAL = 4096, %% read ahead limit
+    %% we store the entry size on 4 bytes, so we must substract them from the data size
+    MaxEntrySize = RAL - 4,
+    DFS = ?DEFAULT_FILTER_SIZE,
+    FilterSizes = [DFS, DFS * 2],
+    Conf0 = ?config(osiris_conf, Config),
+    #{dir := Dir0} = Conf0,
+    lists:foreach(
+      fun(FSize) ->
+              Dir1 = filename:join(Dir0, integer_to_list(FSize)),
+              Conf1 = Conf0#{dir => Dir1,
+                             filter_size => FSize},
+              Wr0 = osiris_log:init(Conf1),
+              Shared = osiris_log:get_shared(Wr0),
+              Conf = Conf1#{shared => Shared},
+              {ok, Rd0} = osiris_log:init_offset_reader(first, Conf),
+              Rd1 = osiris_log:last_data_size(Rd0, 1),
+              %% we always read ahead the default filter size.
+              %% with a larger-than-default filter, we must consider
+              %% the extra bytes that belong to the filter,
+              %% that is (actual filter size) - (default filter size)
+              %% this reduces the max entry size we can read ahead
+              MES = MaxEntrySize - (FSize - DFS),
+
+              Tests =
+              [
+               fun(#{w := W0, r := R0}) ->
+                       %% chunk with a non-empty filter
+                       %% data do not fit in the read ahead
+                       EData = binary:copy(<<"a">>, MES + 1),
+                       Entries = [{<<"banana">>, EData}],
+                       {_, W1} = write_committed(Entries, W0),
+                       {ok, H, Content, R1} = osiris_log:read_header0(R0),
+                       ?assertEqual(undefined, Content),
+                       {H, W1, R1}
+               end,
+               fun(#{w := W0, r := R0}) ->
+                       %% chunk with a non-empty filter
+                       %% data exactly fits in the read ahead
+                       EData = binary:copy(<<"a">>, MES),
+                       Entries = [{<<"banana">>, EData}],
+                       {_, W1} = write_committed(Entries, W0),
+                       {ok, H, Content, R1} = osiris_log:read_header0(R0),
+                       [_, _, D, _] = fake_chunk(Entries, ?LINE, 1, 100),
+                       ?assertEqual(iolist_to_binary(D), Content),
+                       {H, W1, R1}
+               end
+              ],
+              #{w := Wr1, r := Rd2} = run_read_ahead_tests(Tests, offset, FSize,
+                                                           Wr0, Rd1),
+              osiris_log:close(Rd2),
+              osiris_log:close(Wr1)
+      end, FilterSizes),
+    ok.
+
 %% Utility
+
+init_reader(offset, Conf) ->
+    osiris_log:init_offset_reader(first, Conf);
+init_reader(data, Conf) ->
+    osiris_log:init_data_reader({0, empty}, Conf).
+
+run_read_ahead_tests(Tests, RType, FSize, Wr0, Rd0) ->
+    lists:foldl(fun(F, Acc) ->
+                        {H, W, R0} = F(Acc),
+                        R1 = update_read(H, R0),
+                        #{w => W, r => R1, rtype => RType, fsize => FSize}
+                end, #{w => Wr0, r => Rd0, rtype => RType, fsize => FSize}, Tests).
+
+-spec update_read(map(), osiris_log:state()) -> osiris_log:state().
+update_read(#{chunk_id := ChId,
+              num_records := NumRecords,
+              next_position := NextPos}, R) ->
+    osiris_log:update_read(R, ChId, NumRecords, NextPos).
 
 truncate_at(File, Pos) ->
     {ok, Fd} = file:open(File, [raw, binary, read, write]),
@@ -1977,7 +2144,13 @@ delete_dir(Dir) ->
             ok
     end.
 
+fake_chunk_bin(Blobs, Ts, Epoch, NextChId) ->
+    iolist_to_binary(fake_chunk(Blobs, Ts, Epoch, NextChId)).
+
 fake_chunk(Blobs, Ts, Epoch, NextChId) ->
-    iolist_to_binary(
-      element(1,
-              osiris_log:make_chunk(Blobs, <<>>, 0, Ts, Epoch, NextChId, 16))).
+    fake_chunk(Blobs, Ts, Epoch, NextChId, ?DEFAULT_FILTER_SIZE).
+
+fake_chunk(Blobs, Ts, Epoch, NextChId, FSize) ->
+    element(1,
+            osiris_log:make_chunk(Blobs, <<>>, 0, Ts, Epoch, NextChId,
+                                  FSize)).
