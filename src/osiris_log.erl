@@ -64,7 +64,10 @@
          sorted_index_files/1,
          index_files_unsorted/1,
          make_chunk/7,
-         orphaned_segments/1
+         orphaned_segments/1,
+         read_header0/1,
+         last_data_size/2,
+         update_read/4
         ]).
 
 % maximum size of a segment in bytes
@@ -104,6 +107,9 @@
         _/binary>>).
 
 -define(SKIP_SEARCH_JUMP, 2048).
+-define(READ_AHEAD_LIMIT, 4096).
+-define(CAN_READ_AHEAD(LastDataSize), LastDataSize =/= undefined andalso
+        LastDataSize =< ?READ_AHEAD_LIMIT).
 
 %% Specification of the Log format.
 %%
@@ -424,7 +430,8 @@
          transport :: transport(),
          chunk_selector :: all | user_data,
          position = 0 :: non_neg_integer(),
-         filter :: undefined | osiris_bloom:mstate()}).
+         filter :: undefined | osiris_bloom:mstate(),
+         last_data_size = undefined :: undefined | non_neg_integer()}).
 -record(write,
         {type = writer :: writer | acceptor,
          segment_size = {?LOG_HEADER_SIZE, 0} :: {non_neg_integer(), non_neg_integer()},
@@ -1389,7 +1396,7 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
         {ok,
          #{num_records := NumRecords,
            next_position := NextPos} =
-             Header,
+             Header, _,
          #?MODULE{mode = #read{next_offset = ChId} = Read} = State} ->
             %% skip data portion
             {ok, Header,
@@ -1451,7 +1458,7 @@ chunk_iterator(#?MODULE{cfg = #cfg{},
            data_size := DataSize,
            filter_size := FilterSize,
            position := Pos,
-           next_position := NextPos} = Header,
+           next_position := NextPos} = Header, _,
          #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State1} ->
             State = State1#?MODULE{mode = Read#read{next_offset = ChId + NumRecords,
                                                     position = NextPos}},
@@ -1549,7 +1556,7 @@ read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
            filter_size := FilterSize,
            position := Pos,
            next_position := NextPos,
-           trailer_size := TrailerSize},
+           trailer_size := TrailerSize}, _,
          #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State} ->
             ToRead = ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
             {ok, ChData} = file:pread(Fd, Pos, ToRead),
@@ -1649,10 +1656,10 @@ is_valid_chunk_on_disk(SegFile, Pos) ->
                    {error, term()} |
                    {end_of_stream, state()}.
 send_file(Sock, State) ->
-    send_file(Sock, State, fun(_, _) -> ok end).
+    send_file(Sock, State, fun(_, _) -> <<>> end).
 
 -spec send_file(gen_tcp:socket() | ssl:socket(), state(),
-                fun((header_map(), non_neg_integer()) -> term())) ->
+                fun((header_map(), non_neg_integer()) -> binary())) ->
     {ok, state()} |
     {error, term()} |
     {end_of_stream, state()}.
@@ -1671,45 +1678,61 @@ send_file(Sock,
                position := Pos,
                next_position := NextPos,
                header_data := HeaderData} = Header,
+         MaybeData,
          #?MODULE{fd = Fd,
                   mode = #read{next_offset = ChId} = Read0} = State1} ->
-            %% read header
-            %% used to write frame headers to socket
-            %% and return the number of bytes to sendfile
-            %% this allow users of this api to send all the data
-            %% or just header and entry data
-            {ToSkip, ToSend} =
-                case RType of
-                    offset ->
-                        select_amount_to_send(Selector, ChType, FilterSize,
-                                              DataSize, TrailerSize);
-                    data ->
-                        {0, FilterSize + DataSize + TrailerSize}
-                end,
 
-            Read = Read0#read{next_offset = ChId + NumRecords,
-                              position = NextPos},
             %% only sendfile if either the reader is a data reader
             %% or the chunk is a user type (for offset readers)
             case needs_handling(RType, Selector, ChType) of
                 true ->
-                    _ = Callback(Header, ToSend + byte_size(HeaderData)),
-                    case send(Transport, Sock, HeaderData) of
-                        ok ->
-                            case sendfile(Transport, Fd, Sock,
-                                          Pos + ?HEADER_SIZE_B + ToSkip, ToSend) of
+                    %% read header
+                    %% used to write frame headers to socket
+                    %% and return the number of bytes to sendfile
+                    %% this allow users of this api to send all the data
+                    %% or just header and entry data
+                    {ToSkip, ToSend} =
+                    case RType of
+                        offset ->
+                            select_amount_to_send(Selector, ChType, FilterSize,
+                                                  DataSize, TrailerSize);
+                        data ->
+                            {0, FilterSize + DataSize + TrailerSize}
+                    end,
+
+                    Read = Read0#read{next_offset = ChId + NumRecords,
+                                      position = NextPos,
+                                      last_data_size = DataSize},
+                    FrameHeader = Callback(Header, ToSend + byte_size(HeaderData)),
+                    case MaybeData of
+                        undefined ->
+                            case send(Transport, Sock, [FrameHeader, HeaderData]) of
+                                ok ->
+                                    case sendfile(Transport, Fd, Sock,
+                                                  Pos + ?HEADER_SIZE_B + ToSkip, ToSend) of
+                                        ok ->
+                                            State = State1#?MODULE{mode = Read},
+                                            {ok, State};
+                                        Err ->
+                                            %% reset the position to the start of the current
+                                            %% chunk so that subsequent reads won't error
+                                            Err
+                                    end;
+                                Err ->
+                                    Err
+                            end;
+                        Data ->
+                            case send(Transport, Sock, [FrameHeader, HeaderData, Data]) of
                                 ok ->
                                     State = State1#?MODULE{mode = Read},
                                     {ok, State};
                                 Err ->
-                                    %% reset the position to the start of the current
-                                    %% chunk so that subsequent reads won't error
                                     Err
-                            end;
-                        Err ->
-                            Err
+                            end
                     end;
                 false ->
+                    Read = Read0#read{next_offset = ChId + NumRecords,
+                                      position = NextPos},
                     State = State1#?MODULE{mode = Read},
                     %% skip chunk and recurse
                     send_file(Sock, State, Callback)
@@ -2861,137 +2884,211 @@ recover_tracking(Fd, Trk0, Pos0) ->
             Trk0
     end.
 
-read_header0(#?MODULE{cfg = #cfg{directory = Dir,
-                                 shared = Shared,
-                                 counter = CntRef},
-                      mode = #read{next_offset = NextChId0,
-                                   position = Pos,
-                                   filter = Filter} = Read0,
-                      current_file = CurFile,
-                      fd = Fd} =
-             State) ->
+read_header0(State) ->
     %% reads the next header if permitted
     case can_read_next(State) of
         true ->
-            %% optimistically read 64 bytes (small binary) as it may save us
-            %% a syscall reading the filter if the filter is of the default
-            %% 16 byte size
-            case file:pread(Fd, Pos, ?HEADER_SIZE_B + ?DEFAULT_FILTER_SIZE) of
-                {ok, <<?MAGIC:4/unsigned,
-                       ?VERSION:4/unsigned,
-                       ChType:8/unsigned,
-                       NumEntries:16/unsigned,
-                       NumRecords:32/unsigned,
-                       Timestamp:64/signed,
-                       Epoch:64/unsigned,
-                       NextChId0:64/unsigned,
-                       Crc:32/integer,
-                       DataSize:32/unsigned,
-                       TrailerSize:32/unsigned,
-                       FilterSize:8/unsigned,
-                       _Reserved:24,
-                       MaybeFilter/binary>> = HeaderData0} ->
-                    <<HeaderData:?HEADER_SIZE_B/binary, _/binary>> = HeaderData0,
-                    counters:put(CntRef, ?C_OFFSET, NextChId0 + NumRecords),
-                    counters:add(CntRef, ?C_CHUNKS, 1),
-                    NextPos = Pos + ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
-
-                    ChunkFilter = case MaybeFilter of
-                                      <<F:FilterSize/binary, _/binary>> ->
-                                          %% filter is of default size or 0
-                                          F;
-                                      _  when Filter =/= undefined ->
-                                          %% the filter is larger than default
-                                          case file:pread(Fd, Pos + ?HEADER_SIZE_B,
-                                                          FilterSize) of
-                                              {ok, F} ->
-                                                  F;
-                                              eof ->
-                                                  throw({end_of_stream, State})
-                                          end;
-                                      _ ->
-                                          <<>>
-                                  end,
-
-                    case osiris_bloom:is_match(ChunkFilter, Filter) of
-                        true ->
-                            {ok, #{chunk_id => NextChId0,
-                                   epoch => Epoch,
-                                   type => ChType,
-                                   crc => Crc,
-                                   num_records => NumRecords,
-                                   num_entries => NumEntries,
-                                   timestamp => Timestamp,
-                                   data_size => DataSize,
-                                   trailer_size => TrailerSize,
-                                   header_data => HeaderData,
-                                   filter_size => FilterSize,
-                                   next_position => NextPos,
-                                   position => Pos}, State};
-                        false ->
-                            Read = Read0#read{next_offset = NextChId0 + NumRecords,
-                                              position = NextPos},
-                            read_header0(State#?MODULE{mode = Read});
-                        {retry_with, NewFilter} ->
-                            Read = Read0#read{filter = NewFilter},
-                            read_header0(State#?MODULE{mode = Read})
-                    end;
-                {ok, Bin} when byte_size(Bin) < ?HEADER_SIZE_B ->
-                    %% partial header read
-                    %% this can happen when a replica reader reads ahead
-                    %% optimistically
-                    %% treat as end_of_stream
-                    {end_of_stream, State};
-                eof ->
-                    FirstOffset = osiris_log_shared:first_chunk_id(Shared),
-                    %% open next segment file and start there if it exists
-                    NextChId = max(FirstOffset, NextChId0),
-                    %% TODO: replace this check with a last chunk id counter
-                    %% updated by the writer and replicas
-                    SegFile = make_file_name(NextChId, "segment"),
-                    case SegFile == CurFile of
-                        true ->
-                            %% the new filename is the same as the old one
-                            %% this should only really happen for an empty
-                            %% log but would cause an infinite loop if it does
-                            {end_of_stream, State};
-                        false ->
-                            case file:open(filename:join(Dir, SegFile),
-                                           [raw, binary, read]) of
-                                {ok, Fd2} ->
-                                    ok = file:close(Fd),
-                                    Read = Read0#read{next_offset = NextChId,
-                                                      position = ?LOG_HEADER_SIZE},
-                                    read_header0(
-                                      State#?MODULE{current_file = SegFile,
-                                                    fd = Fd2,
-                                                    mode = Read});
-                                {error, enoent} ->
-                                    {end_of_stream, State}
-                            end
-                    end;
-                {ok,
-                 <<?MAGIC:4/unsigned,
-                   ?VERSION:4/unsigned,
-                   _ChType:8/unsigned,
-                   _NumEntries:16/unsigned,
-                   _NumRecords:32/unsigned,
-                   _Timestamp:64/signed,
-                   _Epoch:64/unsigned,
-                   UnexpectedChId:64/unsigned,
-                   _Crc:32/integer,
-                   _DataSize:32/unsigned,
-                   _TrailerSize:32/unsigned,
-                   _Reserved:32>>} ->
-                    %% TODO: we may need to return the new state here if
-                    %% we've crossed segments
-                    {error, {unexpected_chunk_id, UnexpectedChId, NextChId0}};
-                Invalid ->
-                    {error, {invalid_chunk_header, Invalid}}
-            end;
+            do_read_header(State);
         false ->
             {end_of_stream, State}
     end.
+
+do_read_header(#?MODULE{cfg = #cfg{directory = Dir,
+                                   shared = Shared},
+                        mode = #read{chunk_selector = Selector,
+                                     next_offset = NextChId0,
+                                     position = Pos,
+                                     last_data_size = Lds} = Read0,
+                        current_file = CurFile,
+                        fd = Fd} = State) ->
+    ReadAheadOffset = case Lds of
+                          Lds when ?CAN_READ_AHEAD(Lds) ->
+                              ?DEFAULT_FILTER_SIZE + ?READ_AHEAD_LIMIT;
+                          _ ->
+                              %% optimistically read 64 bytes (small binary) as it may save us
+                              %% a syscall reading the filter if the filter is of the default
+                              %% 16 byte size
+                              ?DEFAULT_FILTER_SIZE
+                      end,
+
+    case file:pread(Fd, Pos, ?HEADER_SIZE_B + ReadAheadOffset) of
+        {ok, <<?MAGIC:4/unsigned,
+               ?VERSION:4/unsigned,
+               ChType:8/unsigned,
+               NumEntries:16/unsigned,
+               NumRecords:32/unsigned,
+               Timestamp:64/signed,
+               Epoch:64/unsigned,
+               NextChId0:64/unsigned,
+               Crc:32/integer,
+               DataSize:32/unsigned,
+               TrailerSize:32/unsigned,
+               FilterSize:8/unsigned,
+               _Reserved:24,
+               MaybeFilterAndRest/binary>> = HeaderData0}
+          when ?CAN_READ_AHEAD(Lds) ->
+            SzToRead = case {Selector, ChType} of
+                {user_data, ?CHNK_USER} ->
+                    FilterSize + DataSize;
+                _ ->
+                    FilterSize + DataSize + TrailerSize
+            end,
+            Content = case ReadAheadOffset of
+                RAO when RAO >= SzToRead ->
+                    %% we read everything we needed
+                    case {Selector, ChType} of
+                        {user_data, ?CHNK_USER} ->
+                            <<_ChkFilter:FilterSize/binary,
+                              Data:DataSize/binary,
+                              _/binary>> = MaybeFilterAndRest,
+                            Data;
+                        _ ->
+                            <<Ctnt:(FilterSize + DataSize + TrailerSize)/binary,
+                              _/binary>> = MaybeFilterAndRest,
+                            Ctnt
+                    end;
+                _ ->
+                    undefined
+            end,
+            maybe_return_header(State, HeaderData0, MaybeFilterAndRest, Content,
+                                ChType, NumEntries, NumRecords, Timestamp,
+                                Epoch, NextChId0, Crc, DataSize, TrailerSize,
+                                FilterSize);
+        {ok, <<?MAGIC:4/unsigned,
+               ?VERSION:4/unsigned,
+               ChType:8/unsigned,
+               NumEntries:16/unsigned,
+               NumRecords:32/unsigned,
+               Timestamp:64/signed,
+               Epoch:64/unsigned,
+               NextChId0:64/unsigned,
+               Crc:32/integer,
+               DataSize:32/unsigned,
+               TrailerSize:32/unsigned,
+               FilterSize:8/unsigned,
+               _Reserved:24,
+               MaybeFilter/binary>> = HeaderData0} ->
+            maybe_return_header(State, HeaderData0, MaybeFilter, undefined,
+                                ChType, NumEntries, NumRecords, Timestamp,
+                                Epoch, NextChId0, Crc, DataSize,
+                                TrailerSize, FilterSize);
+        {ok, Bin} when byte_size(Bin) < ?HEADER_SIZE_B ->
+            %% partial header read
+            %% this can happen when a replica reader reads ahead
+            %% optimistically
+            %% treat as end_of_stream
+            {end_of_stream, State};
+        eof ->
+            FirstOffset = osiris_log_shared:first_chunk_id(Shared),
+            %% open next segment file and start there if it exists
+            NextChId = max(FirstOffset, NextChId0),
+            %% TODO: replace this check with a last chunk id counter
+            %% updated by the writer and replicas
+            SegFile = make_file_name(NextChId, "segment"),
+            case SegFile == CurFile of
+                true ->
+                    %% the new filename is the same as the old one
+                    %% this should only really happen for an empty
+                    %% log but would cause an infinite loop if it does
+                    {end_of_stream, State};
+                false ->
+                    case file:open(filename:join(Dir, SegFile),
+                                   [raw, binary, read]) of
+                        {ok, Fd2} ->
+                            ok = file:close(Fd),
+                            Read = Read0#read{next_offset = NextChId,
+                                              position = ?LOG_HEADER_SIZE},
+                            read_header0(
+                              State#?MODULE{current_file = SegFile,
+                                            fd = Fd2,
+                                            mode = Read});
+                        {error, enoent} ->
+                            {end_of_stream, State}
+                    end
+            end;
+        {ok,
+         <<?MAGIC:4/unsigned,
+           ?VERSION:4/unsigned,
+           _ChType:8/unsigned,
+           _NumEntries:16/unsigned,
+           _NumRecords:32/unsigned,
+           _Timestamp:64/signed,
+           _Epoch:64/unsigned,
+           UnexpectedChId:64/unsigned,
+           _Crc:32/integer,
+           _DataSize:32/unsigned,
+           _TrailerSize:32/unsigned,
+           _Reserved:32>>} ->
+            %% TODO: we may need to return the new state here if
+            %% we've crossed segments
+            {error, {unexpected_chunk_id, UnexpectedChId, NextChId0}};
+        Invalid ->
+            {error, {invalid_chunk_header, Invalid}}
+    end.
+
+maybe_return_header(#?MODULE{cfg = #cfg{counter = CntRef},
+                             mode = #read{next_offset = NextChId0,
+                                          position = Pos,
+                                          filter = Filter} = Read0,
+                             fd = Fd} = State, HeaderData0, MaybeFilter, Content,
+                    ChType, NumEntries, NumRecords, Timestamp, Epoch,
+                    NextChId0, Crc, DataSize, TrailerSize, FilterSize) ->
+    <<HeaderData:?HEADER_SIZE_B/binary, _/binary>> = HeaderData0,
+
+    ChunkFilter = case MaybeFilter of
+                      <<F:FilterSize/binary, _/binary>> ->
+                          %% filter is of default size or 0
+                          F;
+                      _  when Filter =/= undefined ->
+                          %% the filter is larger than default
+                          case file:pread(Fd, Pos + ?HEADER_SIZE_B,
+                                          FilterSize) of
+                              {ok, F} ->
+                                  F;
+                              eof ->
+                                  throw({end_of_stream, State})
+                          end;
+                      _ ->
+                          <<>>
+                  end,
+
+    counters:put(CntRef, ?C_OFFSET, NextChId0 + NumRecords),
+    counters:add(CntRef, ?C_CHUNKS, 1),
+    NextPos = Pos + ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
+
+    case osiris_bloom:is_match(ChunkFilter, Filter) of
+        true ->
+            {ok, #{chunk_id => NextChId0,
+                   epoch => Epoch,
+                   type => ChType,
+                   crc => Crc,
+                   num_records => NumRecords,
+                   num_entries => NumEntries,
+                   timestamp => Timestamp,
+                   data_size => DataSize,
+                   trailer_size => TrailerSize,
+                   header_data => HeaderData,
+                   filter_size => FilterSize,
+                   next_position => NextPos,
+                   position => Pos}, Content, State};
+        false ->
+            Read = Read0#read{next_offset = NextChId0 + NumRecords,
+                              position = NextPos},
+            read_header0(State#?MODULE{mode = Read});
+        {retry_with, NewFilter} ->
+            Read = Read0#read{filter = NewFilter},
+            read_header0(State#?MODULE{mode = Read})
+    end.
+
+-spec last_data_size(state(), offset()) -> state().
+last_data_size(#?MODULE{mode = #read{} = R0} = S, Lds) ->
+    R = R0#read{last_data_size = Lds},
+    S#?MODULE{mode = R}.
+
+update_read(#?MODULE{mode = R0} = S, ChId, NumRecords, Pos) ->
+    R = R0#read{next_offset = ChId + NumRecords,
+                position = Pos},
+    S#?MODULE{mode = R}.
 
 trigger_retention_eval(#?MODULE{cfg =
                                     #cfg{name = Name,
