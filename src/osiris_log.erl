@@ -65,14 +65,10 @@
          index_files_unsorted/1,
          make_chunk/7,
          orphaned_segments/1,
-         read_header0/1
+         read_header0/1,
+         last_data_size/2,
+         update_read/4
         ]).
-
--ifdef(TEST).
--export([last_data_size/2,
-         update_read/4]).
--endif.
-
 
 % maximum size of a segment in bytes
 -define(DEFAULT_MAX_SEGMENT_SIZE_B, 500 * 1000 * 1000).
