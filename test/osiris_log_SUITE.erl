@@ -1896,9 +1896,9 @@ read_header_ahead_offset_reader(Config) ->
              %% previous chunk too large reading ahead
              R1 = osiris_log:last_data_size(R0, RAL * 2),
              {_, W1} = write_committed([<<"hi">>, <<"ho">>], W0),
-             {ok, H, Content, R1} = osiris_log:read_header0(R1),
+             {ok, H, Content, R2} = osiris_log:read_header0(R1),
              ?assertEqual(undefined, Content),
-             {H, W1, R1}
+             {H, W1, R2}
      end,
      fun({W0, R0}) ->
              %% trigger reading ahead by setting a small value for the

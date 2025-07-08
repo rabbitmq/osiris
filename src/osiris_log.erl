@@ -3080,8 +3080,10 @@ maybe_return_header(#?MODULE{cfg = #cfg{counter = CntRef},
             read_header0(State#?MODULE{mode = Read})
     end.
 
-last_data_size(#?MODULE{mode = R} = S, Lds) ->
-    S#?MODULE{mode = R#read{last_data_size = Lds}}.
+-spec last_data_size(state(), offset()) -> state().
+last_data_size(#?MODULE{mode = #read{} = R0} = S, Lds) ->
+    R = R0#read{last_data_size = Lds},
+    S#?MODULE{mode = R}.
 
 update_read(#?MODULE{mode = R0} = S, ChId, NumRecords, Pos) ->
     R = R0#read{next_offset = ChId + NumRecords,
