@@ -30,7 +30,7 @@
 -record(?MODULE, {cfg = #cfg{} :: #cfg{},
                   pending = init_pending() :: #{sequences | offsets | timestamps =>
                                                 #{tracking_id() => tracking()}},
-                  sequences = #{} :: #{osiris:writer_id() => {osiris:offset(), non_neg_integer()}},
+                  sequences = #{} :: #{tracking_id() => {osiris:offset(), non_neg_integer()}},
                   offsets = #{} :: #{tracking_id() => osiris:offset()},
                   timestamps = #{} :: #{tracking_id() => osiris:timestamp()}
                  }).

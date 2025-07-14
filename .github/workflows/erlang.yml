@@ -18,6 +18,7 @@ jobs:
         erlang_version:
         - "26"
         - "27"
+        - "28"
     steps:
     - name: Clone the repository
       uses: actions/checkout@v2
