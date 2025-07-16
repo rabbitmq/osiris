@@ -209,7 +209,7 @@ fetch_writer_seq(Pid, WriterId)
 %% `{abs, offset()}': Attach at the provided offset. If this offset does not exist
 %% in the log it will error with `{error, {offset_out_of_range, Range}}'
 %% `offset()': Like `{abs, offset()}' but instead of erroring it will fall back
-%% to `first' (if lower than first offset in log) or `nextl if higher than
+%% to `first' (if lower than first offset in log) or `nextl' if higher than
 %% last offset in log.
 %% @returns `{ok, state()} | {error, Error}' when error can be
 %% `{offset_out_of_range, empty | {From :: offset(), To :: offset()}}'
