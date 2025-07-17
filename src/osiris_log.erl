@@ -824,7 +824,7 @@ first_timestamp(#?MODULE{cfg = #cfg{counter = Cnt}}) ->
 tail_info(#?MODULE{mode = #write{tail_info = TailInfo}}) ->
     TailInfo.
 
-%% called by the writer before every write to evalaute segment size
+%% called by the writer before every write to evaluate segment size
 %% and write a tracking snapshot
 -spec evaluate_tracking_snapshot(state(), osiris_tracking:state()) ->
     {state(), osiris_tracking:state()}.
