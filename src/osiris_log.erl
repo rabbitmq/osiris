@@ -57,6 +57,7 @@
 
 %% osiris_log_manifest callbacks (default implementations)
 -export([init_manifest/2,
+         finalize_manifest/1,
          fix_corrupted_files/1,
          truncate_to/3,
          first_and_last_seginfos/1,
@@ -456,7 +457,8 @@
          mode :: #read{} | #write{},
          current_file :: undefined | file:filename_all(),
          index_fd :: undefined | file:io_device(),
-         fd :: undefined | file:io_device()
+         fd :: undefined | file:io_device(),
+         manifest :: {module(), osiris_log_manifest:state()}
         }).
 %% Default manifest implementation which lists the configured dir for index
 %% files.
@@ -550,7 +552,7 @@ init(#{dir := Dir,
                counter_id = counter_id(Config),
                shared = Shared,
                filter_size = FilterSize},
-    Manifest = ManifestMod:fix_corrupted_files(Manifest0),
+    Manifest1 = ManifestMod:fix_corrupted_files(Manifest0),
     DefaultNextOffset = case Config of
                             #{initial_offset := IO}
                               when WriterType == acceptor ->
@@ -558,11 +560,13 @@ init(#{dir := Dir,
                             _ ->
                                 0
                         end,
-    case ManifestMod:first_and_last_seginfos(Manifest) of
+    case ManifestMod:first_and_last_seginfos(Manifest1) of
         none ->
             osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
             osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
+            Manifest = ManifestMod:finalize_manifest(Manifest1),
             open_new_segment(#?MODULE{cfg = Cfg,
+                                      manifest = {ManifestMod, Manifest},
                                       mode =
                                           #write{type = WriterType,
                                                  tail_info = {DefaultNextOffset,
@@ -608,6 +612,7 @@ init(#{dir := Dir,
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, IdxEof} = file:position(IdxFd, eof),
             NumChunks = (IdxEof - ?IDX_HEADER_SIZE) div ?INDEX_RECORD_SIZE_B,
+            Manifest = ManifestMod:finalize_manifest(Manifest1),
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
@@ -616,7 +621,8 @@ init(#{dir := Dir,
                                 current_epoch = Epoch},
                      current_file = filename:basename(Filename),
                      fd = SegFd,
-                     index_fd = IdxFd};
+                     index_fd = IdxFd,
+                     manifest = {ManifestMod, Manifest}};
         {1, #seg_info{file = Filename,
                       index = IdxFilename,
                       last = undefined}, _} ->
@@ -632,6 +638,7 @@ init(#{dir := Dir,
             {ok, _} = file:position(IdxFd, ?IDX_HEADER_SIZE),
             osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
             osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
+            Manifest = ManifestMod:finalize_manifest(Manifest1),
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
@@ -639,7 +646,8 @@ init(#{dir := Dir,
                                 current_epoch = Epoch},
                      current_file = filename:basename(Filename),
                      fd = SegFd,
-                     index_fd = IdxFd}
+                     index_fd = IdxFd,
+                     manifest = {ManifestMod, Manifest}}
     end.
 
 fix_corrupted_files(#manifest{dir = Dir,
@@ -1022,10 +1030,12 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
     {error, file:posix()}.
 init_data_reader(TailInfo, Config) ->
     ManifestMod = maps:get(manifest_module, Config, ?MODULE),
-    Manifest = ManifestMod:init_manifest(data_reader, Config),
-    case ManifestMod:find_data_reader_position(TailInfo, Manifest) of
+    Manifest0 = ManifestMod:init_manifest(data_reader, Config),
+    case ManifestMod:find_data_reader_position(TailInfo, Manifest0) of
         {ok, ChunkId, Pos, Segment} ->
-            init_data_reader_at(ChunkId, Pos, Segment, Config);
+            Manifest = ManifestMod:finalize_manifest(Manifest0),
+            init_data_reader_at(ChunkId, Pos, Segment, {ManifestMod, Manifest},
+                                Config);
         {error, _} = Err ->
             Err
     end.
@@ -1083,7 +1093,7 @@ check_chunk_has_expected_epoch(Name, ChunkId, Epoch, IdxFiles) ->
             end
     end.
 
-init_data_reader_at(ChunkId, FilePos, File,
+init_data_reader_at(ChunkId, FilePos, File, Manifest,
                     #{dir := Dir, name := Name,
                       shared := Shared,
                       readers_counter_fun := CountersFun} = Config) ->
@@ -1108,7 +1118,8 @@ init_data_reader_at(ChunkId, FilePos, File,
                             next_offset = ChunkId,
                             chunk_selector = all,
                             position = FilePos,
-                            transport = maps:get(transport, Config, tcp)}}};
+                            transport = maps:get(transport, Config, tcp)},
+                      manifest = Manifest}};
         Err ->
             Err
     end.
@@ -1154,20 +1165,22 @@ init_offset_reader(OffsetSpec, Conf) ->
 init_offset_reader(_OffsetSpec, _Conf, 0) ->
     {error, retries_exhausted};
 init_offset_reader(OffsetSpec, Conf, Attempt) ->
-    {ManifestMod, Manifest} = case Conf of
-                                  #{manifest := M} ->
-                                      %% cached
-                                      M;
-                                  _ ->
-                                      Mod = maps:get(manifest_module, Conf,
-                                                     ?MODULE),
-                                      M = Mod:init_manifest(offset_reader,
-                                                            Conf),
-                                      {Mod, M}
-                              end,
-    try ManifestMod:find_offset_reader_position(OffsetSpec, Manifest) of
+    {ManifestMod, Manifest0} = case Conf of
+                                   #{manifest := M} ->
+                                       %% cached
+                                       M;
+                                   _ ->
+                                       Mod = maps:get(manifest_module, Conf,
+                                                      ?MODULE),
+                                       M = Mod:init_manifest(offset_reader,
+                                                             Conf),
+                                       {Mod, M}
+                               end,
+    try ManifestMod:find_offset_reader_position(OffsetSpec, Manifest0) of
         {ok, ChunkId, Pos, Segment} ->
-            open_offset_reader_at(Segment, ChunkId, Pos, Conf);
+            Manifest = ManifestMod:finalize_manifest(Manifest0),
+            open_offset_reader_at(Segment, ChunkId, Pos,
+                                  {ManifestMod, Manifest}, Conf);
         {error, _} = Err ->
             Err
     catch
@@ -1313,7 +1326,7 @@ find_offset_reader_position(OffsetSpec, #manifest{name = Name} = Manifest)
             end
     end.
 
-open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
+open_offset_reader_at(SegmentFile, NextChunkId, FilePos, Manifest,
                       #{dir := Dir,
                         name := Name,
                         shared := Shared,
@@ -1344,7 +1357,8 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                                                          user_data),
                                next_offset = NextChunkId,
                                transport = maps:get(transport, Options, tcp),
-                               filter = FilterMatcher}}}.
+                               filter = FilterMatcher},
+                  manifest = Manifest}}.
 
 %% Searches the index files backwards for the ID of the last user chunk.
 last_user_chunk_location(Name, RevdIdxFiles)
@@ -3300,6 +3314,10 @@ list_dir(Dir) ->
 
 init_manifest(_LogKind, #{name := Name, dir := Dir}) ->
     #manifest{name = Name, dir = Dir, index_files = sorted_index_files(Dir)}.
+
+finalize_manifest(#manifest{} = Manifest0) ->
+    %% The index files list might be long. Clear it after init to save memory.
+    Manifest0#manifest{index_files = undefined}.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
