@@ -53,3 +53,5 @@
     {error, {invalid_chunk_header, term()}} |
     {error, no_index_file} |
     {error, retries_exhausted}.
+
+-callback delete(osiris_log:config()) -> ok.

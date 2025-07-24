@@ -63,7 +63,8 @@
          truncate_to/3,
          first_and_last_seginfos/1,
          find_data_reader_position/2,
-         find_offset_reader_position/2]).
+         find_offset_reader_position/2,
+         delete/1]).
 
 -export([dump_init/1,
          dump_init_idx/1,
@@ -1823,7 +1824,13 @@ delete_directory(#{name := Name,
                    dir := _} = Config) ->
     Dir = directory(Config),
     ?DEBUG_(Name, " deleting directory ~ts", [Dir]),
-    delete_dir(Dir);
+    delete_dir(Dir),
+    case Config of
+        #{manifest_module := ManifestMod} ->
+            ok = ManifestMod:delete(Config);
+        _ ->
+            ok
+    end;
 delete_directory(#{name := Name}) ->
     delete_directory(Name);
 delete_directory(Name) when ?IS_STRING(Name) ->
@@ -3332,6 +3339,9 @@ finalize_manifest(#manifest{} = Manifest0) ->
 
 handle_event(_Event, Manifest) ->
     Manifest.
+
+delete(_Config) ->
+    ok.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
