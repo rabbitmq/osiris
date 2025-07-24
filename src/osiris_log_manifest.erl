@@ -6,13 +6,22 @@
 
 -type state() :: term().
 
--export_type([state/0]).
+-type event() :: {segment_opened,
+                  OldSegment :: file:filename_all() | undefined,
+                  NewSegment :: file:filename_all()} |
+                 {chunk_written, osiris:offset(), osiris:timestamp(),
+                  osiris:epoch(), Pos :: non_neg_integer(),
+                  Size :: non_neg_integer(), NumRecords :: non_neg_integer()}.
+
+-export_type([state/0, event/0]).
 
 -callback init_manifest(log_kind(), osiris_log:config()) -> state().
 
 %% Called whenever initialization is finished. Free any resources used during
 %% init.
 -callback finalize_manifest(state()) -> state().
+
+-callback handle_event(event(), state()) -> state().
 
 -callback fix_corrupted_files(state()) -> state().
 

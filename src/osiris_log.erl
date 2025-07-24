@@ -58,6 +58,7 @@
 %% osiris_log_manifest callbacks (default implementations)
 -export([init_manifest/2,
          finalize_manifest/1,
+         handle_event/2,
          fix_corrupted_files/1,
          truncate_to/3,
          first_and_last_seginfos/1,
@@ -2463,6 +2464,7 @@ write_chunk(Chunk,
                                 shared = Shared} = Cfg,
                      fd = Fd,
                      index_fd = IdxFd,
+                     manifest = {ManifestMod, Manifest0},
                      mode =
                          #write{segment_size = {SegSizeBytes, SegSizeChunks},
                                 tail_info = {Next, _}} =
@@ -2494,7 +2496,11 @@ write_chunk(Chunk,
             counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
             counters:add(CntRef, ?C_CHUNKS, 1),
             maybe_set_first_offset(Next, Cfg),
-            State#?MODULE{mode =
+            Event = {chunk_written, Next, Timestamp, Epoch,
+                     Cur, Size, NumRecords},
+            Manifest = ManifestMod:handle_event(Event, Manifest0),
+            State#?MODULE{manifest = {ManifestMod, Manifest},
+                          mode =
                           Write#write{tail_info = {NextOffset,
                                                    {Epoch, Next, Timestamp}},
                                       segment_size = {SegSizeBytes + Size,
@@ -2708,6 +2714,8 @@ open_new_segment(#?MODULE{cfg = #cfg{name = Name,
                                      counter = Cnt},
                           fd = OldFd,
                           index_fd = OldIdxFd,
+                          current_file = OldFilename,
+                          manifest = {ManifestMod, Manifest0},
                           mode = #write{type = _WriterType,
                                         tail_info = {NextOffset, _}} = Write} =
                  State0) ->
@@ -2728,11 +2736,14 @@ open_new_segment(#?MODULE{cfg = #cfg{name = Name,
     {ok, _} = file:position(Fd, eof),
     {ok, _} = file:position(IdxFd, eof),
     counters:add(Cnt, ?C_SEGMENTS, 1),
+    Event = {segment_opened, OldFilename, Filename},
+    Manifest = ManifestMod:handle_event(Event, Manifest0),
 
     State0#?MODULE{current_file = Filename,
                    fd = Fd,
                    %% reset segment_size counter
                    index_fd = IdxFd,
+                   manifest = {ManifestMod, Manifest},
                    mode = Write#write{segment_size = {?LOG_HEADER_SIZE, 0}}}.
 
 open_index_read(File) ->
@@ -3318,6 +3329,9 @@ init_manifest(_LogKind, #{name := Name, dir := Dir}) ->
 finalize_manifest(#manifest{} = Manifest0) ->
     %% The index files list might be long. Clear it after init to save memory.
     Manifest0#manifest{index_files = undefined}.
+
+handle_event(_Event, Manifest) ->
+    Manifest.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
