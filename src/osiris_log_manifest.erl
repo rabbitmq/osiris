@@ -10,6 +10,10 @@
 
 -callback init_manifest(log_kind(), osiris_log:config()) -> state().
 
+%% Called whenever initialization is finished. Free any resources used during
+%% init.
+-callback finalize_manifest(state()) -> state().
+
 -callback fix_corrupted_files(state()) -> state().
 
 -callback first_and_last_seginfos(state()) ->
