@@ -1936,6 +1936,21 @@ read_header_ahead_offset_reader(Config) ->
                         end,
              ?assertEqual(iolist_to_binary(Expected), Content),
              {H, W1, R1}
+     end,
+     fun(#{w := W0, r := R0}) ->
+             Entries1 = [binary:copy(<<"a">>, 16)],
+             {_, W1} = write_committed(Entries1, W0),
+             Entries2 = [binary:copy(<<"b">>, 32)],
+             {_, W2} = write_committed(Entries2, W1),
+
+             {ok, H1, Content1, R1} = osiris_log:read_header0(R0),
+             [_, _, D1, _] = fake_chunk(Entries1, ?LINE, 1, 100),
+             ?assertEqual(iolist_to_binary(D1), Content1),
+
+             {ok, H2, Content2, R2} = osiris_log:read_header0(update_read(H1, R1)),
+             [_, _, D2, _] = fake_chunk(Entries2, ?LINE, 1, 100),
+             ?assertEqual(iolist_to_binary(D2), Content2),
+             {H2, W2, R2}
      end
     ],
 
@@ -2022,12 +2037,15 @@ init_reader(data, Conf) ->
 
 run_read_ahead_tests(Tests, RType, FSize, Wr0, Rd0) ->
     lists:foldl(fun(F, Acc) ->
-                        {#{chunk_id := ChId,
-                           num_records := NumRecords,
-                           next_position := NextPos}, W, R0} = F(Acc),
-                        R1 = osiris_log:update_read(R0, ChId, NumRecords, NextPos),
+                        {H, W, R0} = F(Acc),
+                        R1 = update_read(H, R0),
                         #{w => W, r => R1, rtype => RType, fsize => FSize}
                 end, #{w => Wr0, r => Rd0, rtype => RType, fsize => FSize}, Tests).
+
+update_read(#{chunk_id := ChId,
+              num_records := NumRecords,
+              next_position := NextPos}, R) ->
+    osiris_log:update_read(R, ChId, NumRecords, NextPos).
 
 truncate_at(File, Pos) ->
     {ok, Fd} = file:open(File, [raw, binary, read, write]),

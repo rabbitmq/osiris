@@ -431,7 +431,8 @@
          chunk_selector :: all | user_data,
          position = 0 :: non_neg_integer(),
          filter :: undefined | osiris_bloom:mstate(),
-         last_data_size = undefined :: undefined | non_neg_integer()}).
+         last_data_size = undefined :: undefined | non_neg_integer(),
+         read_ahead_data = undefined :: undefined | binary()}).
 -record(write,
         {type = writer :: writer | acceptor,
          segment_size = {?LOG_HEADER_SIZE, 0} :: {non_neg_integer(), non_neg_integer()},
@@ -2899,11 +2900,10 @@ read_header0(State) ->
 
 do_read_header(#?MODULE{cfg = #cfg{directory = Dir,
                                    shared = Shared},
-                        mode = #read{type = RType,
-                                     chunk_selector = Selector,
-                                     next_offset = NextChId0,
+                        mode = #read{next_offset = NextChId0,
                                      position = Pos,
-                                     last_data_size = Lds} = Read0,
+                                     last_data_size = Lds,
+                                     read_ahead_data = undefined} = Read0,
                         current_file = CurFile,
                         fd = Fd} = State) ->
     ReadAheadOffset = read_ahead_offset(Lds),
@@ -2924,26 +2924,17 @@ do_read_header(#?MODULE{cfg = #cfg{directory = Dir,
                _Reserved:24,
                MaybeFilterAndRest/binary>> = HeaderData0}
           when ?CAN_READ_AHEAD(Lds) ->
-            {ToSkip, ToSend} = select_amount_to_send(RType, Selector, ChType,
-                                                     FilterSize, DataSize,
-                                                     TrailerSize),
-            %% summing what we need to skip and send gives us the number
-            %% of bytes we need to read, we make sure we read it ahead
-            Content = case ReadAheadOffset of
-                RAO when RAO >= (ToSkip + ToSend) ->
-                    %% we read everything we needed
-                    <<_Skip:ToSkip/binary,
-                      Ctnt:ToSend/binary,
-                      _Rest/binary>> = MaybeFilterAndRest,
-                    Ctnt;
-                _ ->
-                    %% we did not read enough, the caller will have to do it
-                    undefined
-            end,
-            maybe_return_header(State, HeaderData0, MaybeFilterAndRest, Content,
-                                ChType, NumEntries, NumRecords, Timestamp,
-                                Epoch, NextChId0, Crc, DataSize, TrailerSize,
-                                FilterSize);
+            case read_ahead_chunk(HeaderData0, State) of
+                need_more_data ->
+                    Read1 = Read0#read{read_ahead_data = undefined},
+                    maybe_return_header(State#?MODULE{mode = Read1},
+                                        HeaderData0, MaybeFilterAndRest, undefined,
+                                        ChType, NumEntries, NumRecords, Timestamp,
+                                        Epoch, NextChId0, Crc, DataSize, TrailerSize,
+                                        FilterSize);
+                R ->
+                    R
+            end;
         {ok, <<?MAGIC:4/unsigned,
                ?VERSION:4/unsigned,
                ChType:8/unsigned,
@@ -3014,7 +3005,63 @@ do_read_header(#?MODULE{cfg = #cfg{directory = Dir,
             {error, {unexpected_chunk_id, UnexpectedChId, NextChId0}};
         Invalid ->
             {error, {invalid_chunk_header, Invalid}}
+    end;
+do_read_header(#?MODULE{mode = #read{read_ahead_data = RAD} = Read0} = State) ->
+    case read_ahead_chunk(RAD, State) of
+        need_more_data ->
+            %% we don't have enough data in memory
+            Read1 = Read0#read{read_ahead_data = undefined},
+            do_read_header(State#?MODULE{mode = Read1});
+        R ->
+            R
     end.
+
+read_ahead_chunk(<<?MAGIC:4/unsigned,
+                  ?VERSION:4/unsigned,
+                  ChType:8/unsigned,
+                  NumEntries:16/unsigned,
+                  NumRecords:32/unsigned,
+                  Timestamp:64/signed,
+                  Epoch:64/unsigned,
+                  NextChId0:64/unsigned,
+                  Crc:32/integer,
+                  DataSize:32/unsigned,
+                  TrailerSize:32/unsigned,
+                  FilterSize:8/unsigned,
+                  _Reserved:24,
+                  MaybeFilterAndRest/binary>> = HeaderData0,
+                 #?MODULE{mode = #read{type = RType,
+                                       chunk_selector = Selector,
+                                       next_offset = NextChId0} = Read0} = State) ->
+    {ToSkip, ToSend} = select_amount_to_send(RType, Selector, ChType,
+                                                             FilterSize, DataSize,
+                                                             TrailerSize),
+    case byte_size(MaybeFilterAndRest) of
+        RAS when RAS >= (ToSkip + ToSend) ->
+            %% we read everything we needed
+            {ReadAheadData, Content} =
+                case MaybeFilterAndRest of
+                    <<_Skip:ToSkip/binary,
+                      Ctnt:ToSend/binary,
+                      Rest/binary>>
+                      when byte_size(Rest) > ?HEADER_SIZE_B+ ?DEFAULT_FILTER_SIZE ->
+                        {Rest, Ctnt};
+                    <<_Skip:ToSkip/binary,
+                      Ctnt:ToSend/binary,
+                      _Rest/binary>> ->
+                        {undefined, Ctnt}
+                end,
+            Read1 = Read0#read{read_ahead_data = ReadAheadData},
+            maybe_return_header(State#?MODULE{mode = Read1},
+                                HeaderData0, MaybeFilterAndRest, Content,
+                                ChType, NumEntries, NumRecords, Timestamp,
+                                Epoch, NextChId0, Crc, DataSize, TrailerSize,
+                                FilterSize);
+        _ ->
+            need_more_data
+    end;
+read_ahead_chunk(_, _) ->
+    need_more_data.
 
 read_ahead_offset(LastDataSize) ->
     case LastDataSize of
