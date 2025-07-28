@@ -394,15 +394,7 @@
       %% avoids scanning disk for files multiple times if already know
       %% e.g. in init_acceptor
       index_files => [file:filename_all()],
-      filter_size => osiris_bloom:filter_size(),
-      %% A module implementing the `osiris_log_reader' behaviour to use when
-      %% reading the log as an offset or data listener. Defaults to using
-      %% `file' directly (implemented in `osiris_log_reader').
-      reader_module => module(),
-      %% A module implementing the `osiris_log_manifest' behaviour.
-      %% This key defaults to `osiris_log' (the default `osiris_log_manifest')
-      %% when not specified.
-      manifest_module => module()
+      filter_size => osiris_bloom:filter_size()
      }.
 -type record() :: {offset(), osiris:entry()}.
 -type offset_entry() :: {offset(), osiris:entry()}.
@@ -526,8 +518,9 @@ init(#{dir := Dir,
                                        %% cached
                                        M;
                                   _ ->
-                                      Mod = maps:get(manifest_module, Config,
-                                                     ?MODULE),
+                                      Mod = application:get_env(osiris,
+                                                                log_manifest,
+                                                                ?MODULE),
                                       M = Mod:init_manifest(WriterType, Config),
                                       {Mod, M}
                                end,
@@ -899,7 +892,7 @@ init_acceptor(Range, EpochOffsets0,
         lists:reverse(
             lists:sort(EpochOffsets0)),
 
-    ManifestMod = maps:get(manifest_module, Conf, ?MODULE),
+    ManifestMod = application:get_env(osiris, log_manifest, ?MODULE),
     Manifest0 = ManifestMod:init_manifest(acceptor, Conf),
     ?DEBUG_(Name, "from epoch offsets: ~w range ~w", [EpochOffsets, Range]),
     Manifest = ManifestMod:truncate_to(Range, EpochOffsets, Manifest0),
@@ -1031,7 +1024,7 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
     {error, {invalid_last_offset_epoch, epoch(), offset()}} |
     {error, file:posix()}.
 init_data_reader(TailInfo, Config) ->
-    ManifestMod = maps:get(manifest_module, Config, ?MODULE),
+    ManifestMod = application:get_env(osiris, log_manifest, ?MODULE),
     Manifest0 = ManifestMod:init_manifest(data_reader, Config),
     case ManifestMod:find_data_reader_position(TailInfo, Manifest0) of
         {ok, ChunkId, Pos, Segment} ->
@@ -1099,7 +1092,7 @@ init_data_reader_at(ChunkId, FilePos, File, Manifest,
                     #{dir := Dir, name := Name,
                       shared := Shared,
                       readers_counter_fun := CountersFun} = Config) ->
-    ReaderMod = maps:get(reader_module, Config, osiris_log_reader),
+    ReaderMod = application:get_env(osiris, log_reader, osiris_log_reader),
     case ReaderMod:open(File) of
         {ok, Reader} ->
             Cnt = make_counter(Config),
@@ -1172,8 +1165,9 @@ init_offset_reader(OffsetSpec, Conf, Attempt) ->
                                        %% cached
                                        M;
                                    _ ->
-                                       Mod = maps:get(manifest_module, Conf,
-                                                      ?MODULE),
+                                       Mod = application:get_env(osiris,
+                                                                 log_manifest,
+                                                                 ?MODULE),
                                        M = Mod:init_manifest(offset_reader,
                                                              Conf),
                                        {Mod, M}
@@ -1335,7 +1329,7 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos, Manifest,
                         readers_counter_fun := ReaderCounterFun,
                         options := Options} =
                       Conf) ->
-    ReaderMod = maps:get(reader_module, Conf, osiris_log_reader),
+    ReaderMod = application:get_env(osiris, log_reader, osiris_log_reader),
     {ok, Reader} = throw_missing(ReaderMod:open(SegmentFile)),
     Cnt = make_counter(Conf),
     ReaderCounterFun(1),
@@ -1825,10 +1819,10 @@ delete_directory(#{name := Name,
     Dir = directory(Config),
     ?DEBUG_(Name, " deleting directory ~ts", [Dir]),
     delete_dir(Dir),
-    case Config of
-        #{manifest_module := ManifestMod} ->
+    case application:get_env(osiris, log_manifest) of
+        {ok, ManifestMod} ->
             ok = ManifestMod:delete(Config);
-        _ ->
+        undefined ->
             ok
     end;
 delete_directory(#{name := Name}) ->
