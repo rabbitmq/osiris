@@ -463,6 +463,7 @@
         }).
 
 -opaque state() :: #?MODULE{}.
+-type manifest() :: #manifest{}.
 
 -export_type([state/0,
               chunk_iterator/0,
@@ -470,7 +471,8 @@
               config/0,
               counter_spec/0,
               transport/0,
-              chunk_type/0]).
+              chunk_type/0,
+              manifest/0]).
 
 -spec directory(osiris:config() | list()) -> file:filename_all().
 directory(#{name := Name, dir := Dir}) ->
