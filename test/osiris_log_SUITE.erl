@@ -2042,6 +2042,7 @@ run_read_ahead_tests(Tests, RType, FSize, Wr0, Rd0) ->
                         #{w => W, r => R1, rtype => RType, fsize => FSize}
                 end, #{w => Wr0, r => Rd0, rtype => RType, fsize => FSize}, Tests).
 
+-spec update_read(map(), osiris_log:state()) -> osiris_log:state().
 update_read(#{chunk_id := ChId,
               num_records := NumRecords,
               next_position := NextPos}, R) ->

@@ -2889,6 +2889,8 @@ recover_tracking(Fd, Trk0, Pos0) ->
             Trk0
     end.
 
+-spec read_header0(state()) -> {ok, map(), undefined | binary(), state()} |
+                               {end_of_stream, state()}.
 read_header0(State) ->
     %% reads the next header if permitted
     case can_read_next(State) of
@@ -3136,7 +3138,8 @@ maybe_return_header(#?MODULE{cfg = #cfg{counter = CntRef},
 last_data_size(#?MODULE{mode = R = #read{}} = S, Lds) ->
     S#?MODULE{mode = R#read{last_data_size = Lds}}.
 
-update_read(#?MODULE{mode = R0} = S, ChId, NumRecords, Pos) ->
+-spec update_read(state(), offset(), offset(), non_neg_integer()) -> state().
+update_read(#?MODULE{mode = R0 = #read{}} = S, ChId, NumRecords, Pos) ->
     R = R0#read{next_offset = ChId + NumRecords,
                 position = Pos},
     S#?MODULE{mode = R}.
