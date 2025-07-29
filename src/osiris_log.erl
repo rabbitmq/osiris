@@ -108,8 +108,6 @@
 
 -define(SKIP_SEARCH_JUMP, 2048).
 -define(READ_AHEAD_LIMIT, 4096).
--define(CAN_READ_AHEAD(LastDataSize), LastDataSize =/= undefined andalso
-        LastDataSize =< ?READ_AHEAD_LIMIT).
 
 %% Specification of the Log format.
 %%
@@ -2895,66 +2893,24 @@ read_header0(State) ->
     %% reads the next header if permitted
     case can_read_next(State) of
         true ->
-            do_read_header(State);
+            read_header_with_ra(State);
         false ->
             {end_of_stream, State}
     end.
 
-do_read_header(#?MODULE{cfg = #cfg{directory = Dir,
-                                   shared = Shared},
-                        mode = #read{next_offset = NextChId0,
-                                     position = Pos,
-                                     last_data_size = Lds,
-                                     read_ahead_data = undefined} = Read0,
-                        current_file = CurFile,
-                        fd = Fd} = State) ->
-    ReadAheadOffset = read_ahead_offset(Lds),
+read_header_with_ra(#?MODULE{cfg = #cfg{directory = Dir,
+                                        shared = Shared},
+                             mode = #read{next_offset = NextChId0,
+                                          position = Pos,
+                                          last_data_size = Lds,
+                                          read_ahead_data = undefined} = Read0,
+                             current_file = CurFile,
+                             fd = Fd} = State) ->
+    ReadAheadSize = read_ahead_size(Lds),
 
-    case file:pread(Fd, Pos, ?HEADER_SIZE_B + ReadAheadOffset) of
-        {ok, <<?MAGIC:4/unsigned,
-               ?VERSION:4/unsigned,
-               ChType:8/unsigned,
-               NumEntries:16/unsigned,
-               NumRecords:32/unsigned,
-               Timestamp:64/signed,
-               Epoch:64/unsigned,
-               NextChId0:64/unsigned,
-               Crc:32/integer,
-               DataSize:32/unsigned,
-               TrailerSize:32/unsigned,
-               FilterSize:8/unsigned,
-               _Reserved:24,
-               MaybeFilterAndRest/binary>> = HeaderData0}
-          when ?CAN_READ_AHEAD(Lds) ->
-            case read_ahead_chunk(HeaderData0, State) of
-                need_more_data ->
-                    Read1 = Read0#read{read_ahead_data = undefined},
-                    maybe_return_header(State#?MODULE{mode = Read1},
-                                        HeaderData0, MaybeFilterAndRest, undefined,
-                                        ChType, NumEntries, NumRecords, Timestamp,
-                                        Epoch, NextChId0, Crc, DataSize, TrailerSize,
-                                        FilterSize);
-                R ->
-                    R
-            end;
-        {ok, <<?MAGIC:4/unsigned,
-               ?VERSION:4/unsigned,
-               ChType:8/unsigned,
-               NumEntries:16/unsigned,
-               NumRecords:32/unsigned,
-               Timestamp:64/signed,
-               Epoch:64/unsigned,
-               NextChId0:64/unsigned,
-               Crc:32/integer,
-               DataSize:32/unsigned,
-               TrailerSize:32/unsigned,
-               FilterSize:8/unsigned,
-               _Reserved:24,
-               MaybeFilter/binary>> = HeaderData0} ->
-            maybe_return_header(State, HeaderData0, MaybeFilter, undefined,
-                                ChType, NumEntries, NumRecords, Timestamp,
-                                Epoch, NextChId0, Crc, DataSize,
-                                TrailerSize, FilterSize);
+    case file:pread(Fd, Pos, ?HEADER_SIZE_B + ReadAheadSize) of
+        {ok, Bin} when byte_size(Bin) >= ?HEADER_SIZE_B ->
+            parse_header(Bin, State);
         {ok, Bin} when byte_size(Bin) < ?HEADER_SIZE_B ->
             %% partial header read
             %% this can happen when a replica reader reads ahead
@@ -3008,45 +2964,55 @@ do_read_header(#?MODULE{cfg = #cfg{directory = Dir,
         Invalid ->
             {error, {invalid_chunk_header, Invalid}}
     end;
-do_read_header(#?MODULE{mode = #read{read_ahead_data = RAD} = Read0} = State) ->
-    case read_ahead_chunk(RAD, State) of
-        need_more_data ->
-            %% we don't have enough data in memory
+read_header_with_ra(#?MODULE{mode = #read{last_data_size = Lds,
+                                          read_ahead_data = RAD} = Read0} = State) ->
+    case byte_size(RAD) > ?HEADER_SIZE_B + Lds of
+        true ->
+            case parse_header(RAD, State) of
+                need_more_data ->
+                    %% we don't have enough data in memory
+                    Read1 = Read0#read{read_ahead_data = undefined},
+                    read_header_with_ra(State#?MODULE{mode = Read1});
+                Result ->
+                    Result
+            end;
+        false ->
             Read1 = Read0#read{read_ahead_data = undefined},
-            do_read_header(State#?MODULE{mode = Read1});
-        R ->
-            R
+            read_header_with_ra(State#?MODULE{mode = Read1})
     end.
 
-read_ahead_chunk(<<?MAGIC:4/unsigned,
-                  ?VERSION:4/unsigned,
-                  ChType:8/unsigned,
-                  NumEntries:16/unsigned,
-                  NumRecords:32/unsigned,
-                  Timestamp:64/signed,
-                  Epoch:64/unsigned,
-                  NextChId0:64/unsigned,
-                  Crc:32/integer,
-                  DataSize:32/unsigned,
-                  TrailerSize:32/unsigned,
-                  FilterSize:8/unsigned,
-                  _Reserved:24,
-                  MaybeFilterAndRest/binary>> = HeaderData0,
-                 #?MODULE{mode = #read{type = RType,
-                                       chunk_selector = Selector,
-                                       next_offset = NextChId0} = Read0} = State) ->
+
+parse_header(<<?MAGIC:4/unsigned,
+               ?VERSION:4/unsigned,
+               ChType:8/unsigned,
+               NumEntries:16/unsigned,
+               NumRecords:32/unsigned,
+               Timestamp:64/signed,
+               Epoch:64/unsigned,
+               NextChId0:64/unsigned,
+               Crc:32/integer,
+               DataSize:32/unsigned,
+               TrailerSize:32/unsigned,
+               FilterSize:8/unsigned,
+               _Reserved:24,
+               MaybeFilterAndRest/binary>> = HeaderData0,
+             #?MODULE{mode = #read{type = RType,
+                                   chunk_selector = Selector,
+                                   next_offset = NextChId0} = Read0} = State) ->
     {ToSkip, ToSend} = select_amount_to_send(RType, Selector, ChType,
-                                                             FilterSize, DataSize,
-                                                             TrailerSize),
-    case byte_size(MaybeFilterAndRest) of
-        RAS when RAS >= (ToSkip + ToSend) ->
+                                             FilterSize, DataSize,
+                                             TrailerSize),
+    case byte_size(MaybeFilterAndRest) >= (ToSkip + ToSend) of
+        true ->
             %% we read everything we needed
             {ReadAheadData, Content} =
                 case MaybeFilterAndRest of
                     <<_Skip:ToSkip/binary,
                       Ctnt:ToSend/binary,
                       Rest/binary>>
-                      when byte_size(Rest) > ?HEADER_SIZE_B+ ?DEFAULT_FILTER_SIZE ->
+                      when byte_size(Rest) > ?HEADER_SIZE_B + ?DEFAULT_FILTER_SIZE ->
+                        %% remained is larger than 64 bytes so worth keeping
+                        %% around
                         {Rest, Ctnt};
                     <<_Skip:ToSkip/binary,
                       Ctnt:ToSend/binary,
@@ -3059,20 +3025,27 @@ read_ahead_chunk(<<?MAGIC:4/unsigned,
                                 ChType, NumEntries, NumRecords, Timestamp,
                                 Epoch, NextChId0, Crc, DataSize, TrailerSize,
                                 FilterSize);
-        _ ->
-            need_more_data
+        false ->
+            %% having to throw away the read ahead data here
+            Read1 = Read0#read{read_ahead_data = undefined},
+            maybe_return_header(State#?MODULE{mode = Read1},
+                                HeaderData0, MaybeFilterAndRest, undefined,
+                                ChType, NumEntries, NumRecords, Timestamp,
+                                Epoch, NextChId0, Crc, DataSize, TrailerSize,
+                                FilterSize)
     end;
-read_ahead_chunk(_, _) ->
+parse_header(_, _) ->
     need_more_data.
 
-read_ahead_offset(LastDataSize) ->
-    case LastDataSize of
-        LastDataSize when ?CAN_READ_AHEAD(LastDataSize) ->
+read_ahead_size(LastDataSize) ->
+    case LastDataSize =/= undefined andalso
+         LastDataSize =< ?READ_AHEAD_LIMIT of
+        true ->
             %% the previous chunk was small, try to read
             %% the next chunk fully in one read
-            %% this can save us the sendfile call later
+            %% this can save us a system call later
             ?DEFAULT_FILTER_SIZE + ?READ_AHEAD_LIMIT;
-        _ ->
+        false ->
             %% optimistically read the default filter size.
             %% this amounts to 64 bytes with the header (small binary)
             %% and it may save us a syscall reading the filter
@@ -3087,7 +3060,6 @@ maybe_return_header(#?MODULE{cfg = #cfg{counter = CntRef},
                              fd = Fd} = State, HeaderData0, MaybeFilter, Content,
                     ChType, NumEntries, NumRecords, Timestamp, Epoch,
                     NextChId0, Crc, DataSize, TrailerSize, FilterSize) ->
-    <<HeaderData:?HEADER_SIZE_B/binary, _/binary>> = HeaderData0,
 
     ChunkFilter = case MaybeFilter of
                       <<F:FilterSize/binary, _/binary>> ->
@@ -3112,6 +3084,7 @@ maybe_return_header(#?MODULE{cfg = #cfg{counter = CntRef},
 
     case osiris_bloom:is_match(ChunkFilter, Filter) of
         true ->
+            <<HeaderData:?HEADER_SIZE_B/binary, _/binary>> = HeaderData0,
             {ok, #{chunk_id => NextChId0,
                    epoch => Epoch,
                    type => ChType,

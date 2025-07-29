@@ -1887,7 +1887,10 @@ read_header_ahead_offset_reader(Config) ->
     [
      fun(#{w := W0, r := R0}) ->
              %% no previous chunk, so not reading ahead
-             {_, W1} = write_committed([<<"hi">>, <<"ho">>], W0),
+             %% the messages are large enough to be larger than the default
+             %% filter size which is always read ahead (16 bytes)
+             {_, W1} = write_committed([<<"hiiiiiiiii">>, <<"hooooooo">>], W0),
+             ct:pal("R0 ~p", [R0]),
              {ok, H, Content, R1} = osiris_log:read_header0(R0),
              ?assertEqual(undefined, Content),
              {H, W1, R1}
@@ -1895,7 +1898,7 @@ read_header_ahead_offset_reader(Config) ->
      fun(#{w := W0, r := R0}) ->
              %% previous chunk too large to read ahead
              R1 = osiris_log:last_data_size(R0, RAL * 2),
-             {_, W1} = write_committed([<<"hi">>, <<"ho">>], W0),
+             {_, W1} = write_committed([<<"hiiiiiiiii">>, <<"hooooooo">>], W0),
              {ok, H, Content, R2} = osiris_log:read_header0(R1),
              ?assertEqual(undefined, Content),
              {H, W1, R2}
