@@ -21,6 +21,8 @@
 %% init.
 -callback finalize_manifest(state()) -> state().
 
+-callback close_manifest(state()) -> ok.
+
 -callback handle_event(event(), state()) -> state().
 
 -callback fix_corrupted_files(state()) -> state().

@@ -58,6 +58,7 @@
 %% osiris_log_manifest callbacks (default implementations)
 -export([init_manifest/2,
          finalize_manifest/1,
+         close_manifest/1,
          handle_event/2,
          fix_corrupted_files/1,
          truncate_to/3,
@@ -1805,10 +1806,12 @@ needs_handling(_, _, _) ->
 close(#?MODULE{cfg = #cfg{counter_id = CntId,
                           readers_counter_fun = Fun},
                fd = SegFd,
-               index_fd = IdxFd}) ->
+               index_fd = IdxFd,
+               manifest = {ManifestMod, Manifest}}) ->
     close_fd(IdxFd),
     close_fd(SegFd),
     Fun(-1),
+    ok = ManifestMod:close_manifest(Manifest),
     case CntId of
         undefined ->
             ok;
@@ -3332,6 +3335,9 @@ init_manifest(_LogKind, #{name := Name, dir := Dir}) ->
 finalize_manifest(#manifest{} = Manifest0) ->
     %% The index files list might be long. Clear it after init to save memory.
     Manifest0#manifest{index_files = undefined}.
+
+close_manifest(#manifest{}) ->
+    ok.
 
 handle_event(_Event, Manifest) ->
     Manifest.
