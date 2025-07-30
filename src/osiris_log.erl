@@ -8,7 +8,6 @@
 -module(osiris_log).
 
 -include("src/osiris.hrl").
--include("src/osiris_log.hrl").
 -include_lib("kernel/include/file.hrl").
 
 -export([init/1,

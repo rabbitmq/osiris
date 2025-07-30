@@ -1,6 +1,6 @@
 -module(osiris_log_manifest).
 
--include("src/osiris_log.hrl").
+-include("src/osiris.hrl").
 
 -type log_kind() :: writer | acceptor | data_reader | offset_reader.
 
