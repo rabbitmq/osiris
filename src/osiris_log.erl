@@ -2503,7 +2503,7 @@ write_chunk(Chunk,
             counters:add(CntRef, ?C_CHUNKS, 1),
             maybe_set_first_offset(Next, Cfg),
             Event = {chunk_written, Next, Timestamp, Epoch,
-                     Cur, Size, NumRecords},
+                     Cur, Size, NumRecords, Chunk},
             Manifest = ManifestMod:handle_event(Event, Manifest0),
             State#?MODULE{manifest = {ManifestMod, Manifest},
                           mode =
