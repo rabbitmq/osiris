@@ -66,7 +66,7 @@
          make_chunk/7,
          orphaned_segments/1,
          read_header0/1,
-         last_data_size/2,
+         read_ahead_hints/3,
          update_read/4
         ]).
 
@@ -430,6 +430,7 @@
          position = 0 :: non_neg_integer(),
          filter :: undefined | osiris_bloom:mstate(),
          last_data_size = undefined :: undefined | non_neg_integer(),
+         filter_size = ?DEFAULT_FILTER_SIZE :: osiris_bloom:filter_size(),
          read_ahead_data = undefined :: undefined | binary()}).
 -record(write,
         {type = writer :: writer | acceptor,
@@ -1665,7 +1666,8 @@ send_file(Sock, State) ->
 send_file(Sock,
           #?MODULE{mode = #read{type = RType,
                                 chunk_selector = Selector,
-                                transport = Transport}} = State0,
+                                transport = Transport,
+                                filter_size = RaFs}} = State0,
           Callback) ->
     case catch read_header0(State0) of
         {ok, #{type := ChType,
@@ -1687,7 +1689,9 @@ send_file(Sock,
                 true ->
                     Read = Read0#read{next_offset = ChId + NumRecords,
                                       position = NextPos,
-                                      last_data_size = DataSize},
+                                      last_data_size = DataSize,
+                                      filter_size = read_ahead_fsize(RaFs,
+                                                                     FilterSize)},
                     case MaybeData of
                         undefined ->
                             %% read header
@@ -2903,10 +2907,11 @@ read_header_with_ra(#?MODULE{cfg = #cfg{directory = Dir,
                              mode = #read{next_offset = NextChId0,
                                           position = Pos,
                                           last_data_size = Lds,
+                                          filter_size = FilterSize,
                                           read_ahead_data = undefined} = Read0,
                              current_file = CurFile,
                              fd = Fd} = State) ->
-    ReadAheadSize = read_ahead_size(Lds),
+    ReadAheadSize = read_ahead_size(Lds, FilterSize),
 
     case file:pread(Fd, Pos, ?HEADER_SIZE_B + ReadAheadSize) of
         {ok, Bin} when byte_size(Bin) >= ?HEADER_SIZE_B ->
@@ -2981,7 +2986,6 @@ read_header_with_ra(#?MODULE{mode = #read{last_data_size = Lds,
             read_header_with_ra(State#?MODULE{mode = Read1})
     end.
 
-
 parse_header(<<?MAGIC:4/unsigned,
                ?VERSION:4/unsigned,
                ChType:8/unsigned,
@@ -2998,7 +3002,9 @@ parse_header(<<?MAGIC:4/unsigned,
                MaybeFilterAndRest/binary>> = HeaderData0,
              #?MODULE{mode = #read{type = RType,
                                    chunk_selector = Selector,
-                                   next_offset = NextChId0} = Read0} = State) ->
+                                   next_offset = NextChId0,
+                                   read_ahead_data = RAD,
+                                   filter_size = LFS} = Read0} = State) ->
     {ToSkip, ToSend} = select_amount_to_send(RType, Selector, ChType,
                                              FilterSize, DataSize,
                                              TrailerSize),
@@ -3010,8 +3016,8 @@ parse_header(<<?MAGIC:4/unsigned,
                     <<_Skip:ToSkip/binary,
                       Ctnt:ToSend/binary,
                       Rest/binary>>
-                      when byte_size(Rest) > ?HEADER_SIZE_B + ?DEFAULT_FILTER_SIZE ->
-                        %% remained is larger than 64 bytes so worth keeping
+                      when byte_size(Rest) > ?HEADER_SIZE_B + LFS ->
+                        %% remaining is larger than 64 bytes so worth keeping
                         %% around
                         {Rest, Ctnt};
                     <<_Skip:ToSkip/binary,
@@ -3026,25 +3032,38 @@ parse_header(<<?MAGIC:4/unsigned,
                                 Epoch, NextChId0, Crc, DataSize, TrailerSize,
                                 FilterSize);
         false ->
-            %% having to throw away the read ahead data here
-            Read1 = Read0#read{read_ahead_data = undefined},
-            maybe_return_header(State#?MODULE{mode = Read1},
-                                HeaderData0, MaybeFilterAndRest, undefined,
-                                ChType, NumEntries, NumRecords, Timestamp,
-                                Epoch, NextChId0, Crc, DataSize, TrailerSize,
-                                FilterSize)
+            case RAD of
+                undefined ->
+                    %% we just read the data, we could not read ahead the whole chunk
+                    %% let's move on to see whether the chunk should be filtered or not
+                    maybe_return_header(State,
+                                        HeaderData0, MaybeFilterAndRest, undefined,
+                                        ChType, NumEntries, NumRecords, Timestamp,
+                                        Epoch, NextChId0, Crc, DataSize, TrailerSize,
+                                        FilterSize);
+                _ ->
+                    %% the data were from a previous read
+                    %% we can ditch them and try to read the chunk ahead
+                    need_more_data
+            end
     end;
 parse_header(_, _) ->
     need_more_data.
 
-read_ahead_size(LastDataSize) ->
+%% keep the previous value if the current one is 0 (i.e. no filter in the chunk)
+read_ahead_fsize(Previous, 0) ->
+    Previous;
+read_ahead_fsize(_, Current) ->
+    Current.
+
+read_ahead_size(LastDataSize, FilterSize) ->
     case LastDataSize =/= undefined andalso
          LastDataSize =< ?READ_AHEAD_LIMIT of
         true ->
             %% the previous chunk was small, try to read
             %% the next chunk fully in one read
             %% this can save us a system call later
-            ?DEFAULT_FILTER_SIZE + ?READ_AHEAD_LIMIT;
+            FilterSize + ?READ_AHEAD_LIMIT;
         false ->
             %% optimistically read the default filter size.
             %% this amounts to 64 bytes with the header (small binary)
@@ -3107,10 +3126,14 @@ maybe_return_header(#?MODULE{cfg = #cfg{counter = CntRef},
             read_header0(State#?MODULE{mode = Read})
     end.
 
--spec last_data_size(state(), non_neg_integer()) -> state().
-last_data_size(#?MODULE{mode = R = #read{}} = S, Lds) ->
-    S#?MODULE{mode = R#read{last_data_size = Lds}}.
+%% for testing
+-spec read_ahead_hints(state(), non_neg_integer(), osiris_bloom:filter_size()) ->
+    state().
+read_ahead_hints(#?MODULE{mode = R = #read{}} = S, Lds, FilterSize) ->
+    S#?MODULE{mode = R#read{last_data_size = Lds,
+                            filter_size = FilterSize}}.
 
+%% for testing
 -spec update_read(state(), offset(), offset(), non_neg_integer()) -> state().
 update_read(#?MODULE{mode = R0 = #read{}} = S, ChId, NumRecords, Pos) ->
     R = R0#read{next_offset = ChId + NumRecords,
