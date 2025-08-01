@@ -9,10 +9,7 @@
 -type event() :: {segment_opened,
                   OldSegment :: file:filename_all() | undefined,
                   NewSegment :: file:filename_all()} |
-                 {chunk_written, osiris:offset(), osiris:timestamp(),
-                  osiris:epoch(), Pos :: non_neg_integer(),
-                  Size :: non_neg_integer(), NumRecords :: non_neg_integer(),
-                  Chunk :: iodata()}.
+                 {chunk_written, #chunk_info{}, iolist()}.
 
 -export_type([state/0, event/0]).
 
