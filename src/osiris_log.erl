@@ -2,7 +2,7 @@
 %% License, v. 2.0. If a copy of the MPL was not distributed with this
 %% file, You can obtain one at https://mozilla.org/MPL/2.0/.
 %%
-%% Copyright (c) 2007-2023 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
+%% Copyright (c) 2007-2025 Broadcom. All Rights Reserved. The term Broadcom refers to Broadcom Inc. and/or its subsidiaries.
 %%
 
 -module(osiris_log).
@@ -1443,8 +1443,9 @@ chunk_iterator(State) ->
     {error, {invalid_chunk_header, term()}}.
 chunk_iterator(#?MODULE{cfg = #cfg{},
                         mode = #read{type = RType,
-                                     chunk_selector = Selector}
-                       } = State0, CreditHint)
+                                     chunk_selector = Selector,
+                                     filter_size = RaFs}} = State0,
+               CreditHint)
   when (is_integer(CreditHint) andalso CreditHint > 0) orelse
        is_atom(CreditHint) ->
     %% reads the next chunk of unparsed chunk data
@@ -1458,15 +1459,20 @@ chunk_iterator(#?MODULE{cfg = #cfg{},
            data_size := DataSize,
            filter_size := FilterSize,
            position := Pos,
-           next_position := NextPos} = Header, _,
-         #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read} = State1} ->
-            State = State1#?MODULE{mode = Read#read{next_offset = ChId + NumRecords,
-                                                    position = NextPos}},
+           next_position := NextPos} = Header, MaybeData,
+         #?MODULE{fd = Fd, mode = #read{next_offset = ChId} = Read1} = State1} ->
             case needs_handling(RType, Selector, ChType) of
                 true ->
+                    Read = Read1#read{next_offset = ChId + NumRecords,
+                                      position = NextPos,
+                                      last_data_size = DataSize,
+                                      filter_size = read_ahead_fsize(RaFs,
+                                                                     FilterSize)},
+
+                    State = State1#?MODULE{mode = Read},
                     DataPos = Pos + ?HEADER_SIZE_B + FilterSize,
                     Data = iter_read_ahead(Fd, DataPos, ChId, Crc, CreditHint,
-                                           DataSize, NumEntries),
+                                           DataSize, NumEntries, MaybeData),
                     Iterator = #iterator{fd = Fd,
                                          data = Data,
                                          next_offset = ChId,
@@ -1475,6 +1481,9 @@ chunk_iterator(#?MODULE{cfg = #cfg{},
                     {ok, Header, Iterator, State};
                 false ->
                     %% skip
+                    Read = Read1#read{next_offset = ChId + NumRecords,
+                                      position = NextPos},
+                    State = State1#?MODULE{mode = Read},
                     chunk_iterator(State, CreditHint)
             end;
         Other ->
@@ -1681,13 +1690,13 @@ send_file(Sock,
                header_data := HeaderData} = Header,
          MaybeData,
          #?MODULE{fd = Fd,
-                  mode = #read{next_offset = ChId} = Read0} = State1} ->
+                  mode = #read{next_offset = ChId} = Read1} = State1} ->
 
             %% only sendfile if either the reader is a data reader
             %% or the chunk is a user type (for offset readers)
             case needs_handling(RType, Selector, ChType) of
                 true ->
-                    Read = Read0#read{next_offset = ChId + NumRecords,
+                    Read = Read1#read{next_offset = ChId + NumRecords,
                                       position = NextPos,
                                       last_data_size = DataSize,
                                       filter_size = read_ahead_fsize(RaFs,
@@ -1733,7 +1742,7 @@ send_file(Sock,
                             end
                     end;
                 false ->
-                    Read = Read0#read{next_offset = ChId + NumRecords,
+                    Read = Read1#read{next_offset = ChId + NumRecords,
                                       position = NextPos},
                     State = State1#?MODULE{mode = Read},
                     %% skip chunk and recurse
@@ -3362,16 +3371,21 @@ dump_crc_check(Fd) ->
             dump_crc_check(Fd)
     end.
 
-iter_read_ahead(_Fd, _Pos, _ChunkId, _Crc, 1, _DataSize, _NumEntries) ->
+iter_read_ahead(_Fd, _Pos, _ChunkId, _Crc, _Credit, DataSize, _NumEntries, RAD)
+  when RAD =/= undefined ->
+    <<Data:DataSize/binary, _/binary>> = RAD,
+    Data;
+iter_read_ahead(_Fd, _Pos, _ChunkId, _Crc, 1, _DataSize, _NumEntries, undefined) ->
+    %% FIXME is it about credit = 1 or number of entries = 1?
     %% no point reading ahead if there is only one entry to be read at this
     %% time
     undefined;
-iter_read_ahead(Fd, Pos, ChunkId, Crc, Credit, DataSize, NumEntries)
+iter_read_ahead(Fd, Pos, ChunkId, Crc, Credit, DataSize, NumEntries, undefined)
   when Credit == all orelse NumEntries == 1 ->
     {ok, Data} = file:pread(Fd, Pos, DataSize),
     validate_crc(ChunkId, Crc, Data),
     Data;
-iter_read_ahead(Fd, Pos, _ChunkId, _Crc, Credit0, DataSize, NumEntries) ->
+iter_read_ahead(Fd, Pos, _ChunkId, _Crc, Credit0, DataSize, NumEntries, undefined) ->
     %% read ahead, assumes roughly equal entry sizes which may not be the case
     %% TODO round up to nearest block?
     %% We can only practically validate CRC if we read the whole data

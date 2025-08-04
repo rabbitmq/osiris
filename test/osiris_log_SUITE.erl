@@ -38,6 +38,7 @@ all_tests() ->
      subbatch,
      subbatch_compressed,
      iterator_read_chunk,
+     iterator_read_chunk_with_read_ahead,
      iterator_read_chunk_mixed_sizes_with_credit,
      read_chunk_parsed,
      read_chunk_parsed_2,
@@ -344,14 +345,16 @@ iterator_read_chunk(Config) ->
     EntriesRev = [Batch,
                   <<"ho">>,
                   {<<"filter">>, <<"hi">>}],
-    {ChId, _S1} = write_committed(EntriesRev, S0),
-    {ok, _H, I0, _R2} = osiris_log:chunk_iterator(R1),
+    {ChId, S1} = write_committed(EntriesRev, S0),
+    {ok, _H, I0, R2} = osiris_log:chunk_iterator(R1),
     HoOffs = ChId + 1,
     BatchOffs = ChId + 2,
     {{ChId, <<"hi">>}, I1} = osiris_log:iterator_next(I0),
     {{HoOffs, <<"ho">>}, I2} = osiris_log:iterator_next(I1),
     {{BatchOffs, Batch}, I} = osiris_log:iterator_next(I2),
     ?assertMatch(end_of_chunk, osiris_log:iterator_next(I)),
+    osiris_log:close(R2),
+    osiris_log:close(S1),
     ok.
 
 iterator_read_chunk_mixed_sizes_with_credit(Config) ->
@@ -365,16 +368,79 @@ iterator_read_chunk_mixed_sizes_with_credit(Config) ->
     EntriesRev = [Big,
                   <<"ho">>,
                   {<<"filter">>, <<"hi">>}],
-    {ChId, _S1} = write_committed(EntriesRev, S0),
+    {ChId, S1} = write_committed(EntriesRev, S0),
     %% this is a less than ideal case where we have one large and two very
-    %% small entries inthe same batch. The read ahead only
-    {ok, _H, I0, _R2} = osiris_log:chunk_iterator(R1, 2),
+    %% small entries in the same batch. We read ahead only the 2 first entries.
+    {ok, _H, I0, R2} = osiris_log:chunk_iterator(R1, 2),
     HoOffs = ChId + 1,
     BigOffs = ChId + 2,
     {{ChId, <<"hi">>}, I1} = osiris_log:iterator_next(I0),
     {{HoOffs, <<"ho">>}, I2} = osiris_log:iterator_next(I1),
     {{BigOffs, Big}, I} = osiris_log:iterator_next(I2),
     ?assertMatch(end_of_chunk, osiris_log:iterator_next(I)),
+    osiris_log:close(R2),
+    osiris_log:close(S1),
+    ok.
+
+iterator_read_chunk_with_read_ahead(Config) ->
+    %% the test makes sure reading ahead on header reading does not break
+    %% the iterator
+    RAL = 4096, %% read ahead limit
+    Conf = ?config(osiris_conf, Config),
+    W = osiris_log:init(Conf),
+    Shared = osiris_log:get_shared(W),
+    RConf = Conf#{shared => Shared},
+    {ok, R} = osiris_log:init_offset_reader(0, RConf),
+    Tests =
+    [
+     fun(#{w := W0, r := R0}) ->
+             %% first chunk, there won't be any data size hints in the reader
+             EntriesRev = [<<"hi">>, <<"ho">>],
+             {_, W1} = write_committed(EntriesRev, W0),
+             {ok, H, I0, R1} = osiris_log:chunk_iterator(R0),
+             {{_, <<"ho">>}, I1} = osiris_log:iterator_next(I0),
+             {{_, <<"hi">>}, I2} = osiris_log:iterator_next(I1),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
+             {H, W1, R1}
+     end,
+     fun(#{w := W0, r := R0}) ->
+             %% this one will be read ahead
+             EntriesRev = [<<"foo">>, <<"bar">>],
+             {_, W1} = write_committed(EntriesRev, W0),
+             {ok, H, I0, R1} = osiris_log:chunk_iterator(R0),
+             {{_, <<"bar">>}, I1} = osiris_log:iterator_next(I0),
+             {{_, <<"foo">>}, I2} = osiris_log:iterator_next(I1),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
+             {H, W1, R1}
+     end,
+     fun(#{w := W0, r := R0}) ->
+             %% this one will be read ahead
+             E1 = rand:bytes(RAL - 100),
+             EntriesRev = [E1 , <<"aaa">>],
+             {_, W1} = write_committed(EntriesRev, W0),
+             {ok, H, I0, R1} = osiris_log:chunk_iterator(R0),
+             {{_, <<"aaa">>}, I1} = osiris_log:iterator_next(I0),
+             {{_, E1}, I2} = osiris_log:iterator_next(I1),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
+             {H, W1, R1}
+     end,
+     fun(#{w := W0, r := R0}) ->
+             %% this one is too big to be read ahead
+             E1 = rand:bytes(RAL * 2),
+             EntriesRev = [E1 , <<"aaa">>],
+             {_, W1} = write_committed(EntriesRev, W0),
+             {ok, H, I0, R1} = osiris_log:chunk_iterator(R0),
+             {{_, <<"aaa">>}, I1} = osiris_log:iterator_next(I0),
+             {{_, E1}, I2} = osiris_log:iterator_next(I1),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
+             {H, W1, R1}
+     end
+    ],
+
+    #{w := Wr1, r := Rd1} = run_read_ahead_tests(Tests, offset,
+                                                 ?DEFAULT_FILTER_SIZE, W, R),
+    osiris_log:close(Rd1),
+    osiris_log:close(Wr1),
     ok.
 
 read_chunk_parsed(Config) ->
