@@ -1518,16 +1518,18 @@ chunk_iterator(#?MODULE{cfg = #cfg{},
            filter_size := FilterSize,
            position := Pos,
            next_position := NextPos} = Header,
-         #?MODULE{mode = #read{reader = Reader,
+         #?MODULE{mode = #read{reader = {ReaderMod, Reader0},
                                next_offset = ChId} = Read} = State1} ->
             State = State1#?MODULE{mode = Read#read{next_offset = ChId + NumRecords,
                                                     position = NextPos}},
             case needs_handling(RType, Selector, ChType) of
                 true ->
                     DataPos = Pos + ?HEADER_SIZE_B + FilterSize,
-                    Data = iter_read_ahead(Reader, DataPos, ChId, Crc,
-                                           CreditHint, DataSize, NumEntries),
-                    Iterator = #iterator{reader = Reader,
+                    {Data, Reader} = iter_read_ahead(ReaderMod, Reader0,
+                                                     DataPos, ChId, Crc,
+                                                     CreditHint, DataSize,
+                                                     NumEntries),
+                    Iterator = #iterator{reader = {ReaderMod, Reader},
                                          data = Data,
                                          next_offset = ChId,
                                          num_left = NumEntries,
@@ -1545,58 +1547,61 @@ chunk_iterator(#?MODULE{cfg = #cfg{},
     end_of_chunk | {offset_entry(), chunk_iterator()}.
 iterator_next(#iterator{num_left = 0}) ->
     end_of_chunk;
-iterator_next(#iterator{reader = {ReaderMod, Reader},
+iterator_next(#iterator{reader = {ReaderMod, Reader0},
                         next_offset = NextOffs,
                         num_left = Num,
                         data = ?REC_MATCH_SIMPLE(Len, Rem0),
                         next_record_pos = Pos} = I0) ->
-    {Record, Rem} =
+    {Record, Rem, Reader} =
         case Rem0 of
             <<Record0:Len/binary, Rem1/binary>> ->
-                {Record0, Rem1};
+                {Record0, Rem1, Reader0};
             _ ->
                 %% not enough in Rem0 to read the entire record
                 %% so we need to read it from disk
-                {ok, <<Record0:Len/binary, Rem1/binary>>} =
-                    ReaderMod:pread(Reader, Pos + ?REC_HDR_SZ_SIMPLE_B,
+                {ok, <<Record0:Len/binary, Rem1/binary>>, Reader1} =
+                    ReaderMod:pread(Reader0, Pos + ?REC_HDR_SZ_SIMPLE_B,
                                     Len + ?ITER_READ_AHEAD_B),
-                {Record0, Rem1}
+                {Record0, Rem1, Reader1}
         end,
 
-    I = I0#iterator{next_offset = NextOffs + 1,
+    I = I0#iterator{reader = {ReaderMod, Reader},
+                    next_offset = NextOffs + 1,
                     num_left = Num - 1,
                     data = Rem,
                     next_record_pos = Pos + ?REC_HDR_SZ_SIMPLE_B + Len},
     {{NextOffs, Record}, I};
-iterator_next(#iterator{reader = {ReaderMod, Reader},
+iterator_next(#iterator{reader = {ReaderMod, Reader0},
                         next_offset = NextOffs,
                         num_left = Num,
                         data = ?REC_MATCH_SUBBATCH(CompType, NumRecs,
                                                    UncompressedLen,
                                                    Len, Rem0),
                         next_record_pos = Pos} = I0) ->
-    {Data, Rem} =
+    {Data, Rem, Reader} =
         case Rem0 of
             <<Record0:Len/binary, Rem1/binary>> ->
-                {Record0, Rem1};
+                {Record0, Rem1, Reader0};
             _ ->
                 %% not enough in Rem0 to read the entire record
                 %% so we need to read it from disk
-                {ok, <<Record0:Len/binary, Rem1/binary>>} =
-                    ReaderMod:pread(Reader, Pos + ?REC_HDR_SZ_SUBBATCH_B,
+                {ok, <<Record0:Len/binary, Rem1/binary>>, Reader1} =
+                    ReaderMod:pread(Reader0, Pos + ?REC_HDR_SZ_SUBBATCH_B,
                                     Len + ?ITER_READ_AHEAD_B),
-                {Record0, Rem1}
+                {Record0, Rem1, Reader1}
         end,
     Record = {batch, NumRecs, CompType, UncompressedLen, Data},
-    I = I0#iterator{next_offset = NextOffs + NumRecs,
+    I = I0#iterator{reader = {ReaderMod, Reader},
+                    next_offset = NextOffs + NumRecs,
                     num_left = Num - 1,
                     data = Rem,
                     next_record_pos = Pos + ?REC_HDR_SZ_SUBBATCH_B + Len},
     {{NextOffs, Record}, I};
-iterator_next(#iterator{reader = {ReaderMod, Reader},
+iterator_next(#iterator{reader = {ReaderMod, Reader0},
                         next_record_pos = Pos} = I) ->
-    {ok, Data} = ReaderMod:pread(Reader, Pos, ?ITER_READ_AHEAD_B),
-    iterator_next(I#iterator{data = Data}).
+    {ok, Data, Reader} = ReaderMod:pread(Reader0, Pos, ?ITER_READ_AHEAD_B),
+    iterator_next(I#iterator{reader = {ReaderMod, Reader},
+                             data = Data}).
 
 -spec read_chunk(state()) ->
     {ok, binary(), state()} |
@@ -1617,17 +1622,18 @@ read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
            position := Pos,
            next_position := NextPos,
            trailer_size := TrailerSize},
-         #?MODULE{mode = #read{reader = {ReaderMod, Reader},
+         #?MODULE{mode = #read{reader = {ReaderMod, Reader0},
                                next_offset = ChId} = Read} = State} ->
             ToRead = ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
-            {ok, ChData} = ReaderMod:pread(Reader, Pos, ToRead),
+            {ok, ChData, Reader} = ReaderMod:pread(Reader0, Pos, ToRead),
             <<_:?HEADER_SIZE_B/binary,
               _:FilterSize/binary,
               RecordData:DataSize/binary,
               _/binary>> = ChData,
             validate_crc(ChId, Crc, RecordData),
             {ok, ChData,
-             State#?MODULE{mode = Read#read{next_offset = ChId + NumRecords,
+             State#?MODULE{mode = Read#read{reader = {ReaderMod, Reader},
+                                            next_offset = ChId + NumRecords,
                                             position = NextPos}}};
         Other ->
             Other
@@ -1712,7 +1718,7 @@ is_valid_chunk_on_disk(SegFile, Pos) ->
             false
     end.
 
--spec send_file(gen_tcp:socket(), state()) ->
+-spec send_file(gen_tcp:socket() | ssl:socket(), state()) ->
                    {ok, state()} |
                    {error, term()} |
                    {end_of_stream, state()}.
@@ -1739,7 +1745,7 @@ send_file(Sock,
                position := Pos,
                next_position := NextPos,
                header_data := HeaderData} = Header,
-         #?MODULE{mode = #read{reader = Reader,
+         #?MODULE{mode = #read{reader = {ReaderMod, Reader0},
                                next_offset = ChId} = Read0} = State1} ->
             %% read header
             %% used to write frame headers to socket
@@ -1755,8 +1761,8 @@ send_file(Sock,
                         {0, FilterSize + DataSize + TrailerSize}
                 end,
 
-            Read = Read0#read{next_offset = ChId + NumRecords,
-                              position = NextPos},
+            Read1 = Read0#read{next_offset = ChId + NumRecords,
+                               position = NextPos},
             %% only sendfile if either the reader is a data reader
             %% or the chunk is a user type (for offset readers)
             case needs_handling(RType, Selector, ChType) of
@@ -1764,9 +1770,12 @@ send_file(Sock,
                     _ = Callback(Header, ToSend + byte_size(HeaderData)),
                     case send(Transport, Sock, HeaderData) of
                         ok ->
-                            case sendfile(Transport, Reader, Sock,
-                                          Pos + ?HEADER_SIZE_B + ToSkip, ToSend) of
-                                ok ->
+                            case ReaderMod:sendfile(Transport, Reader0, Sock,
+                                                    Pos + ?HEADER_SIZE_B + ToSkip,
+                                                    ToSend) of
+                                {ok, Reader} ->
+                                    Read = Read1#read{reader = {ReaderMod,
+                                                                Reader}},
                                     State = State1#?MODULE{mode = Read},
                                     {ok, State};
                                 Err ->
@@ -1778,7 +1787,7 @@ send_file(Sock,
                             Err
                     end;
                 false ->
-                    State = State1#?MODULE{mode = Read},
+                    State = State1#?MODULE{mode = Read1},
                     %% skip chunk and recurse
                     send_file(Sock, State, Callback)
             end;
@@ -2528,26 +2537,6 @@ max_segment_size_reached(
     CurrentSizeBytes >= MaxSizeBytes orelse
     CurrentSizeChunks >= MaxSizeChunks.
 
-sendfile(_Transport, _Reader, _Sock, _Pos, 0) ->
-    ok;
-sendfile(tcp = Transport, {ReaderMod, Reader} = R, Sock, Pos, ToSend) ->
-    case ReaderMod:sendfile(Reader, Sock, Pos, ToSend) of
-        {ok, 0} ->
-            %% TODO add counter for this?
-            sendfile(Transport, R, Sock, Pos, ToSend);
-        {ok, BytesSent} ->
-            sendfile(Transport, R, Sock, Pos + BytesSent, ToSend - BytesSent);
-        {error, _} = Err ->
-            Err
-    end;
-sendfile(ssl, {ReaderMod, Reader}, Sock, Pos, ToSend) ->
-    case ReaderMod:pread(Reader, Pos, ToSend) of
-        {ok, Data} ->
-            ssl:send(Sock, Data);
-        {error, _} = Err ->
-            Err
-    end.
-
 send(tcp, Sock, Data) ->
     gen_tcp:send(Sock, Data);
 send(ssl, Sock, Data) ->
@@ -2950,7 +2939,7 @@ recover_tracking(Fd, Trk0, Pos0) ->
 read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                                  shared = Shared,
                                  counter = CntRef},
-                      mode = #read{reader = {ReaderMod, Reader},
+                      mode = #read{reader = {ReaderMod, Reader0},
                                    next_offset = NextChId0,
                                    position = Pos,
                                    filter = Filter} = Read0,
@@ -2962,7 +2951,7 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
             %% optimistically read 64 bytes (small binary) as it may save us
             %% a syscall reading the filter if the filter is of the default
             %% 16 byte size
-            case ReaderMod:pread(Reader, Pos,
+            case ReaderMod:pread(Reader0, Pos,
                                  ?HEADER_SIZE_B + ?DEFAULT_FILTER_SIZE) of
                 {ok, <<?MAGIC:4/unsigned,
                        ?VERSION:4/unsigned,
@@ -2977,29 +2966,30 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                        TrailerSize:32/unsigned,
                        FilterSize:8/unsigned,
                        _Reserved:24,
-                       MaybeFilter/binary>> = HeaderData0} ->
+                       MaybeFilter/binary>> = HeaderData0, Reader1} ->
                     <<HeaderData:?HEADER_SIZE_B/binary, _/binary>> = HeaderData0,
                     counters:put(CntRef, ?C_OFFSET, NextChId0 + NumRecords),
                     counters:add(CntRef, ?C_CHUNKS, 1),
                     NextPos = Pos + ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
 
-                    ChunkFilter = case MaybeFilter of
-                                      <<F:FilterSize/binary, _/binary>> ->
-                                          %% filter is of default size or 0
-                                          F;
-                                      _  when Filter =/= undefined ->
-                                          %% the filter is larger than default
-                                          case ReaderMod:pread(Reader,
-                                                               Pos + ?HEADER_SIZE_B,
-                                                               FilterSize) of
-                                              {ok, F} ->
-                                                  F;
-                                              eof ->
-                                                  throw({end_of_stream, State})
-                                          end;
-                                      _ ->
-                                          <<>>
-                                  end,
+                    {ChunkFilter, Reader} =
+                    case MaybeFilter of
+                        <<F:FilterSize/binary, _/binary>> ->
+                            %% filter is of default size or 0
+                            {F, Reader1};
+                        _  when Filter =/= undefined ->
+                            %% the filter is larger than default
+                            case ReaderMod:pread(Reader1,
+                                                 Pos + ?HEADER_SIZE_B,
+                                                 FilterSize) of
+                                {ok, F, Reader2} ->
+                                    {F, Reader2};
+                                eof ->
+                                    throw({end_of_stream, State})
+                            end;
+                        _ ->
+                            {<<>>, Reader1}
+                    end,
 
                     case osiris_bloom:is_match(ChunkFilter, Filter) of
                         true ->
@@ -3018,10 +3008,12 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                                    position => Pos}, State};
                         false ->
                             Read = Read0#read{next_offset = NextChId0 + NumRecords,
-                                              position = NextPos},
+                                              position = NextPos,
+                                              reader = {ReaderMod, Reader}},
                             read_header0(State#?MODULE{mode = Read});
                         {retry_with, NewFilter} ->
-                            Read = Read0#read{filter = NewFilter},
+                            Read = Read0#read{filter = NewFilter,
+                                              reader = {ReaderMod, Reader}},
                             read_header0(State#?MODULE{mode = Read})
                     end;
                 {ok, Bin} when byte_size(Bin) < ?HEADER_SIZE_B ->
@@ -3044,10 +3036,11 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                             %% log but would cause an infinite loop if it does
                             {end_of_stream, State};
                         false ->
+                            ok = ReaderMod:close(Reader0),
                             case ReaderMod:open(filename:join(Dir, SegFile)) of
-                                {ok, Reader2} ->
-                                    ok = ReaderMod:close(Reader),
-                                    Read = Read0#read{reader = {ReaderMod, Reader2},
+                                {ok, Reader} ->
+                                    Read = Read0#read{reader = {ReaderMod,
+                                                                Reader},
                                                       next_offset = NextChId,
                                                       position = ?LOG_HEADER_SIZE},
                                     read_header0(
@@ -3069,7 +3062,7 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                    _Crc:32/integer,
                    _DataSize:32/unsigned,
                    _TrailerSize:32/unsigned,
-                   _Reserved:32>>} ->
+                   _Reserved:32>>, _Reader} ->
                     %% TODO: we may need to return the new state here if
                     %% we've crossed segments
                     {error, {unexpected_chunk_id, UnexpectedChId, NextChId0}};
@@ -3302,25 +3295,27 @@ dump_crc_check(Fd) ->
             dump_crc_check(Fd)
     end.
 
-iter_read_ahead(_Reader, _Pos, _ChunkId, _Crc, 1, _DataSize, _NumEntries) ->
+iter_read_ahead(_ReaderMod, Reader, _Pos, _ChunkId, _Crc, 1, _DataSize,
+                _NumEntries) ->
     %% no point reading ahead if there is only one entry to be read at this
     %% time
-    undefined;
-iter_read_ahead({ReaderMod, Reader}, Pos, ChunkId, Crc, Credit, DataSize,
+    {undefined, Reader};
+iter_read_ahead(ReaderMod, Reader0, Pos, ChunkId, Crc, Credit, DataSize,
                 NumEntries)
   when Credit == all orelse NumEntries == 1 ->
-    {ok, Data} = ReaderMod:pread(Reader, Pos, DataSize),
+    {ok, Data, Reader} = ReaderMod:pread(Reader0, Pos, DataSize),
     validate_crc(ChunkId, Crc, Data),
-    Data;
-iter_read_ahead({ReaderMod, Reader}, Pos, _ChunkId, _Crc, Credit0, DataSize,
+    {Data, Reader};
+iter_read_ahead(ReaderMod, Reader0, Pos, _ChunkId, _Crc, Credit0, DataSize,
                 NumEntries) ->
     %% read ahead, assumes roughly equal entry sizes which may not be the case
     %% TODO round up to nearest block?
     %% We can only practically validate CRC if we read the whole data
     Credit = min(Credit0, NumEntries),
     Size = DataSize div NumEntries * Credit,
-    {ok, Data} = ReaderMod:pread(Reader, Pos, Size + ?ITER_READ_AHEAD_B),
-    Data.
+    {ok, Data, Reader} = ReaderMod:pread(Reader0, Pos,
+                                         Size + ?ITER_READ_AHEAD_B),
+    {Data, Reader}.
 
 list_dir(Dir) ->
     case prim_file:list_dir(Dir) of
