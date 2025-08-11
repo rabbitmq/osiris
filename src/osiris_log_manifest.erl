@@ -4,14 +4,21 @@
 
 -type state() :: term().
 
--type writer_info() ::
+-type segment_info() ::
+    #{file := file:filename_all(),
+      size := non_neg_integer(),
+      first => #chunk_info{},
+      last => #chunk_info{}
+     }.
+
+-type log_info() ::
     #{num_segments := non_neg_integer(),
       %% These keys may be unset if the log is empty.
-      first_offset => osiris:offset(),
-      first_timestamp => osiris:timestamp(),
-      last_segment_file => file:filename_all(),
-      last_segment_size => non_neg_integer(),
-      last_chunk => #chunk_info{}
+      first => segment_info(),
+      last => segment_info(),
+      %% Optional. Included by the default impls of writer_manifest/1 and
+      %% acceptor_manifest/3 for the convenience of other impls.
+      segment_offsets => [osiris:offset()]
      }.
 
 -type event() :: {segment_opened,
@@ -19,15 +26,15 @@
                   NewSegment :: file:filename_all()} |
                  {chunk_written, #chunk_info{}, iolist()}.
 
--export_type([state/0, writer_info/0, event/0]).
+-export_type([state/0, log_info/0, event/0]).
 
 -callback acceptor_manifest(osiris_log:range(),
                             EpochOffsets :: [{osiris:offset(), osiris:epoch()}],
                             osiris_log:config()) ->
-    {writer_info(), state()}.
+    {log_info(), state()}.
 
 -callback writer_manifest(osiris_log:config()) ->
-    {writer_info(), state()}.
+    {log_info(), state()}.
 
 -callback find_data_reader_position(osiris:tail_info(), osiris_log:config()) ->
     {ok, osiris:offset(), Pos :: non_neg_integer(),

@@ -566,14 +566,14 @@ init(#{dir := Dir,
                                                              Manifest0},
                                                  current_epoch = Epoch}});
         #{num_segments := NumSegments,
-          first_offset := FstChId,
-          first_timestamp := FstTs,
-          last_segment_file := Filename,
-          last_segment_size := Size,
-          last_chunk := #chunk_info{epoch = LastEpoch,
-                                    timestamp = LastTs,
-                                    id = LastChId,
-                                    num = LastNum}} ->
+          first := #{first := #chunk_info{id = FstChId,
+                                          timestamp = FstTs}},
+          last := #{file := Filename,
+                    size := Size,
+                    last := #chunk_info{epoch = LastEpoch,
+                                        timestamp = LastTs,
+                                        id = LastChId,
+                                        num = LastNum}}} ->
             %% assert epoch is same or larger
             %% than last known epoch
             case LastEpoch > Epoch of
@@ -614,7 +614,7 @@ init(#{dir := Dir,
                      current_file = filename:basename(Filename),
                      fd = SegFd};
         #{num_segments := 1,
-          last_segment_file := Filename} ->
+          first := #{file := Filename}} ->
             %% the empty log case
             {ok, SegFd} = open(Filename, ?FILE_OPTS_WRITE),
             {ok, _} = file:position(SegFd, ?LOG_HEADER_SIZE),
@@ -650,23 +650,39 @@ writer_manifest(#{dir := Dir} = Config) ->
     ok = maybe_fix_corrupted_files(Config),
     Info = case first_and_last_seginfos(Config) of
                none ->
-                   #{num_segments => 0};
-               {NumSegments,
-                #seg_info{first = #chunk_info{id = FstChId,
-                                              timestamp = FstTs}},
-                #seg_info{file = Filename,
-                          size = Size,
-                          last = LastChunk}} ->
-                   #{num_segments => NumSegments,
-                     first_offset => FstChId,
-                     first_timestamp => FstTs,
-                     last_segment_file => Filename,
-                     last_segment_size => Size,
-                     last_chunk => LastChunk};
-               {1, #seg_info{last = undefined,
-                             file = Filename}, _} ->
+                   #{num_segments => 0,
+                     segment_offsets => []};
+               {SegmentOffsets,
+                #seg_info{file = FirstFile,
+                          size = FirstSize,
+                          first = FirstFirstChunk,
+                          last = FirstLastChunk},
+                #seg_info{file = LastFile,
+                          size = LastSize,
+                          first = LastFirstChunk,
+                          last = #chunk_info{} = LastLastChunk}} ->
+                   First = #{file => FirstFile,
+                             size => FirstSize,
+                             first => FirstFirstChunk,
+                             last => FirstLastChunk},
+                   Last = #{file => LastFile,
+                            size => LastSize,
+                            first => LastFirstChunk,
+                            last => LastLastChunk},
+                   #{num_segments => length(SegmentOffsets),
+                     first => First,
+                     last => Last,
+                     segment_offsets => SegmentOffsets};
+               {[_] = SegmentOffsets,
+                #seg_info{last = undefined,
+                          file = Filename,
+                          size = Size}, _} ->
+                   SegInfo = #{file => Filename,
+                               size => Size},
                    #{num_segments => 1,
-                     last_segment_file => Filename}
+                     first => SegInfo,
+                     last => SegInfo,
+                     segment_offsets => SegmentOffsets}
            end,
     %% The segment_opened event will create the index fd.
     {Info, #manifest{dir = Dir}}.
@@ -1945,7 +1961,7 @@ first_and_last_seginfos0([]) ->
     none;
 first_and_last_seginfos0([FstIdxFile]) ->
     {ok, SegInfo} = build_seg_info(FstIdxFile),
-    {1, SegInfo, SegInfo};
+    {index_file_offsets([FstIdxFile]), SegInfo, SegInfo};
 first_and_last_seginfos0([FstIdxFile | Rem] = IdxFiles) ->
     %% this function is only used by init
     case build_seg_info(FstIdxFile) of
@@ -1959,7 +1975,7 @@ first_and_last_seginfos0([FstIdxFile | Rem] = IdxFiles) ->
                     [_ | RetryIndexFiles] = lists:reverse(IdxFiles),
                     first_and_last_seginfos0(lists:reverse(RetryIndexFiles));
                 {ok, LastSegInfo} ->
-                    {length(Rem) + 1, FstSegInfo, LastSegInfo};
+                    {index_file_offsets(IdxFiles), FstSegInfo, LastSegInfo};
                 {error, Err} ->
                     ?ERROR("~s: failed to build seg_info from file ~ts, error: ~w",
                            [?MODULE, LastIdxFile, Err]),
@@ -1969,6 +1985,12 @@ first_and_last_seginfos0([FstIdxFile | Rem] = IdxFiles) ->
             %% most likely retention race condition
             first_and_last_seginfos0(Rem)
     end.
+
+index_file_offsets(IdxFiles) ->
+    [begin
+         <<Offset:20/binary, ".index">> = filename:basename(I),
+         binary_to_integer(Offset)
+     end || I <- IdxFiles].
 
 build_seg_info(IdxFile) ->
     case last_valid_idx_record(IdxFile) of
