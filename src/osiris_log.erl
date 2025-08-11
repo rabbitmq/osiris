@@ -55,15 +55,12 @@
          make_counter/1]).
 
 %% osiris_log_manifest callbacks (default implementations)
--export([init_manifest/2,
-         finalize_manifest/1,
-         close_manifest/1,
-         handle_event/2,
-         fix_corrupted_files/1,
-         truncate_to/3,
-         first_and_last_seginfos/1,
+-export([writer_manifest/1,
+         acceptor_manifest/3,
          find_data_reader_position/2,
          find_offset_reader_position/2,
+         handle_event/2,
+         close_manifest/1,
          delete/1]).
 
 -export([dump_init/1,
@@ -444,23 +441,26 @@
         {type = writer :: writer | acceptor,
          segment_size = {?LOG_HEADER_SIZE, 0} :: {non_neg_integer(), non_neg_integer()},
          current_epoch :: non_neg_integer(),
-         tail_info = {0, empty} :: osiris:tail_info()
+         tail_info = {0, empty} :: osiris:tail_info(),
+         manifest :: {module(), osiris_log_manifest:state()}
         }).
 -record(?MODULE,
         {cfg :: #cfg{},
          mode :: #read{} | #write{},
          current_file :: undefined | file:filename_all(),
-         index_fd :: undefined | file:io_device(),
-         fd :: undefined | file:io_device(),
-         manifest :: {module(), osiris_log_manifest:state()}
+         fd :: undefined | file:io_device()
         }).
+-record(seg_info,
+        {file :: file:filename_all(),
+         size = 0 :: non_neg_integer(),
+         index :: file:filename_all(),
+         first :: undefined | #chunk_info{},
+         last :: undefined | #chunk_info{}}).
 %% Default manifest implementation which lists the configured dir for index
 %% files.
 -record(manifest,
-        {name :: osiris:name(),
-         dir :: file:filename_all(),
-         index_files :: [file:filename_all()] | undefined
-        }).
+        {dir :: file:filename_all(),
+         index_fd :: file:io_device() | undefined}).
 
 -opaque state() :: #?MODULE{}.
 -type manifest() :: #manifest{}.
@@ -515,18 +515,6 @@ init(#{dir := Dir,
             throw(Err)
     end,
 
-    {ManifestMod, Manifest0} = case Config of
-                                   #{manifest := M} ->
-                                       %% cached
-                                       M;
-                                  _ ->
-                                      Mod = application:get_env(osiris,
-                                                                log_manifest,
-                                                                ?MODULE),
-                                      M = Mod:init_manifest(WriterType, Config),
-                                      {Mod, M}
-                               end,
-
     Cnt = make_counter(Config),
     %% initialise offset counter to -1 as 0 is the first offset in the log and
     %% it hasn't necessarily been written yet, for an empty log the first offset
@@ -549,7 +537,6 @@ init(#{dir := Dir,
                counter_id = counter_id(Config),
                shared = Shared,
                filter_size = FilterSize},
-    Manifest1 = ManifestMod:fix_corrupted_files(Manifest0),
     DefaultNextOffset = case Config of
                             #{initial_offset := IO}
                               when WriterType == acceptor ->
@@ -557,28 +544,36 @@ init(#{dir := Dir,
                             _ ->
                                 0
                         end,
-    case ManifestMod:first_and_last_seginfos(Manifest1) of
-        none ->
+
+    ManifestMod = application:get_env(osiris, log_manifest, ?MODULE),
+    {Info, Manifest0} = case Config of
+                            #{acceptor_manifest := {I, M}} ->
+                                acceptor = WriterType,
+                                {I, M};
+                            _ ->
+                                ManifestMod:writer_manifest(Config)
+                        end,
+    case Info of
+        #{num_segments := 0} ->
             osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
             osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
-            Manifest = ManifestMod:finalize_manifest(Manifest1),
             open_new_segment(#?MODULE{cfg = Cfg,
-                                      manifest = {ManifestMod, Manifest},
                                       mode =
                                           #write{type = WriterType,
                                                  tail_info = {DefaultNextOffset,
                                                               empty},
+                                                 manifest = {ManifestMod,
+                                                             Manifest0},
                                                  current_epoch = Epoch}});
-        {NumSegments,
-         #seg_info{first = #chunk_info{id = FstChId,
-                                       timestamp = FstTs}},
-         #seg_info{file = Filename,
-                   index = IdxFilename,
-                   size = Size,
-                   last = #chunk_info{epoch = LastEpoch,
-                                      timestamp = LastTs,
-                                      id = LastChId,
-                                      num = LastNum}}} ->
+        #{num_segments := NumSegments,
+          first_offset := FstChId,
+          first_timestamp := FstTs,
+          last_segment_file := Filename,
+          last_segment_size := Size,
+          last_chunk := #chunk_info{epoch = LastEpoch,
+                                    timestamp = LastTs,
+                                    id = LastChId,
+                                    num = LastNum}} ->
             %% assert epoch is same or larger
             %% than last known epoch
             case LastEpoch > Epoch of
@@ -606,50 +601,80 @@ init(#{dir := Dir,
             %% at a valid chunk we can now truncate the segment to size in
             %% case there is trailing data
             ok = file:truncate(SegFd),
-            {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
-            {ok, IdxEof} = file:position(IdxFd, eof),
-            NumChunks = (IdxEof - ?IDX_HEADER_SIZE) div ?INDEX_RECORD_SIZE_B,
-            Manifest = ManifestMod:finalize_manifest(Manifest1),
+            Event = {segment_opened, undefined, Filename},
+            Manifest = ManifestMod:handle_event(Event, Manifest0),
+            NumChunks = LastChId - FstChId,
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
                                 tail_info = TailInfo,
                                 segment_size = {Size, NumChunks},
+                                manifest = {ManifestMod, Manifest},
                                 current_epoch = Epoch},
                      current_file = filename:basename(Filename),
-                     fd = SegFd,
-                     index_fd = IdxFd,
-                     manifest = {ManifestMod, Manifest}};
-        {1, #seg_info{file = Filename,
-                      index = IdxFilename,
-                      last = undefined}, _} ->
+                     fd = SegFd};
+        #{num_segments := 1,
+          last_segment_file := Filename} ->
             %% the empty log case
             {ok, SegFd} = open(Filename, ?FILE_OPTS_WRITE),
-            {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, _} = file:position(SegFd, ?LOG_HEADER_SIZE),
             counters:put(Cnt, ?C_SEGMENTS, 1),
             %% the segment could potentially have trailing data here so we'll
             %% do a truncate just in case. The index would have been truncated
             %% earlier
             ok = file:truncate(SegFd),
-            {ok, _} = file:position(IdxFd, ?IDX_HEADER_SIZE),
             osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
             osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
-            Manifest = ManifestMod:finalize_manifest(Manifest1),
+            Event = {segment_opened, undefined, Filename},
+            Manifest = ManifestMod:handle_event(Event, Manifest0),
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
                                 tail_info = {DefaultNextOffset, empty},
+                                manifest = {ManifestMod, Manifest},
                                 current_epoch = Epoch},
                      current_file = filename:basename(Filename),
-                     fd = SegFd,
-                     index_fd = IdxFd,
-                     manifest = {ManifestMod, Manifest}}
+                     fd = SegFd}
     end.
 
-fix_corrupted_files(#manifest{dir = Dir,
-                              index_files = IdxFiles0} = Manifest0) ->
-    IdxFiles = maybe_fix_corrupted_files(IdxFiles0),
+writer_manifest(#{dir := Dir} = Config) ->
+    ok = filelib:ensure_dir(Dir),
+    case file:make_dir(Dir) of
+        ok ->
+            ok;
+        {error, eexist} ->
+            ok;
+        Err ->
+            throw(Err)
+    end,
+    ok = maybe_fix_corrupted_files(Config),
+    Info = case first_and_last_seginfos(Config) of
+               none ->
+                   #{num_segments => 0};
+               {NumSegments,
+                #seg_info{first = #chunk_info{id = FstChId,
+                                              timestamp = FstTs}},
+                #seg_info{file = Filename,
+                          size = Size,
+                          last = LastChunk}} ->
+                   #{num_segments => NumSegments,
+                     first_offset => FstChId,
+                     first_timestamp => FstTs,
+                     last_segment_file => Filename,
+                     last_segment_size => Size,
+                     last_chunk => LastChunk};
+               {1, #seg_info{last = undefined,
+                             file = Filename}, _} ->
+                   #{num_segments => 1,
+                     last_segment_file => Filename}
+           end,
+    %% The segment_opened event will create the index fd.
+    {Info, #manifest{dir = Dir}}.
+
+maybe_fix_corrupted_files([]) ->
+    ok;
+maybe_fix_corrupted_files(#{dir := Dir}) ->
+    ok = maybe_fix_corrupted_files(sorted_index_files(Dir)),
     %% dangling segments can be left behind if the server process crashes
     %% after the retention evaluator process deleted the index but
     %% before it deleted the corresponding segment
@@ -658,11 +683,7 @@ fix_corrupted_files(#manifest{dir = Dir,
                [F, Dir]),
          ok = prim_file:delete(filename:join(Dir, F))
      end|| F <- orphaned_segments(Dir)],
-    %% TODO: do we want to update this to drop the index file which is deleted?
-    Manifest0#manifest{index_files = IdxFiles}.
-
-maybe_fix_corrupted_files([]) ->
-    [];
+    ok;
 maybe_fix_corrupted_files([IdxFile]) ->
     SegFile = segment_from_index_file(IdxFile),
     ok = truncate_invalid_idx_records(IdxFile, file_size_or_zero(SegFile)),
@@ -685,8 +706,7 @@ maybe_fix_corrupted_files([IdxFile]) ->
             ok = file:close(SegFd);
         false ->
             ok
-    end,
-    [IdxFile];
+    end;
 maybe_fix_corrupted_files(IdxFiles) ->
     LastIdxFile = lists:last(IdxFiles),
     LastSegFile = segment_from_index_file(LastIdxFile),
@@ -698,8 +718,7 @@ maybe_fix_corrupted_files(IdxFiles) ->
             ok = prim_file:delete(LastSegFile),
             maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile]);
         LastSegFileSize ->
-            ok = truncate_invalid_idx_records(LastIdxFile, LastSegFileSize),
-            IdxFiles
+            ok = truncate_invalid_idx_records(LastIdxFile, LastSegFileSize)
     catch missing_file ->
             % if the last segment is missing, just delete its index
             ?WARNING("deleting index of the missing last segment file: ~0p",
@@ -881,8 +900,22 @@ evaluate_tracking_snapshot(#?MODULE{mode = #write{type = writer}} = State0, Trk0
 % -spec
 -spec init_acceptor(range(), list(), config()) ->
     state().
-init_acceptor(Range, EpochOffsets0,
-              #{name := Name} = Conf) ->
+init_acceptor(Range, EpochOffsets0, Conf) ->
+    EpochOffsets =
+        lists:reverse(
+            lists:sort(EpochOffsets0)),
+    ManifestMod = application:get_env(osiris, log_manifest, ?MODULE),
+    {Info, Manifest} = ManifestMod:acceptor_manifest(Range, EpochOffsets,
+                                                     Conf),
+    InitOffset = case Range  of
+                     empty -> 0;
+                     {O, _} -> O
+                 end,
+    init(Conf#{initial_offset => InitOffset,
+               acceptor_manifest => {Info, Manifest}}, acceptor).
+
+acceptor_manifest(Range, EpochOffsets,
+                  #{name := Name, dir := Dir} = Conf) ->
     %% truncate to first common last epoch offset
     %% * if the last local chunk offset has the same epoch but is lower
     %% than the last chunk offset then just attach at next offset.
@@ -890,21 +923,13 @@ init_acceptor(Range, EpochOffsets0,
     %% * if it has a higher epoch than last provided - truncate to last offset
     %% of previous
     %% sort them so that the highest epochs go first
-    EpochOffsets =
-        lists:reverse(
-            lists:sort(EpochOffsets0)),
 
-    ManifestMod = application:get_env(osiris, log_manifest, ?MODULE),
-    Manifest0 = ManifestMod:init_manifest(acceptor, Conf),
+    %% then truncate to
+    IdxFiles = sorted_index_files(Dir),
     ?DEBUG_(Name, "from epoch offsets: ~w range ~w", [EpochOffsets, Range]),
-    Manifest = ManifestMod:truncate_to(Range, EpochOffsets, Manifest0),
+    RemIdxFiles = truncate_to(Name, Range, EpochOffsets, IdxFiles),
     %% after truncation we can do normal init
-    InitOffset = case Range  of
-                     empty -> 0;
-                     {O, _} -> O
-                 end,
-    init(Conf#{initial_offset => InitOffset,
-               manifest => {ManifestMod, Manifest}}, acceptor).
+    writer_manifest(Conf#{index_files => RemIdxFiles}).
 
 chunk_id_index_scan(IdxFile, ChunkId)
   when ?IS_STRING(IdxFile) ->
@@ -930,11 +955,6 @@ delete_segment_from_index(Index) ->
     ok = prim_file:delete(Index),
     ok = prim_file:delete(File),
     ok.
-
-truncate_to(Range, EpochOffsets,
-            #manifest{index_files = IdxFiles, name = Name} = Manifest) ->
-    RemIdxFiles = truncate_to(Name, Range, EpochOffsets, IdxFiles),
-    Manifest#manifest{index_files = RemIdxFiles}.
 
 truncate_to(_Name, _Range, _EpochOffsets, []) ->
     %% the target log is empty
@@ -1027,19 +1047,17 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
     {error, file:posix()}.
 init_data_reader(TailInfo, Config) ->
     ManifestMod = application:get_env(osiris, log_manifest, ?MODULE),
-    Manifest0 = ManifestMod:init_manifest(data_reader, Config),
-    case ManifestMod:find_data_reader_position(TailInfo, Manifest0) of
+    case ManifestMod:find_data_reader_position(TailInfo, Config) of
         {ok, ChunkId, Pos, Segment} ->
-            Manifest = ManifestMod:finalize_manifest(Manifest0),
-            init_data_reader_at(ChunkId, Pos, Segment, {ManifestMod, Manifest},
-                                Config);
+            init_data_reader_at(ChunkId, Pos, Segment, Config);
         {error, _} = Err ->
             Err
     end.
 
 find_data_reader_position({StartChunkId, PrevEOT},
-                          #manifest{name = Name,
-                                    index_files = IdxFiles} = Manifest) ->
+                          #{dir := Dir,
+                            name := Name} = Config) ->
+    IdxFiles = sorted_index_files(Dir),
     Range = offset_range_from_idx_files(IdxFiles),
     ?DEBUG_(Name, " at ~b prev ~w local range: ~w",
            [StartChunkId, PrevEOT, Range]),
@@ -1057,7 +1075,7 @@ find_data_reader_position({StartChunkId, PrevEOT},
             find_data_reader_pos(StartChunkId,
                                  find_segment_for_offset(StartChunkId,
                                                          IdxFiles),
-                                 Manifest);
+                                 Config);
         _ ->
             {PrevEpoch, PrevChunkId, _PrevTs} = PrevEOT,
             case check_chunk_has_expected_epoch(Name, PrevChunkId,
@@ -1066,7 +1084,7 @@ find_data_reader_position({StartChunkId, PrevEOT},
                     find_data_reader_pos(StartChunkId,
                                          find_segment_for_offset(StartChunkId,
                                                                  IdxFiles),
-                                         Manifest);
+                                         Config);
                 {error, _} = Err ->
                     Err
             end
@@ -1090,7 +1108,7 @@ check_chunk_has_expected_epoch(Name, ChunkId, Epoch, IdxFiles) ->
             end
     end.
 
-init_data_reader_at(ChunkId, FilePos, File, Manifest,
+init_data_reader_at(ChunkId, FilePos, File,
                     #{dir := Dir, name := Name,
                       shared := Shared,
                       readers_counter_fun := CountersFun} = Config) ->
@@ -1115,20 +1133,20 @@ init_data_reader_at(ChunkId, FilePos, File, Manifest,
                             next_offset = ChunkId,
                             chunk_selector = all,
                             position = FilePos,
-                            transport = maps:get(transport, Config, tcp)},
-                      manifest = Manifest}};
+                            transport = maps:get(transport, Config, tcp)}}};
         Err ->
             Err
     end.
 
 find_data_reader_pos(ChunkId,
                      {end_of_log, #seg_info{file = File, last = LastChunk}},
-                     _Manifest) ->
+                     _Config) ->
     {ChunkId, AttachPos} = next_location(LastChunk),
     {ok, ChunkId, AttachPos, File};
 find_data_reader_pos(ChunkId,
                      {found, #seg_info{file = File} = SegInfo},
-                     #manifest{name = Name}) ->
+                     Config) ->
+    Name = maps:get(name, Config, <<>>),
     {ChunkId, _Epoch, FilePos} = offset_idx_scan(Name, ChunkId, SegInfo),
     {ok, ChunkId, FilePos, File}.
 
@@ -1162,23 +1180,10 @@ init_offset_reader(OffsetSpec, Conf) ->
 init_offset_reader(_OffsetSpec, _Conf, 0) ->
     {error, retries_exhausted};
 init_offset_reader(OffsetSpec, Conf, Attempt) ->
-    {ManifestMod, Manifest0} = case Conf of
-                                   #{manifest := M} ->
-                                       %% cached
-                                       M;
-                                   _ ->
-                                       Mod = application:get_env(osiris,
-                                                                 log_manifest,
-                                                                 ?MODULE),
-                                       M = Mod:init_manifest(offset_reader,
-                                                             Conf),
-                                       {Mod, M}
-                               end,
-    try ManifestMod:find_offset_reader_position(OffsetSpec, Manifest0) of
+    ManifestMod = application:get_env(osiris, log_manifest, ?MODULE),
+    try ManifestMod:find_offset_reader_position(OffsetSpec, Conf) of
         {ok, ChunkId, Pos, Segment} ->
-            Manifest = ManifestMod:finalize_manifest(Manifest0),
-            open_offset_reader_at(Segment, ChunkId, Pos,
-                                  {ManifestMod, Manifest}, Conf);
+            open_offset_reader_at(Segment, ChunkId, Pos, Conf);
         {error, _} = Err ->
             Err
     catch
@@ -1187,14 +1192,12 @@ init_offset_reader(OffsetSpec, Conf, Attempt) ->
             %% TODO: should we limit the number of retries?
             %% Remove cached index_files from config
             init_offset_reader(OffsetSpec, Conf, Attempt - 1);
-        {retry_with, NewOffsSpec, Manifest1} ->
-            init_offset_reader(NewOffsSpec,
-                               Conf#{manifest => {ManifestMod, Manifest1}},
-                               Attempt - 1)
+        {retry_with, NewOffsSpec, NewConf} ->
+            init_offset_reader(NewOffsSpec, NewConf, Attempt - 1)
     end.
 
-find_offset_reader_position({abs, Offs}, Manifest) ->
-    case sorted_index_files(Manifest) of
+find_offset_reader_position({abs, Offs}, #{dir := Dir} = Config) ->
+    case sorted_index_files(Dir) of
         [] ->
             {error, no_index_file};
         IdxFiles ->
@@ -1206,13 +1209,13 @@ find_offset_reader_position({abs, Offs}, Manifest) ->
                     {error, {offset_out_of_range, Range}};
                 _ ->
                     %% it is in range, convert to standard offset
-                    find_offset_reader_position(Offs, Manifest)
+                    find_offset_reader_position(Offs, Config)
             end
     end;
-find_offset_reader_position({timestamp, Ts}, Manifest) ->
-    case sorted_index_files_rev(Manifest) of
+find_offset_reader_position({timestamp, Ts}, #{} = Conf) ->
+    case sorted_index_files_rev(Conf) of
         [] ->
-            find_offset_reader_position(next, Manifest);
+            find_offset_reader_position(next, Conf);
         IdxFilesRev ->
             case timestamp_idx_file_search(Ts, IdxFilesRev) of
                 {scan, IdxFile} ->
@@ -1229,11 +1232,11 @@ find_offset_reader_position({timestamp, Ts}, Manifest) ->
                 next ->
                     %% segment was not found, attach next
                     %% this should be rare
-                    find_offset_reader_position(next, Manifest)
+                    find_offset_reader_position(next, Conf)
             end
     end;
-find_offset_reader_position(first, Manifest) ->
-    case sorted_index_files(Manifest) of
+find_offset_reader_position(first, #{} = Conf) ->
+    case sorted_index_files(Conf) of
         [] ->
             {error, no_index_file};
         [FstIdxFile | _ ] ->
@@ -1250,8 +1253,8 @@ find_offset_reader_position(first, Manifest) ->
                     exit(Err)
             end
     end;
-find_offset_reader_position(next, Manifest) ->
-    case sorted_index_files_rev(Manifest) of
+find_offset_reader_position(next, #{} = Conf) ->
+    case sorted_index_files_rev(Conf) of
         [] ->
             {error, no_index_file};
         [LastIdxFile | _ ] ->
@@ -1264,8 +1267,8 @@ find_offset_reader_position(next, Manifest) ->
                     exit(Err)
             end
     end;
-find_offset_reader_position(last, #manifest{name = Name} = Manifest) ->
-    case sorted_index_files_rev(Manifest) of
+find_offset_reader_position(last, #{name := Name} = Conf) ->
+    case sorted_index_files_rev(Conf) of
         [] ->
             {error, no_index_file};
         IdxFiles ->
@@ -1273,15 +1276,16 @@ find_offset_reader_position(last, #manifest{name = Name} = Manifest) ->
                 not_found ->
                     ?DEBUG_(Name, "offset spec: 'last', user chunk not found, fall back to next", []),
                     %% no user chunks in stream, this is awkward, fall back to next
-                    find_offset_reader_position(next, Manifest);
+                    find_offset_reader_position(next, Conf);
                 {ChunkId, FilePos, IdxFile} ->
                     File = segment_from_index_file(IdxFile),
                     {ok, ChunkId, FilePos, File}
             end
     end;
-find_offset_reader_position(OffsetSpec, #manifest{name = Name} = Manifest)
+find_offset_reader_position(OffsetSpec, #{} = Conf)
   when is_integer(OffsetSpec) ->
-    case sorted_index_files(Manifest) of
+    Name = maps:get(name, Conf, <<>>),
+    case sorted_index_files(Conf) of
         [] ->
             {error, no_index_file};
         IdxFiles ->
@@ -1299,7 +1303,8 @@ find_offset_reader_position(OffsetSpec, #manifest{name = Name} = Manifest)
 
             case find_segment_for_offset(StartOffset, IdxFiles) of
                 {not_found, high} ->
-                    throw({retry_with, next, Manifest});
+                    %% TODO: shouldn't this cache the index files?
+                    throw({retry_with, next, Conf});
                 {end_of_log, #seg_info{file = SegmentFile,
                                        last = LastChunk}} ->
                     {ChunkId, FilePos} = next_location(LastChunk),
@@ -1324,7 +1329,7 @@ find_offset_reader_position(OffsetSpec, #manifest{name = Name} = Manifest)
             end
     end.
 
-open_offset_reader_at(SegmentFile, NextChunkId, FilePos, Manifest,
+open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                       #{dir := Dir,
                         name := Name,
                         shared := Shared,
@@ -1355,8 +1360,7 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos, Manifest,
                                                          user_data),
                                next_offset = NextChunkId,
                                transport = maps:get(transport, Options, tcp),
-                               filter = FilterMatcher},
-                  manifest = Manifest}}.
+                               filter = FilterMatcher}}}.
 
 %% Searches the index files backwards for the ID of the last user chunk.
 last_user_chunk_location(Name, RevdIdxFiles)
@@ -1813,13 +1817,15 @@ needs_handling(_, _, _) ->
 -spec close(state()) -> ok.
 close(#?MODULE{cfg = #cfg{counter_id = CntId,
                           readers_counter_fun = Fun},
-               fd = SegFd,
-               index_fd = IdxFd,
-               manifest = {ManifestMod, Manifest}}) ->
-    close_fd(IdxFd),
+               fd = SegFd} = State) ->
     close_fd(SegFd),
+    case State of
+        #?MODULE{mode = #write{manifest = {ManifestMod, Manifest}}} ->
+            ok = ManifestMod:close_manifest(Manifest);
+        _ ->
+            ok
+    end,
     Fun(-1),
-    ok = ManifestMod:close_manifest(Manifest),
     case CntId of
         undefined ->
             ok;
@@ -1887,7 +1893,7 @@ parse_subbatch(Offs,
     parse_subbatch(Offs + 1, Rem, [{Offs, Data} | Acc]).
 
 
-sorted_index_files(#manifest{index_files = IdxFiles}) ->
+sorted_index_files(#{index_files := IdxFiles}) ->
     %% cached
     IdxFiles;
 sorted_index_files(#{dir := Dir}) ->
@@ -1895,7 +1901,7 @@ sorted_index_files(#{dir := Dir}) ->
 sorted_index_files(Dir) when ?IS_STRING(Dir) ->
     index_files(Dir, fun lists:sort/1).
 
-sorted_index_files_rev(#manifest{index_files = IdxFiles}) ->
+sorted_index_files_rev(#{index_files := IdxFiles}) ->
     %% cached
     lists:reverse(IdxFiles);
 sorted_index_files_rev(#{dir := Dir}) ->
@@ -1930,8 +1936,10 @@ orphaned_segments([_Unexpected | Rem], Acc) ->
     %% just ignore unexpected files
     orphaned_segments(Rem, Acc).
 
-first_and_last_seginfos(#manifest{index_files = IdxFiles}) ->
-    first_and_last_seginfos0(IdxFiles).
+first_and_last_seginfos(#{index_files := IdxFiles}) ->
+    first_and_last_seginfos0(IdxFiles);
+first_and_last_seginfos(#{dir := Dir}) ->
+    first_and_last_seginfos0(sorted_index_files(Dir)).
 
 first_and_last_seginfos0([]) ->
     none;
@@ -2477,10 +2485,9 @@ write_chunk(Chunk,
             #?MODULE{cfg = #cfg{counter = CntRef,
                                 shared = Shared} = Cfg,
                      fd = Fd,
-                     index_fd = IdxFd,
-                     manifest = {ManifestMod, Manifest0},
                      mode =
                          #write{segment_size = {SegSizeBytes, SegSizeChunks},
+                                manifest = {ManifestMod, Manifest0},
                                 tail_info = {Next, _}} =
                              Write} =
                 State) ->
@@ -2499,26 +2506,20 @@ write_chunk(Chunk,
             {ok, Cur} = file:position(Fd, cur),
             ok = file:write(Fd, Chunk),
 
-            ok = file:write(IdxFd,
-                            <<Next:64/unsigned,
-                              Timestamp:64/signed,
-                              Epoch:64/unsigned,
-                              Cur:32/unsigned,
-                              ChType:8/unsigned>>),
-            osiris_log_shared:set_last_chunk_id(Shared, Next),
-            %% update counters
-            counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
-            counters:add(CntRef, ?C_CHUNKS, 1),
-            maybe_set_first_offset(Next, Cfg),
             ChunkInfo = #chunk_info{id = Next, timestamp = Timestamp,
                                     epoch = Epoch, num = NumRecords,
                                     type = ChType, size = Size, pos = Cur},
             Event = {chunk_written, ChunkInfo, Chunk},
             Manifest = ManifestMod:handle_event(Event, Manifest0),
-            State#?MODULE{manifest = {ManifestMod, Manifest},
-                          mode =
+            osiris_log_shared:set_last_chunk_id(Shared, Next),
+            %% update counters
+            counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
+            counters:add(CntRef, ?C_CHUNKS, 1),
+            maybe_set_first_offset(Next, Cfg),
+            State#?MODULE{mode =
                           Write#write{tail_info = {NextOffset,
                                                    {Epoch, Next, Timestamp}},
+                                      manifest = {ManifestMod, Manifest},
                                       segment_size = {SegSizeBytes + Size,
                                                       SegSizeChunks + 1}}}
     end.
@@ -2709,38 +2710,31 @@ open_new_segment(#?MODULE{cfg = #cfg{name = Name,
                                      directory = Dir,
                                      counter = Cnt},
                           fd = OldFd,
-                          index_fd = OldIdxFd,
                           current_file = OldFilename,
-                          manifest = {ManifestMod, Manifest0},
                           mode = #write{type = _WriterType,
+                                        manifest = {ManifestMod, Manifest0},
                                         tail_info = {NextOffset, _}} = Write} =
                  State0) ->
     _ = close_fd(OldFd),
-    _ = close_fd(OldIdxFd),
     Filename = make_file_name(NextOffset, "segment"),
-    IdxFilename = make_file_name(NextOffset, "index"),
     ?DEBUG_(Name, "~ts", [Filename]),
-    {ok, IdxFd} =
-        file:open(
-            filename:join(Dir, IdxFilename), ?FILE_OPTS_WRITE),
-    ok = file:write(IdxFd, ?IDX_HEADER),
     {ok, Fd} =
         file:open(
             filename:join(Dir, Filename), ?FILE_OPTS_WRITE),
     ok = file:write(Fd, ?LOG_HEADER),
     %% we always move to the end of the file
     {ok, _} = file:position(Fd, eof),
-    {ok, _} = file:position(IdxFd, eof),
-    counters:add(Cnt, ?C_SEGMENTS, 1),
+
     Event = {segment_opened, OldFilename, Filename},
     Manifest = ManifestMod:handle_event(Event, Manifest0),
+
+    counters:add(Cnt, ?C_SEGMENTS, 1),
 
     State0#?MODULE{current_file = Filename,
                    fd = Fd,
                    %% reset segment_size counter
-                   index_fd = IdxFd,
-                   manifest = {ManifestMod, Manifest},
-                   mode = Write#write{segment_size = {?LOG_HEADER_SIZE, 0}}}.
+                   mode = Write#write{segment_size = {?LOG_HEADER_SIZE, 0},
+                                      manifest = {ManifestMod, Manifest}}}.
 
 open_index_read(File) ->
     {ok, Fd} = open(File, [read, raw, binary, read_ahead]),
@@ -3325,18 +3319,42 @@ list_dir(Dir) ->
             [list_to_binary(F) || F <- Files]
     end.
 
-init_manifest(_LogKind, #{name := Name, dir := Dir}) ->
-    #manifest{name = Name, dir = Dir, index_files = sorted_index_files(Dir)}.
-
-finalize_manifest(#manifest{} = Manifest0) ->
-    %% The index files list might be long. Clear it after init to save memory.
-    Manifest0#manifest{index_files = undefined}.
-
-close_manifest(#manifest{}) ->
-    ok.
-
-handle_event(_Event, Manifest) ->
+handle_event({segment_opened, _OldSegment, NewSegment},
+             #manifest{dir = Dir,
+                       index_fd = Fd0} = Manifest) ->
+    _ = close_fd(Fd0),
+    IdxFilename = unicode:characters_to_list(
+                    string:replace(NewSegment, ".segment", ".index",
+                                   trailing)),
+    {ok, Fd} =
+        file:open(
+            filename:join(Dir, IdxFilename), ?FILE_OPTS_WRITE),
+    %% Write the header if this is a new index file.
+    case file:position(Fd, eof) of
+        {ok, 0} ->
+            ok = file:write(Fd, ?IDX_HEADER);
+        {ok, _} ->
+            ok
+    end,
+    {ok, _} = file:position(Fd, eof),
+    Manifest#manifest{index_fd = Fd};
+handle_event({chunk_written, #chunk_info{id = Offset,
+                                         timestamp = Timestamp,
+                                         epoch = Epoch,
+                                         pos = SegmentFilePos,
+                                         type = ChType}, _Chunk},
+             #manifest{index_fd = Fd} = Manifest) ->
+    ok = file:write(Fd,
+                    <<Offset:64/unsigned,
+                      Timestamp:64/signed,
+                      Epoch:64/unsigned,
+                      SegmentFilePos:32/unsigned,
+                      ChType:8/unsigned>>),
     Manifest.
+
+close_manifest(#manifest{index_fd = Fd}) ->
+    _ = close_fd(Fd),
+    ok.
 
 delete(_Config) ->
     ok.

@@ -59,12 +59,6 @@
          %% position in segment file
          pos :: integer()
         }).
--record(seg_info,
-        {file :: file:filename_all(),
-         size = 0 :: non_neg_integer(),
-         index :: file:filename_all(),
-         first :: undefined | #chunk_info{},
-         last :: undefined | #chunk_info{}}).
 
 %% chunk types
 -define(CHNK_USER, 0).
