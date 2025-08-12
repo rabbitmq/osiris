@@ -1581,7 +1581,7 @@ iterator_next(#iterator{reader = {ReaderMod, Reader0},
                 %% so we need to read it from disk
                 {ok, <<Record0:Len/binary, Rem1/binary>>, Reader1} =
                     ReaderMod:pread(Reader0, Pos + ?REC_HDR_SZ_SIMPLE_B,
-                                    Len + ?ITER_READ_AHEAD_B),
+                                    Len + ?ITER_READ_AHEAD_B, within),
                 {Record0, Rem1, Reader1}
         end,
 
@@ -1607,7 +1607,7 @@ iterator_next(#iterator{reader = {ReaderMod, Reader0},
                 %% so we need to read it from disk
                 {ok, <<Record0:Len/binary, Rem1/binary>>, Reader1} =
                     ReaderMod:pread(Reader0, Pos + ?REC_HDR_SZ_SUBBATCH_B,
-                                    Len + ?ITER_READ_AHEAD_B),
+                                    Len + ?ITER_READ_AHEAD_B, within),
                 {Record0, Rem1, Reader1}
         end,
     Record = {batch, NumRecs, CompType, UncompressedLen, Data},
@@ -1619,7 +1619,8 @@ iterator_next(#iterator{reader = {ReaderMod, Reader0},
     {{NextOffs, Record}, I};
 iterator_next(#iterator{reader = {ReaderMod, Reader0},
                         next_record_pos = Pos} = I) ->
-    {ok, Data, Reader} = ReaderMod:pread(Reader0, Pos, ?ITER_READ_AHEAD_B),
+    {ok, Data, Reader} = ReaderMod:pread(Reader0, Pos, ?ITER_READ_AHEAD_B,
+                                         within),
     iterator_next(I#iterator{reader = {ReaderMod, Reader},
                              data = Data}).
 
@@ -1645,7 +1646,8 @@ read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
          #?MODULE{mode = #read{reader = {ReaderMod, Reader0},
                                next_offset = ChId} = Read} = State} ->
             ToRead = ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
-            {ok, ChData, Reader} = ReaderMod:pread(Reader0, Pos, ToRead),
+            {ok, ChData, Reader} = ReaderMod:pread(Reader0, Pos, ToRead,
+                                                   within),
             <<_:?HEADER_SIZE_B/binary,
               _:FilterSize/binary,
               RecordData:DataSize/binary,
@@ -2968,7 +2970,8 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
             %% a syscall reading the filter if the filter is of the default
             %% 16 byte size
             case ReaderMod:pread(Reader0, Pos,
-                                 ?HEADER_SIZE_B + ?DEFAULT_FILTER_SIZE) of
+                                 ?HEADER_SIZE_B + ?DEFAULT_FILTER_SIZE,
+                                 boundary) of
                 {ok, <<?MAGIC:4/unsigned,
                        ?VERSION:4/unsigned,
                        ChType:8/unsigned,
@@ -2997,7 +3000,7 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
                             %% the filter is larger than default
                             case ReaderMod:pread(Reader1,
                                                  Pos + ?HEADER_SIZE_B,
-                                                 FilterSize) of
+                                                 FilterSize, within) of
                                 {ok, F, Reader2} ->
                                     {F, Reader2};
                                 eof ->
@@ -3319,7 +3322,7 @@ iter_read_ahead(_ReaderMod, Reader, _Pos, _ChunkId, _Crc, 1, _DataSize,
 iter_read_ahead(ReaderMod, Reader0, Pos, ChunkId, Crc, Credit, DataSize,
                 NumEntries)
   when Credit == all orelse NumEntries == 1 ->
-    {ok, Data, Reader} = ReaderMod:pread(Reader0, Pos, DataSize),
+    {ok, Data, Reader} = ReaderMod:pread(Reader0, Pos, DataSize, within),
     validate_crc(ChunkId, Crc, Data),
     {Data, Reader};
 iter_read_ahead(ReaderMod, Reader0, Pos, _ChunkId, _Crc, Credit0, DataSize,
@@ -3330,7 +3333,8 @@ iter_read_ahead(ReaderMod, Reader0, Pos, _ChunkId, _Crc, Credit0, DataSize,
     Credit = min(Credit0, NumEntries),
     Size = DataSize div NumEntries * Credit,
     {ok, Data, Reader} = ReaderMod:pread(Reader0, Pos,
-                                         Size + ?ITER_READ_AHEAD_B),
+                                         Size + ?ITER_READ_AHEAD_B,
+                                         within),
     {Data, Reader}.
 
 list_dir(Dir) ->

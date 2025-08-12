@@ -1,17 +1,24 @@
 -module(osiris_log_reader).
 
--export([open/1, pread/3, sendfile/5, close/1]).
+-export([open/1, pread/4, sendfile/5, close/1]).
 
 -type state() :: term().
 
--export_type([state/0]).
+%% A hint for whether the position should lie on a chunk header (i.e. the next
+%% data would be the magic), or otherwise is somewhere within the chunk.
+%% NOTE: sendfile is used exclusively 'within' chunks.
+-type position_hint() :: boundary | within.
+
+-export_type([state/0,
+              position_hint/0]).
 
 -callback open(SegmentFilename :: file:filename_all()) ->
     {ok, state()} | {error, term()}.
 
 -callback pread(state(),
                 Offset :: non_neg_integer(),
-                Bytes :: non_neg_integer()) ->
+                Bytes :: non_neg_integer(),
+                position_hint()) ->
     {ok, Data :: binary(), state()} | eof | {error, term()}.
 
 -callback sendfile(tcp | ssl,
@@ -28,7 +35,7 @@
 open(SegmentFilename) ->
     file:open(SegmentFilename, [raw, binary, read]).
 
-pread(Fd, Offset, Bytes) ->
+pread(Fd, Offset, Bytes, _Hint) ->
     case file:pread(Fd, Offset, Bytes) of
         {ok, Data} ->
             {ok, Data, Fd};
