@@ -3358,11 +3358,13 @@ handle_event({segment_opened, _OldSegment, NewSegment},
     %% Write the header if this is a new index file.
     case file:position(Fd, eof) of
         {ok, 0} ->
-            ok = file:write(Fd, ?IDX_HEADER);
+            ok = file:write(Fd, ?IDX_HEADER),
+            %% TODO: necessary?
+            {ok, _} = file:position(Fd, eof),
+            ok;
         {ok, _} ->
             ok
     end,
-    {ok, _} = file:position(Fd, eof),
     Manifest#manifest{index_fd = Fd};
 handle_event({chunk_written, #chunk_info{id = Offset,
                                          timestamp = Timestamp,
