@@ -15,8 +15,9 @@
 -type log_info() ::
     #{num_segments := non_neg_integer(),
       %% These keys may be unset if the log is empty.
-      first => segment_info(),
-      last => segment_info(),
+      first_offset => osiris:offset(),
+      first_timestamp => osiris:timestamp(),
+      last_segment => segment_info(),
       %% Optional. Included by the default impls of writer_manifest/1 and
       %% acceptor_manifest/3 for the convenience of other impls.
       segment_offsets => [osiris:offset()]

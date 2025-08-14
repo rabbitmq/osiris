@@ -567,15 +567,15 @@ init(#{dir := Dir,
                                                              Manifest0},
                                                  current_epoch = Epoch}});
         #{num_segments := NumSegments,
-          first := #{first := #chunk_info{id = FstChId,
-                                          timestamp = FstTs}},
-          last := #{file := Filename,
-                    size := Size,
-                    chunks := NumChunks,
-                    last := #chunk_info{epoch = LastEpoch,
-                                        timestamp = LastTs,
-                                        id = LastChId,
-                                        num = LastNum}}} ->
+          first_offset := FstChId,
+          first_timestamp := FstTs,
+          active_segment := #{file := Filename,
+                              size := Size,
+                              chunks := NumChunks,
+                              last := #chunk_info{epoch = LastEpoch,
+                                                  timestamp = LastTs,
+                                                  id = LastChId,
+                                                  num = LastNum}}} ->
             %% assert epoch is same or larger
             %% than last known epoch
             case LastEpoch > Epoch of
@@ -615,7 +615,7 @@ init(#{dir := Dir,
                      current_file = filename:basename(Filename),
                      fd = SegFd};
         #{num_segments := 1,
-          first := #{file := Filename}} ->
+          active_segment := #{file := Filename}} ->
             %% the empty log case
             {ok, SegFd} = open(Filename, ?FILE_OPTS_WRITE),
             {ok, _} = file:position(SegFd, ?LOG_HEADER_SIZE),
@@ -654,29 +654,22 @@ writer_manifest(#{dir := Dir} = Config) ->
                    #{num_segments => 0,
                      segment_offsets => []};
                {SegmentOffsets,
-                #seg_info{file = FirstFile,
-                          size = FirstSize,
-                          chunks = FirstNumChunks,
-                          first = FirstFirstChunk,
-                          last = FirstLastChunk},
+                #seg_info{first = #chunk_info{id = FirstOffset,
+                                              timestamp = FirstTimestamp}},
                 #seg_info{file = LastFile,
                           size = LastSize,
                           chunks = LastNumChunks,
                           first = LastFirstChunk,
                           last = #chunk_info{} = LastLastChunk}} ->
-                   First = #{file => FirstFile,
-                             size => FirstSize,
-                             chunks => FirstNumChunks,
-                             first => FirstFirstChunk,
-                             last => FirstLastChunk},
-                   Last = #{file => LastFile,
-                            size => LastSize,
-                            chunks => LastNumChunks,
-                            first => LastFirstChunk,
-                            last => LastLastChunk},
+                   SegInfo = #{file => LastFile,
+                               size => LastSize,
+                               chunks => LastNumChunks,
+                               first => LastFirstChunk,
+                               last => LastLastChunk},
                    #{num_segments => length(SegmentOffsets),
-                     first => First,
-                     last => Last,
+                     first_offset => FirstOffset,
+                     first_timestamp => FirstTimestamp,
+                     active_segment => SegInfo,
                      segment_offsets => SegmentOffsets};
                {[_] = SegmentOffsets,
                 #seg_info{last = undefined,
@@ -685,8 +678,7 @@ writer_manifest(#{dir := Dir} = Config) ->
                    SegInfo = #{file => Filename,
                                size => Size},
                    #{num_segments => 1,
-                     first => SegInfo,
-                     last => SegInfo,
+                     active_segment => SegInfo,
                      segment_offsets => SegmentOffsets}
            end,
     %% The segment_opened event will create the index fd.
