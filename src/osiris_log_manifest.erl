@@ -7,6 +7,7 @@
 -type segment_info() ::
     #{file := file:filename_all(),
       size := non_neg_integer(),
+      chunks := non_neg_integer(),
       first => #chunk_info{},
       last => #chunk_info{}
      }.

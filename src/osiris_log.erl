@@ -453,6 +453,7 @@
 -record(seg_info,
         {file :: file:filename_all(),
          size = 0 :: non_neg_integer(),
+         chunks = 0 :: non_neg_integer(),
          index :: file:filename_all(),
          first :: undefined | #chunk_info{},
          last :: undefined | #chunk_info{}}).
@@ -570,6 +571,7 @@ init(#{dir := Dir,
                                           timestamp = FstTs}},
           last := #{file := Filename,
                     size := Size,
+                    chunks := NumChunks,
                     last := #chunk_info{epoch = LastEpoch,
                                         timestamp = LastTs,
                                         id = LastChId,
@@ -603,7 +605,6 @@ init(#{dir := Dir,
             ok = file:truncate(SegFd),
             Event = {segment_opened, undefined, Filename},
             Manifest = ManifestMod:handle_event(Event, Manifest0),
-            NumChunks = LastChId - FstChId,
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
@@ -655,18 +656,22 @@ writer_manifest(#{dir := Dir} = Config) ->
                {SegmentOffsets,
                 #seg_info{file = FirstFile,
                           size = FirstSize,
+                          chunks = FirstNumChunks,
                           first = FirstFirstChunk,
                           last = FirstLastChunk},
                 #seg_info{file = LastFile,
                           size = LastSize,
+                          chunks = LastNumChunks,
                           first = LastFirstChunk,
                           last = #chunk_info{} = LastLastChunk}} ->
                    First = #{file => FirstFile,
                              size => FirstSize,
+                             chunks => FirstNumChunks,
                              first => FirstFirstChunk,
                              last => FirstLastChunk},
                    Last = #{file => LastFile,
                             size => LastSize,
+                            chunks => LastNumChunks,
                             first => LastFirstChunk,
                             last => LastLastChunk},
                    #{num_segments => length(SegmentOffsets),
@@ -2131,6 +2136,7 @@ build_segment_info(SegFile, LastChunkPos, IdxFile) ->
                     {ok, #seg_info{file = SegFile,
                                    index = IdxFile,
                                    size = Size,
+                                   chunks = chunks_in_idx(IdxFile),
                                    first = FstChInfo,
                                    last = LastChInfo}};
                 _ ->
@@ -2149,6 +2155,9 @@ build_segment_info(SegFile, LastChunkPos, IdxFile) ->
                     end
             end
     end.
+
+chunks_in_idx(IdxFile) ->
+    (file_size(IdxFile) - ?IDX_HEADER_SIZE) div ?INDEX_RECORD_SIZE_B.
 
 -spec overview(file:filename_all()) ->
     {range(), [{epoch(), offset()}]}.
