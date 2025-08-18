@@ -460,8 +460,11 @@
 %% Default manifest implementation which lists the configured dir for index
 %% files.
 -record(manifest,
-        {dir :: file:filename_all(),
-         index_fd :: file:io_device() | undefined}).
+        {name :: osiris:name(),
+         directory :: file:filename_all(),
+         index_fd :: file:io_device() | undefined,
+         retention :: [retention_spec()],
+         retention_eval_fun :: fun()}).
 
 -opaque state() :: #?MODULE{}.
 -type manifest() :: #manifest{}.
@@ -492,20 +495,10 @@ init(Config) ->
 -spec init(config(), writer | acceptor) -> state().
 init(#{dir := Dir,
        name := Name,
-       epoch := Epoch} = Config,
+       epoch := Epoch} = Config0,
      WriterType) ->
-    %% scan directory for segments if in write mode
-    MaxSizeBytes = maps:get(max_segment_size_bytes, Config,
-                            ?DEFAULT_MAX_SEGMENT_SIZE_B),
-    MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks,
-                                        ?DEFAULT_MAX_SEGMENT_SIZE_C),
-    Retention = maps:get(retention, Config, []),
-    FilterSize = maps:get(filter_size, Config, ?DEFAULT_FILTER_SIZE),
     ?INFO("Stream: ~ts will use ~ts for osiris log data directory",
           [Name, Dir]),
-    ?DEBUG_(Name, "max_segment_size_bytes: ~b,
-           max_segment_size_chunks ~b, retention ~w, filter size ~b",
-            [MaxSizeBytes, MaxSizeChunks, Retention, FilterSize]),
     ok = filelib:ensure_dir(Dir),
     case file:make_dir(Dir) of
         ok ->
@@ -516,26 +509,40 @@ init(#{dir := Dir,
             throw(Err)
     end,
 
-    Cnt = make_counter(Config),
+    ManifestMod = application:get_env(osiris, log_manifest, ?MODULE),
+    {Info, Config, Manifest0} = case Config0 of
+                                    #{acceptor_manifest := {I, M}} ->
+                                        {I, Config0, M};
+                                    _ ->
+                                        Config1 = with_defaults(Config0),
+                                        ManifestMod:writer_manifest(Config1)
+                                end,
+
+    MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks,
+                                        ?DEFAULT_MAX_SEGMENT_SIZE_C),
+    #{max_segment_size_bytes := MaxSizeBytes,
+      retention := Retention,
+      filter_size := FilterSize,
+      shared := Shared,
+      counter := Cnt,
+      counter_id := CounterId,
+      tracking_config := TrackingConfig} = Config,
+    ?DEBUG_(Name, "max_segment_size_bytes: ~b,
+           max_segment_size_chunks ~b, retention ~w, filter size ~b",
+            [MaxSizeBytes, MaxSizeChunks, Retention, FilterSize]),
     %% initialise offset counter to -1 as 0 is the first offset in the log and
     %% it hasn't necessarily been written yet, for an empty log the first offset
     %% is initialised to 0 however and will be updated after each retention run.
     counters:put(Cnt, ?C_OFFSET, -1),
     counters:put(Cnt, ?C_SEGMENTS, 0),
-    Shared = case Config of
-                 #{shared := S} ->
-                     S;
-                 _ ->
-                     osiris_log_shared:new()
-             end,
     Cfg = #cfg{directory = Dir,
                name = Name,
                max_segment_size_bytes = MaxSizeBytes,
                max_segment_size_chunks = MaxSizeChunks,
-               tracking_config = maps:get(tracking_config, Config, #{}),
+               tracking_config = TrackingConfig,
                retention = Retention,
                counter = Cnt,
-               counter_id = counter_id(Config),
+               counter_id = CounterId,
                shared = Shared,
                filter_size = FilterSize},
     DefaultNextOffset = case Config of
@@ -546,14 +553,6 @@ init(#{dir := Dir,
                                 0
                         end,
 
-    ManifestMod = application:get_env(osiris, log_manifest, ?MODULE),
-    {Info, Manifest0} = case Config of
-                            #{acceptor_manifest := {I, M}} ->
-                                acceptor = WriterType,
-                                {I, M};
-                            _ ->
-                                ManifestMod:writer_manifest(Config)
-                        end,
     case Info of
         #{num_segments := 0} ->
             osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
@@ -638,16 +637,11 @@ init(#{dir := Dir,
                      fd = SegFd}
     end.
 
-writer_manifest(#{dir := Dir} = Config) ->
-    ok = filelib:ensure_dir(Dir),
-    case file:make_dir(Dir) of
-        ok ->
-            ok;
-        {error, eexist} ->
-            ok;
-        Err ->
-            throw(Err)
-    end,
+writer_manifest(#{dir := Dir,
+                  name := Name,
+                  retention := RetentionSpec,
+                  counter := Cnt,
+                  shared := Shared} = Config) ->
     ok = maybe_fix_corrupted_files(Config),
     Info = case first_and_last_seginfos(Config) of
                none ->
@@ -681,8 +675,24 @@ writer_manifest(#{dir := Dir} = Config) ->
                      active_segment => SegInfo,
                      segment_offsets => SegmentOffsets}
            end,
+    %% updates first offset and first timestamp
+    %% after retention has been evaluated
+    EvalFun = fun ({{FstOff, _}, FstTs, NumSegLeft})
+                    when is_integer(FstOff),
+                         is_integer(FstTs) ->
+                      osiris_log_shared:set_first_chunk_id(Shared, FstOff),
+                      counters:put(Cnt, ?C_FIRST_OFFSET, FstOff),
+                      counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
+                      counters:put(Cnt, ?C_SEGMENTS, NumSegLeft);
+                  (_) ->
+                      ok
+              end,
+    Manifest = #manifest{name = Name,
+                         directory = Dir,
+                         retention = RetentionSpec,
+                         retention_eval_fun = EvalFun},
     %% The segment_opened event will create the index fd.
-    {Info, #manifest{dir = Dir}}.
+    {Info, Config, Manifest}.
 
 maybe_fix_corrupted_files([]) ->
     ok;
@@ -910,16 +920,16 @@ evaluate_tracking_snapshot(#?MODULE{mode = #write{type = writer}} = State0, Trk0
             {State0, Trk0}
     end.
 
-% -spec
 -spec init_acceptor(range(), list(), config()) ->
     state().
-init_acceptor(Range, EpochOffsets0, Conf) ->
+init_acceptor(Range, EpochOffsets0, Conf0) ->
     EpochOffsets =
         lists:reverse(
             lists:sort(EpochOffsets0)),
     ManifestMod = application:get_env(osiris, log_manifest, ?MODULE),
-    {Info, Manifest} = ManifestMod:acceptor_manifest(Range, EpochOffsets,
-                                                     Conf),
+    Conf1 = with_defaults(Conf0),
+    {Info, Conf, Manifest} = ManifestMod:acceptor_manifest(Range, EpochOffsets,
+                                                           Conf1),
     InitOffset = case Range  of
                      empty -> 0;
                      {O, _} -> O
@@ -2215,12 +2225,14 @@ format_status(#?MODULE{cfg = #cfg{directory = Dir,
 
 -spec update_retention([retention_spec()], state()) -> state().
 update_retention(Retention,
-                 #?MODULE{cfg = #cfg{name = Name,
-                                     retention = Retention0} = Cfg} = State0)
+                 #?MODULE{mode = #write{manifest = {ManifestMod, Manifest0}} =
+                                     Write0,
+                          cfg = #cfg{name = Name}} = State0)
     when is_list(Retention) ->
-    ?DEBUG_(Name, " from: ~w to ~w", [Retention0, Retention]),
-    State = State0#?MODULE{cfg = Cfg#cfg{retention = Retention}},
-    trigger_retention_eval(State).
+    ?DEBUG_(Name, " updating retention to ~w", [Retention]),
+    Manifest = ManifestMod:handle_event({retention_updated, Retention},
+                                        Manifest0),
+    State0#?MODULE{mode = Write0#write{manifest = {ManifestMod, Manifest}}}.
 
 -spec evaluate_retention(file:filename_all(), [retention_spec()]) ->
     {range(), FirstTimestamp :: osiris:timestamp(),
@@ -2518,13 +2530,12 @@ write_chunk(Chunk,
                 State) ->
     case max_segment_size_reached(State) of
         true ->
-            trigger_retention_eval(
-              write_chunk(Chunk,
-                          ChType,
-                          Timestamp,
-                          Epoch,
-                          NumRecords,
-                          open_new_segment(State)));
+            write_chunk(Chunk,
+                        ChType,
+                        Timestamp,
+                        Epoch,
+                        NumRecords,
+                        open_new_segment(State));
         false ->
             NextOffset = Next + NumRecords,
             Size = iolist_size(Chunk),
@@ -2854,6 +2865,24 @@ validate_crc(ChunkId, Crc, IOData) ->
             exit({crc_validation_failure, {chunk_id, ChunkId}})
     end.
 
+
+-spec with_defaults(config()) -> config().
+with_defaults(Config0) ->
+    Shared = case Config0 of
+                 #{shared := S} ->
+                     S;
+                 _ ->
+                     osiris_log_shared:new()
+             end,
+    maps:merge(#{max_segment_size_bytes => ?DEFAULT_MAX_SEGMENT_SIZE_B,
+                 retention => [],
+                 filter_size => ?DEFAULT_FILTER_SIZE,
+                 shared => Shared,
+                 counter => make_counter(Config0),
+                 counter_id => counter_id(Config0),
+                 tracking_config => #{}},
+               Config0).
+
 -spec make_counter(osiris_log:config()) ->
     counters:counters_ref().
 make_counter(#{counter := Counter}) ->
@@ -3093,28 +3122,6 @@ read_header0(#?MODULE{cfg = #cfg{directory = Dir,
             {end_of_stream, State}
     end.
 
-trigger_retention_eval(#?MODULE{cfg =
-                                    #cfg{name = Name,
-                                         directory = Dir,
-                                         retention = RetentionSpec,
-                                         counter = Cnt,
-                                         shared = Shared}} = State) ->
-
-    %% updates first offset and first timestamp
-    %% after retention has been evaluated
-    EvalFun = fun ({{FstOff, _}, FstTs, NumSegLeft})
-                    when is_integer(FstOff),
-                         is_integer(FstTs) ->
-                      osiris_log_shared:set_first_chunk_id(Shared, FstOff),
-                      counters:put(Cnt, ?C_FIRST_OFFSET, FstOff),
-                      counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
-                      counters:put(Cnt, ?C_SEGMENTS, NumSegLeft);
-                  (_) ->
-                      ok
-              end,
-    ok = osiris_retention:eval(Name, Dir, RetentionSpec, EvalFun),
-    State.
-
 next_location(undefined) ->
     {0, ?LOG_HEADER_SIZE};
 next_location(#chunk_info{id = Id,
@@ -3346,13 +3353,22 @@ list_dir(Dir) ->
             [list_to_binary(F) || F <- Files]
     end.
 
-handle_event({segment_opened, _OldSegment, NewSegment},
-             #manifest{dir = Dir,
+handle_event({segment_opened, OldSegment, NewSegment},
+             #manifest{directory = Dir,
                        index_fd = Fd0} = Manifest) ->
     _ = close_fd(Fd0),
     IdxFilename = unicode:characters_to_list(
                     string:replace(NewSegment, ".segment", ".index",
                                    trailing)),
+
+    case OldSegment of
+        undefined ->
+            %% Skip retention evaluation when opening a stream.
+            ok;
+        _ ->
+            ok = trigger_retention_eval(Manifest)
+    end,
+
     {ok, Fd} =
         file:open(
             filename:join(Dir, IdxFilename), ?FILE_OPTS_WRITE),
@@ -3379,7 +3395,17 @@ handle_event({chunk_written, #chunk_info{id = Offset,
                       Epoch:64/unsigned,
                       SegmentFilePos:32/unsigned,
                       ChType:8/unsigned>>),
+    Manifest;
+handle_event({retention_updated, Retention}, Manifest0) ->
+    Manifest = Manifest0#manifest{retention = Retention},
+    trigger_retention_eval(Manifest),
     Manifest.
+
+trigger_retention_eval(#manifest{name = Name,
+                                 directory = Dir,
+                                 retention = RetentionSpec,
+                                 retention_eval_fun = EvalFun}) ->
+    ok = osiris_retention:eval(Name, Dir, RetentionSpec, EvalFun).
 
 close_manifest(#manifest{index_fd = Fd}) ->
     _ = close_fd(Fd),

@@ -33,10 +33,10 @@
 -callback acceptor_manifest(osiris_log:range(),
                             EpochOffsets :: [{osiris:offset(), osiris:epoch()}],
                             osiris_log:config()) ->
-    {log_info(), state()}.
+    {log_info(), osiris_log:config(), state()}.
 
 -callback writer_manifest(osiris_log:config()) ->
-    {log_info(), state()}.
+    {log_info(), osiris_log:config(), state()}.
 
 -callback find_data_reader_position(osiris:tail_info(), osiris_log:config()) ->
     {ok, osiris:offset(), Pos :: non_neg_integer(),
