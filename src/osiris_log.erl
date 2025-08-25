@@ -12,7 +12,7 @@
 
 -export([init/1,
          init/2,
-         init_acceptor/3,
+         init_acceptor/2,
          write/2,
          write/3,
          write/5,
@@ -56,7 +56,7 @@
 
 %% osiris_log_manifest callbacks (default implementations)
 -export([writer_manifest/1,
-         acceptor_manifest/3,
+         acceptor_manifest/2,
          find_data_reader_position/2,
          find_offset_reader_position/2,
          handle_event/2,
@@ -412,6 +412,9 @@
       position => non_neg_integer(),
       next_position => non_neg_integer()}.
 -type transport() :: tcp | ssl.
+-type overview() ::
+     #{range := range(),
+       epoch_offsets := [{epoch(), offset()}]}.
 
 %% holds static or rarely changing fields
 -record(cfg,
@@ -476,7 +479,8 @@
               counter_spec/0,
               transport/0,
               chunk_type/0,
-              manifest/0]).
+              manifest/0,
+              overview/0]).
 
 -spec directory(osiris:config() | list()) -> file:filename_all().
 directory(#{name := Name, dir := Dir}) ->
@@ -920,24 +924,26 @@ evaluate_tracking_snapshot(#?MODULE{mode = #write{type = writer}} = State0, Trk0
             {State0, Trk0}
     end.
 
--spec init_acceptor(range(), list(), config()) ->
+-spec init_acceptor(overview(), config()) ->
     state().
-init_acceptor(Range, EpochOffsets0, Conf0) ->
+init_acceptor(#{range := Range,
+                epoch_offsets := EpochOffsets0} = Overview0,
+              Conf0) ->
     EpochOffsets =
         lists:reverse(
             lists:sort(EpochOffsets0)),
     ManifestMod = application:get_env(osiris, log_manifest, ?MODULE),
     Conf1 = with_defaults(Conf0),
-    {Info, Conf, Manifest} = ManifestMod:acceptor_manifest(Range, EpochOffsets,
-                                                           Conf1),
-    InitOffset = case Range  of
+    Overview = Overview0#{epoch_offsets := EpochOffsets},
+    {Info, Conf, Manifest} = ManifestMod:acceptor_manifest(Overview, Conf1),
+    InitOffset = case Range of
                      empty -> 0;
                      {O, _} -> O
                  end,
     init(Conf#{initial_offset => InitOffset,
                acceptor_manifest => {Info, Manifest}}, acceptor).
 
-acceptor_manifest(Range, EpochOffsets,
+acceptor_manifest(#{range := Range, epoch_offsets := EpochOffsets},
                   #{name := Name, dir := Dir} = Conf) ->
     %% truncate to first common last epoch offset
     %% * if the last local chunk offset has the same epoch but is lower
@@ -2161,8 +2167,7 @@ build_segment_info(SegFile, LastChunkPos, IdxFile) ->
 chunks_in_idx(IdxFile) ->
     (file_size(IdxFile) - ?IDX_HEADER_SIZE) div ?INDEX_RECORD_SIZE_B.
 
--spec overview(file:filename_all()) ->
-    {range(), [{epoch(), offset()}]}.
+-spec overview(file:filename_all()) -> overview().
 overview(Dir) ->
     Files = list_dir(Dir),
     %% index files with matching segment
@@ -2171,11 +2176,11 @@ overview(Dir) ->
     %% explicitly filter these out
     case index_files_with_segment(lists:sort(Files), Dir, []) of
         [] ->
-            {empty, []};
+            #{range => empty,
+              epoch_offsets => []};
         IdxFiles ->
-            Range = offset_range_from_idx_files(IdxFiles),
-            EpochOffsets = last_epoch_chunk_ids(<<>>, IdxFiles),
-            {Range, EpochOffsets}
+            #{range => offset_range_from_idx_files(IdxFiles),
+              epoch_offsets => last_epoch_chunk_ids(<<>>, IdxFiles)}
     end.
 
 index_files_with_segment([], _, Acc) ->

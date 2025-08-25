@@ -231,6 +231,8 @@ init_reader(Pid, OffsetSpec, CounterSpec) ->
 init_reader(Pid, OffsetSpec, {_, _} = CounterSpec, Options)
     when is_pid(Pid) andalso node(Pid) =:= node() ->
     ?DEBUG("osiris: initialising reader. Spec: ~w", [OffsetSpec]),
+    %% TODO: the manifest mod is now present here. We could use that value
+    %% rather than reading from the application env.
     Ctx0 = osiris_util:get_reader_context(Pid),
     Ctx = Ctx0#{counter_spec => CounterSpec,
                 options => Options},

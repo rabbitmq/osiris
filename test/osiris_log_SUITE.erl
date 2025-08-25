@@ -974,10 +974,10 @@ init_epoch_offsets_empty(Config) ->
     FDir = ?config(follower1_dir, Config),
     LogInit = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(LogInit),
-    EOffs = [{1, 0}],
-    Range = {0, 3},
+    Overview = #{range => {0, 3},
+                 epoch_offsets => [{1, 0}]},
     Log0 =
-        osiris_log:init_acceptor(Range, EOffs, Conf#{dir => FDir, epoch => 1}),
+        osiris_log:init_acceptor(Overview, Conf#{dir => FDir, epoch => 1}),
     {0, empty} = osiris_log:tail_info(Log0),
     osiris_log:close(Log0),
     ok.
@@ -989,10 +989,10 @@ init_epoch_offsets_empty_writer(Config) ->
     LDir = ?config(leader_dir, Config),
     LogInit = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(LogInit),
-    EOffs = [],
-    Range = {0, 3},
+    Overview = #{range => {0, 3},
+                 epoch_offsets => []},
     Log0 =
-        osiris_log:init_acceptor(Range, EOffs, Conf#{dir => LDir, epoch => 2}),
+        osiris_log:init_acceptor(Overview, Conf#{dir => LDir, epoch => 2}),
     {0, empty} = osiris_log:tail_info(Log0),
     osiris_log:close(Log0),
     ok.
@@ -1002,11 +1002,10 @@ init_epoch_offsets_truncated_writer(Config) ->
     %% has had retention remove the head of it's log
     Conf = ?config(osiris_conf, Config),
     LDir = ?config(leader_dir, Config),
-    EOffs = [{3, 100}],
-    Range = {50, 100},
+    Overview = #{range => {50, 100},
+                 epoch_offsets => [{3, 100}]},
     Log0 =
-    osiris_log:init_acceptor(Range, EOffs, Conf#{dir => LDir,
-                                                 epoch => 2}),
+        osiris_log:init_acceptor(Overview, Conf#{dir => LDir, epoch => 2}),
     {50, empty} = osiris_log:tail_info(Log0),
     osiris_log:close(Log0),
 
@@ -1019,10 +1018,10 @@ init_epoch_offsets(Config) ->
     LDir = ?config(leader_dir, Config),
     LogInit = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(LogInit),
-    EOffs = [{1, 1}],
-    Range = {0, 1},
+    Overview = #{range => {0, 1},
+                 epoch_offsets => [{1, 1}]},
     Log0 =
-        osiris_log:init_acceptor(Range, EOffs,
+        osiris_log:init_acceptor(Overview,
                                  #{dir => LDir,
                                    name => ?config(test_case, Config),
                                    epoch => 2}),
@@ -1037,10 +1036,10 @@ init_epoch_offsets_multi_segment(Config) ->
          || _ <- lists:seq(1, 20)],
     LDir = ?config(leader_dir, Config),
     osiris_log:close(seed_log(LDir, EpochChunks, Config)),
-    EOffs = [{1, 650}],
-    Range = {0, 650},
+    Overview = #{range => {0, 650},
+                 epoch_offsets => [{1, 650}]},
     Log0 =
-        osiris_log:init_acceptor(Range, EOffs,
+        osiris_log:init_acceptor(Overview,
                                  #{dir => LDir,
                                    name => ?config(test_case, Config),
                                    epoch => 2}),
@@ -1055,10 +1054,10 @@ init_epoch_offsets_multi_segment2(Config) ->
         ++ [{2, [Data || _ <- lists:seq(1, 50)]} || _ <- lists:seq(1, 5)],
     LDir = ?config(leader_dir, Config),
     osiris_log:close(seed_log(LDir, EpochChunks, Config)),
-    EOffs = [{3, 750}, {1, 650}],
-    Range = {0, 750},
+    Overview = #{range => {0, 750},
+                 epoch_offsets => [{3, 750}, {1, 650}]},
     Log0 =
-        osiris_log:init_acceptor(Range, EOffs,
+        osiris_log:init_acceptor(Overview,
                                  #{dir => LDir,
                                    name => ?config(test_case, Config),
                                    epoch => 2}),
@@ -1113,9 +1112,9 @@ accept_chunk(Config) ->
     Now = ?LINE,
     L2 = osiris_log:write([{<<"filter">>, <<"ho">>}], ?CHNK_USER, Now, <<>>, L1),
 
-    {Range, EOChIds} = osiris_log:overview(LDir),
+    Overview = osiris_log:overview(LDir),
 
-    F0 = osiris_log:init_acceptor(Range, EOChIds, FConf),
+    F0 = osiris_log:init_acceptor(Overview, FConf),
 
     %% replica reader
     RConf = LConf#{shared => osiris_log:get_shared(L2)},
@@ -1129,7 +1128,7 @@ accept_chunk(Config) ->
     osiris_log:close(L2),
     osiris_log:close(R2),
     osiris_log:close(F2),
-    FL0 = osiris_log:init_acceptor(Range, EOChIds, FConf),
+    FL0 = osiris_log:init_acceptor(Overview, FConf),
     osiris_log:close(FL0),
 
     osiris_log_shared:set_committed_chunk_id(maps:get(shared, FConf), 1),
@@ -1151,9 +1150,10 @@ init_acceptor_truncates_tail(Config) ->
     LTail = osiris_log:tail_info(LLog),
     ?assertMatch({4, {1, 3, _}}, LTail), %% {NextOffs, {LastEpoch, LastChunkId, Ts}}
     ok = osiris_log:close(LLog),
-    EOffs = [{2, 4}, {1, 2}],
+    Overview = #{range => {0, 5},
+                 epoch_offsets => [{2, 4}, {1, 2}]},
     ALog0 =
-        osiris_log:init_acceptor({0, 5}, EOffs, Conf#{dir => LDir, epoch => 2}),
+        osiris_log:init_acceptor(Overview, Conf#{dir => LDir, epoch => 2}),
     % ?assertMatch({3, {1, 2, _}}, osiris_log:tail_info(ALog0)), %% {NextOffs, {LastEpoch, LastChunkId, Ts}}
     {3, {1, 2, _}} = osiris_log:tail_info(ALog0), %% {NextOffs, {LastEpoch, LastChunkId, Ts}}
 
@@ -1183,9 +1183,9 @@ accept_chunk_truncates_tail(Config) ->
     FLog0 = seed_log(FDir, FollowerEpochChunks, Config),
     osiris_log:close(FLog0),
 
-    {Range, EOffs} = osiris_log:overview(LDir),
+    Overview = osiris_log:overview(LDir),
     ALog0 =
-        osiris_log:init_acceptor(Range, EOffs, Conf#{dir => FDir, epoch => 2}),
+        osiris_log:init_acceptor(Overview, Conf#{dir => FDir, epoch => 2}),
     LShared = osiris_log:get_shared(LLog),
     osiris_log_shared:set_committed_chunk_id(LShared, 4),
     RConf = Conf#{dir => LDir,
@@ -1199,7 +1199,7 @@ accept_chunk_truncates_tail(Config) ->
 
     osiris_log:close(ALog),
     % validate equal
-    ?assertMatch({Range, EOffs}, osiris_log:overview(FDir)),
+    ?assertMatch(Overview, osiris_log:overview(FDir)),
 
     {ok, V0} = osiris_log:init_data_reader({0, empty}, RConf#{dir => FDir}),
     {[{0, <<"one">>}], V1} = osiris_log:read_chunk_parsed(V0),
@@ -1228,8 +1228,8 @@ accept_chunk_does_not_truncate_tail_in_same_epoch(Config) ->
     FLog0 = seed_log(FDir, FollowerEpochChunks, Config),
     osiris_log:close(FLog0),
 
-    {Range, EOffs} = osiris_log:overview(LDir),
-    ALog0 = osiris_log:init_acceptor(Range, EOffs, Conf#{dir => FDir, epoch => 2}),
+    Overview = osiris_log:overview(LDir),
+    ALog0 = osiris_log:init_acceptor(Overview, Conf#{dir => FDir, epoch => 2}),
     ATail = osiris_log:tail_info(ALog0),
     osiris_log:close(ALog0),
     %% ensure we don't truncate too much
@@ -1256,8 +1256,8 @@ accept_chunk_in_other_epoch(Config) ->
     FLog0 = seed_log(FDir, FollowerEpochChunks, Config),
     osiris_log:close(FLog0),
 
-    {Range,  EOffs} = osiris_log:overview(LDir),
-    ALog0 = osiris_log:init_acceptor(Range, EOffs, Conf#{dir => FDir, epoch => 2}),
+    Overview = osiris_log:overview(LDir),
+    ALog0 = osiris_log:init_acceptor(Overview, Conf#{dir => FDir, epoch => 2}),
     ATail = osiris_log:tail_info(ALog0),
     osiris_log:close(ALog0),
     %% ensure we don't truncate too much
@@ -1273,10 +1273,10 @@ init_epoch_offsets_discards_all_when_no_overlap_in_same_epoch(Config) ->
     LDir = ?config(leader_dir, Config),
     LogInit = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(LogInit),
-    EOffs = [{1, 10}],
-    Range = {5, 10}, %% replica's range is 0, 3
+    Overview = #{range => {5, 10}, %% replica's range is 0, 3
+                 epoch_offsets => [{1, 10}]},
     Log0 =
-        osiris_log:init_acceptor(Range, EOffs,
+        osiris_log:init_acceptor(Overview,
                                  #{dir => LDir,
                                    name => ?config(test_case, Config),
                                    epoch => 2}),
@@ -1293,9 +1293,11 @@ overview(Config) ->
     LDir = ?config(leader_dir, Config),
     Log0 = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(Log0),
-    {{0, 4}, [{1, 1}, {2, 4}]} = osiris_log:overview(LDir),
+    #{range := {0, 4},
+      epoch_offsets := [{1, 1}, {2, 4}]} = osiris_log:overview(LDir),
     %% non existant dir should return empty
-    {empty, []} = osiris_log:overview("/tmp/blahblah"),
+    #{range := empty,
+      epoch_offsets := []} = osiris_log:overview("/tmp/blahblah"),
     ok.
 
 init_corrupted_log(Config) ->
@@ -1324,7 +1326,7 @@ init_corrupted_log(Config) ->
     % record the segment and index sizes before corrupting the log
     ValidSegSize = filelib:file_size(SegPath),
     ValidIdxSize = filelib:file_size(IdxPath),
-    {{0, 1}, _} = osiris_log:overview(LDir),
+    #{range := {0, 1}} = osiris_log:overview(LDir),
 
     % add one more chunk and truncate it from the segment but leave in the index)
     Log1 = osiris_log:write([<<"three">>], Log0),
@@ -1344,7 +1346,7 @@ init_corrupted_log(Config) ->
     ok = file:close(IdxFd),
 
     % the overview should work even before init
-    {Range, _} = osiris_log:overview(LDir),
+    #{range := Range} = osiris_log:overview(LDir),
     ?assertEqual({0, 1}, Range),
 
     Conf0 = ?config(osiris_conf, Config),
@@ -1360,7 +1362,7 @@ init_corrupted_log(Config) ->
     ?assertEqual(ValidSegSize, filelib:file_size(SegPath)),
 
     % the range should not include the corrupted chunk
-    {Range, _} = osiris_log:overview(LDir),
+    #{range := Range} = osiris_log:overview(LDir),
     ?assertEqual({0, 1}, Range),
 
     % a consumer asking for the last chunk, should receive "two"
@@ -1441,7 +1443,8 @@ init_empty_last_files(Config) ->
     {ok, SegFd} = file:open(LastSegFile, [raw, binary, write]),
     _ = file:close(SegFd),
 
-    ?assertEqual({{0,699},[{1,650}]}, osiris_log:overview(LDir)),
+    ?assertEqual(#{range => {0,699},
+                   epoch_offsets => [{1,650}]}, osiris_log:overview(LDir)),
 
     Conf0 = ?config(osiris_conf, Config),
     Conf = Conf0#{dir => LDir},
@@ -1609,17 +1612,17 @@ small_chunk_overview(Config) ->
                                                     osiris_log:overview(Dir)
                                             end),
     ct:pal("OverviewTaken ~bms", [OverviewTaken div 1000]),
-    ?assertMatch({{0,327839},
-                  [{1,32783},
-                   {2,65567},
-                   {3,98351},
-                   {4,131135},
-                   {5,163919},
-                   {6,196703},
-                   {7,229487},
-                   {8,262271},
-                   {9,295055},
-                   {10,327839}]}, LogOverview),
+    ?assertMatch(#{range := {0,327839},
+                   epoch_offsets := [{1,32783},
+                                     {2,65567},
+                                     {3,98351},
+                                     {4,131135},
+                                     {5,163919},
+                                     {6,196703},
+                                     {7,229487},
+                                     {8,262271},
+                                     {9,295055},
+                                     {10,327839}]}, LogOverview),
     {InitTaken100, {ok, L100}} = timer:tc(
                              fun () ->
                                      osiris_log:init_offset_reader(257000, Conf)
@@ -1659,8 +1662,8 @@ many_segment_overview(Config) ->
     ct:pal("OverviewTaken ~bms", [OverviewTaken div 1000]),
     ct:pal("~p", [LogOverview]),
     %% {{0,40959},[{-1,-1},{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]}
-    ?assertEqual({{0,40959},
-                  [{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}]}, LogOverview),
+    ?assertEqual(#{epoch_offsets => [{1,8184},{2,16376},{3,24568},{4,32760},{5,40952}],
+                   range => {0,40959}}, LogOverview),
     Conf6 = Conf#{epoch => 6},
 
     {InitTaken, _} = timer:tc(
@@ -1722,10 +1725,9 @@ many_segment_overview(Config) ->
     ct:pal("TimestampTaken ~p", [TimestampTaken]),
 
     %% acceptor
-    {Range, EOffs} = LogOverview,
     {InitAcceptorTaken, AcceptorLog} =
         timer:tc(fun () ->
-                         osiris_log:init_acceptor(Range, EOffs, Conf6)
+                         osiris_log:init_acceptor(LogOverview, Conf6)
                  end),
     ct:pal("InitAcceptor took ~bus", [InitAcceptorTaken]),
 
@@ -1820,7 +1822,8 @@ init_with_unexpected_file(Config) ->
     ?assertEqual(2, length(Indexes)),
     ok = file:write_file(filename:join(Dir, ".nfs000000000000000000"), <<"bananas">>),
     _ = osiris_log:init(?config(osiris_conf, Config)),
-    ?assertEqual({{0,999},[{1,950}]}, osiris_log:overview(Dir)),
+    ?assertEqual(#{range => {0,999},
+                   epoch_offsets => [{1,950}]}, osiris_log:overview(Dir)),
     ok.
 
 overview_with_missing_segment(Config) ->

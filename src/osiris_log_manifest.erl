@@ -30,9 +30,9 @@
 
 -export_type([state/0, log_info/0, event/0]).
 
--callback acceptor_manifest(osiris_log:range(),
-                            EpochOffsets :: [{osiris:offset(), osiris:epoch()}],
-                            osiris_log:config()) ->
+-callback overview(Dir :: file:filename_all()) -> osiris_log:overview().
+
+-callback acceptor_manifest(osiris_log:overview(), osiris_log:config()) ->
     {log_info(), osiris_log:config(), state()}.
 
 -callback writer_manifest(osiris_log:config()) ->

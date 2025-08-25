@@ -116,11 +116,14 @@ start_link(Config) ->
     Opts = [{reversed_batch, true}],
     gen_batch_server:start_link(undefined, Mod, Config, Opts).
 
+-spec overview(pid()) ->
+    {ok, osiris_log:overview()} | {error, no_process}.
 overview(Pid) when node(Pid) == node() ->
     case erlang:is_process_alive(Pid) of
         true ->
-            #{dir := Dir} = osiris_util:get_reader_context(Pid),
-            {ok, osiris_log:overview(Dir)};
+            #{manifest_mod := ManifestMod,
+              dir := Dir} = osiris_util:get_reader_context(Pid),
+            {ok, ManifestMod:overview(Dir)};
         false ->
             {error, no_process}
     end.
@@ -211,7 +214,11 @@ handle_continue(#{name := Name,
     %% reader context can only be cached _after_ log init as we need to ensure
     %% there is at least 1 segment/index pair and also that the log has been
     %% truncated such that only valid index / segment data remains.
+    %% TODO: switch back to passing this in the config map. Put the application
+    %% config in Rabbit?
+    ManifestMod = application:get_env(osiris, log_manifest, osiris_log),
     osiris_util:cache_reader_context(self(), Dir, Name, Shared, ExtRef,
+                                     ManifestMod,
                                      fun(Inc) ->
                                              counters:add(CntRef, ?C_READERS, Inc)
                                      end),
@@ -502,6 +509,8 @@ handle_command({call, From, get_reader_context},
            committed_offset => max(0, COffs),
            shared => Shared,
            reference => Ref,
+           %% TODO: take this from config and store it in #cfg{} instead
+           manifest_mod => application:get_env(osiris, log_manifest, osiris_log),
            readers_counter_fun => fun(Inc) -> counters:add(CntRef, ?C_READERS, Inc) end
           }},
     {State, Records, [Reply | Replies], Corrs, Trk, Dupes};
