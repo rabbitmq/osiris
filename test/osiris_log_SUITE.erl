@@ -396,47 +396,61 @@ iterator_read_chunk_with_read_ahead(Config) ->
     {ok, R} = osiris_log:init_offset_reader(0, RConf),
     Tests =
     [
-     fun(#{w := W0, r := R0}) ->
-             %% first chunk, there won't be any data size hints in the reader
+     fun(write, #{w := W0}) ->
              EntriesRev = [<<"hi">>, <<"ho">>],
              {_, W1} = write_committed(EntriesRev, W0),
+             W1;
+        (read, #{r := R0, tracer := T}) ->
+             %% first chunk, there won't be any data size hints in the reader
              {ok, H, I0, R1} = osiris_log:chunk_iterator(R0),
              {{_, <<"ho">>}, I1} = osiris_log:iterator_next(I0),
              {{_, <<"hi">>}, I2} = osiris_log:iterator_next(I1),
              ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
-             {H, W1, R1}
+             ?assertEqual(2, length(osiris_tracer:calls(T))),
+             {H, R1}
      end,
-     fun(#{w := W0, r := R0}) ->
+     fun(write, #{w := W0}) ->
              %% this one will be read ahead
              EntriesRev = [<<"foo">>, <<"bar">>],
              {_, W1} = write_committed(EntriesRev, W0),
+             W1;
+        (read, #{r := R0, tracer := T}) ->
              {ok, H, I0, R1} = osiris_log:chunk_iterator(R0),
              {{_, <<"bar">>}, I1} = osiris_log:iterator_next(I0),
              {{_, <<"foo">>}, I2} = osiris_log:iterator_next(I1),
              ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
-             {H, W1, R1}
+             ?assertEqual(0, length(osiris_tracer:calls(T))),
+             {H, R1}
      end,
-     fun(#{w := W0, r := R0}) ->
+     fun(write, #{w := W0}) ->
              %% this one will be read ahead
-             E1 = rand:bytes(RAL - 100),
+             E1 = binary:copy(<<"b">>, RAL - 200),
              EntriesRev = [E1 , <<"aaa">>],
              {_, W1} = write_committed(EntriesRev, W0),
+             W1;
+        (read, #{r := R0, tracer := T}) ->
+             E1 = binary:copy(<<"b">>, RAL - 200),
              {ok, H, I0, R1} = osiris_log:chunk_iterator(R0),
              {{_, <<"aaa">>}, I1} = osiris_log:iterator_next(I0),
              {{_, E1}, I2} = osiris_log:iterator_next(I1),
              ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
-             {H, W1, R1}
+             ?assertEqual(0, length(osiris_tracer:calls(T))),
+             {H, R1}
      end,
-     fun(#{w := W0, r := R0}) ->
+     fun(write, #{w := W0}) ->
              %% this one is too big to be read ahead
-             E1 = rand:bytes(RAL * 2),
+             E1 = binary:copy(<<"b">>, RAL * 2),
              EntriesRev = [E1 , <<"aaa">>],
              {_, W1} = write_committed(EntriesRev, W0),
+             W1;
+        (read, #{r := R0, tracer := T}) ->
+             E1 = binary:copy(<<"b">>, RAL * 2),
              {ok, H, I0, R1} = osiris_log:chunk_iterator(R0),
              {{_, <<"aaa">>}, I1} = osiris_log:iterator_next(I0),
              {{_, E1}, I2} = osiris_log:iterator_next(I1),
              ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
-             {H, W1, R1}
+             ?assertEqual(2, length(osiris_tracer:calls(T))),
+             {H, R1}
      end
     ],
 
@@ -2172,11 +2186,18 @@ init_reader(data, Conf) ->
     osiris_log:init_data_reader({0, empty}, Conf).
 
 run_read_ahead_tests(Tests, RType, FSize, Wr0, Rd0) ->
-    lists:foldl(fun(F, Acc) ->
-                        {H, W, R0} = F(Acc),
-                        R1 = update_read(H, R0),
-                        #{w => W, r => R1, rtype => RType, fsize => FSize}
-                end, #{w => Wr0, r => Rd0, rtype => RType, fsize => FSize}, Tests).
+    W = lists:foldl(fun(F, Acc) ->
+                              W  = F(write, Acc),
+                              #{w => W}
+                      end, #{w => Wr0}, Tests),
+    R = lists:foldl(fun(F, Acc) ->
+                        Tracer = osiris_tracer:start({file, pread, '_'}),
+                        {_, R0} = F(read, Acc#{tracer => Tracer}),
+                        osiris_tracer:stop(Tracer),
+                        % R1 = update_read(H, R0),
+                        #{r => R0, rtype => RType, fsize => FSize}
+                end, #{r => Rd0, rtype => RType, fsize => FSize}, Tests),
+    maps:merge(W, R).
 
 -spec update_read(map(), osiris_log:state()) -> osiris_log:state().
 update_read(#{chunk_id := ChId,
