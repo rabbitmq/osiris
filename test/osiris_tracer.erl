@@ -12,13 +12,12 @@
          calls = [] :: list() 
         }).
 
--export([start/1, loop/1, calls/1, stop/1]).
+-export([start/1, loop/1, calls/1, calls/3, stop/1]).
 
--spec start(erlang:trace_pattern_mfa()) -> pid().
-start(MFA) ->
+start(MFAS) ->
     P = spawn(?MODULE, loop, [#?MODULE{}]),
     erlang:trace(self(), true, [call, {tracer, P}]),
-    erlang:trace_pattern(MFA, true, [global]),
+    [erlang:trace_pattern(MFA, true, [global]) || MFA <- MFAS],
     P.
 
 loop(#?MODULE{calls = Calls} = S) ->
@@ -39,6 +38,13 @@ calls(P) ->
     receive
         Calls -> Calls
     end.
+
+calls(P, M, F) ->
+    Calls = calls(P),
+    lists:filter(fun({M1, F1, _A}) when M1 == M andalso F1 == F ->
+                         true;
+                    (_) -> false
+                 end, Calls).
 
 stop(P) ->
     erlang:trace(self(), false, [call]),

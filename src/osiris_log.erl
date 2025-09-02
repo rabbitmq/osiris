@@ -65,9 +65,7 @@
          index_files_unsorted/1,
          make_chunk/7,
          orphaned_segments/1,
-         read_header0/1,
-         % read_ahead_hints/3,
-         update_read/4
+         read_header0/1
         ]).
 
 % maximum size of a segment in bytes
@@ -3034,13 +3032,6 @@ read_ahead_fsize(Previous, 0) ->
     Previous;
 read_ahead_fsize(_, Current) ->
     Current.
-
-%% for testing
--spec update_read(state(), offset(), offset(), non_neg_integer()) -> state().
-update_read(#?MODULE{mode = R0 = #read{}} = S, ChId, NumRecords, Pos) ->
-    R = R0#read{next_offset = ChId + NumRecords,
-                position = Pos},
-    S#?MODULE{mode = R}.
 
 trigger_retention_eval(#?MODULE{cfg =
                                     #cfg{name = Name,
