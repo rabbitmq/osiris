@@ -65,9 +65,7 @@
          index_files_unsorted/1,
          make_chunk/7,
          orphaned_segments/1,
-         read_header0/1,
-         % read_ahead_hints/3,
-         update_read/4
+         read_header0/1
         ]).
 
 % maximum size of a segment in bytes
@@ -2993,8 +2991,8 @@ parse_header(<<?MAGIC:4/unsigned,
             case osiris_bloom:is_match(ChunkFilter, Filter) of
                 true ->
                     <<HeaderData:?HEADER_SIZE_B/binary, _/binary>> = HeaderData0,
-                    State = case Ra0 of
-                                Ra1 ->
+                    State = case Ra1 of
+                                Ra0 ->
                                     State0;
                                 Ra ->
                                     State0#?MODULE{mode = Read0#read{read_ahead = Ra}}
@@ -3034,13 +3032,6 @@ read_ahead_fsize(Previous, 0) ->
     Previous;
 read_ahead_fsize(_, Current) ->
     Current.
-
-%% for testing
--spec update_read(state(), offset(), offset(), non_neg_integer()) -> state().
-update_read(#?MODULE{mode = R0 = #read{}} = S, ChId, NumRecords, Pos) ->
-    R = R0#read{next_offset = ChId + NumRecords,
-                position = Pos},
-    S#?MODULE{mode = R}.
 
 trigger_retention_eval(#?MODULE{cfg =
                                     #cfg{name = Name,
@@ -3318,21 +3309,22 @@ ra_read(ReadPos, Len, #ra{buf = {Pos, Data}})
 ra_read(_Pos, _Len, _Ra) ->
     undefined.
 
-ra_update_size(undefined, _FilterSize, LastDataSize, #ra{size = Sz})
+ra_update_size(undefined, _FilterSize, LastDataSize, #ra{size = Sz} = Ra)
   when Sz < ?READ_AHEAD_LIMIT andalso
        LastDataSize < ?READ_AHEAD_LIMIT ->
     %% no filter and last data size was small so enable data read ahead
-    #ra{size = ?READ_AHEAD_LIMIT};
-ra_update_size(Filter, FilterSize, _LastDataSize, #ra{size = Sz} = Ra)
-  when Filter =/= undefined ->
+    Ra#ra{size = ?READ_AHEAD_LIMIT};
+ra_update_size(undefined, _FilterSize, LastDataSize,
+               #ra{size = ?READ_AHEAD_LIMIT} = Ra)
+  when LastDataSize < ?READ_AHEAD_LIMIT ->
+    Ra;
+ra_update_size(_Filter, FilterSize, _LastDataSize, #ra{size = Sz} = Ra) ->
     case FilterSize + ?HEADER_SIZE_B of
         Sz ->
             Ra;
         NewSz ->
-            #ra{size = NewSz}
-    end;
-ra_update_size(_Filter, _FilterSize, _LastDataSize, Ra) ->
-    Ra.
+            Ra#ra{size = NewSz}
+    end.
 
 ra_can_fill(ReqSize, #ra{size = Sz}) ->
     ReqSize =< Sz.
@@ -3347,6 +3339,26 @@ ra_fill(Fd, Pos, #ra{size = Sz} = Ra) ->
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
+
+ra_update_size_test() ->
+    DefSize = ?HEADER_SIZE_B + ?DEFAULT_FILTER_SIZE,
+    ?assertMatch(#ra{size = DefSize}, #ra{}),
+    Ra0 = #ra{},
+    ?assertMatch(#ra{size = ?READ_AHEAD_LIMIT},
+                 ra_update_size(undefined, ?DEFAULT_FILTER_SIZE, 100, Ra0)),
+
+    ?assertMatch(#ra{size = ?READ_AHEAD_LIMIT},
+                 ra_update_size(undefined, ?DEFAULT_FILTER_SIZE, 100, Ra0)),
+    Ra1 = #ra{size = ?READ_AHEAD_LIMIT},
+    ?assertMatch(#ra{size = DefSize},
+                 ra_update_size(undefined, ?DEFAULT_FILTER_SIZE, 5000, Ra1)),
+
+    ?assertMatch(#ra{size = ?READ_AHEAD_LIMIT},
+                 ra_update_size(undefined, ?DEFAULT_FILTER_SIZE, 100, Ra1)),
+
+    ?assertMatch(#ra{size = DefSize},
+                 ra_update_size("a filter", ?DEFAULT_FILTER_SIZE, 100, Ra0)),
+    ok.
 
 part_test() ->
     [<<"ABCD">>] = part(4, [<<"ABCDEF">>]),
