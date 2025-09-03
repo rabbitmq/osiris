@@ -12,7 +12,13 @@
          calls = [] :: list() 
         }).
 
--export([start/1, loop/1, calls/1, calls/3, stop/1]).
+-export([start/1,
+         loop/1,
+         calls/1,
+         calls/3,
+         call_count/1,
+         call_count/3,
+         stop/1]).
 
 start(MFAS) ->
     P = spawn(?MODULE, loop, [#?MODULE{}]),
@@ -45,6 +51,12 @@ calls(P, M, F) ->
                          true;
                     (_) -> false
                  end, Calls).
+
+call_count(P) ->
+    length(calls(P)).
+
+call_count(P, M, F) ->
+    length(calls(P, M, F)).
 
 stop(P) ->
     erlang:trace(self(), false, [call]),
