@@ -386,9 +386,9 @@ connect_options() ->
      {keepalive, KeepAlive}].
 
 setopts(tcp, Sock, Opts) ->
-    ok = inet:setopts(Sock, Opts);
+    inet:setopts(Sock, Opts);
 setopts(ssl, Sock, Opts) ->
-    ok = ssl:setopts(Sock, Opts).
+    ssl:setopts(Sock, Opts).
 
 
 maybe_connect(Name, T, Hosts, Port, Options) ->
