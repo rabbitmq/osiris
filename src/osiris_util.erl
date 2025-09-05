@@ -22,7 +22,7 @@
          partition_parallel/3,
          normalise_name/1,
          get_reader_context/1,
-         cache_reader_context/6,
+         cache_reader_context/7,
          is_dir/1,
          is_file/1
         ]).
@@ -288,20 +288,24 @@ get_reader_context(Pid)
         [] ->
             {ok, Ctx0} = gen:call(Pid, '$gen_call', get_reader_context, infinity),
             Ctx0;
-        [{_Pid, Dir, Name, Shared, Ref, ReadersCountersFun}] ->
+        [{_Pid, Dir, Name, Shared, Ref, ManifestMod, ReadersCountersFun}] ->
             #{dir => Dir,
               name => Name,
               shared => Shared,
               reference => Ref,
+              manifest_mod => ManifestMod,
               readers_counter_fun => ReadersCountersFun}
     end.
 
-cache_reader_context(Pid, Dir, Name, Shared, Ref, ReadersCounterFun)
+cache_reader_context(Pid, Dir, Name, Shared, Ref, ManifestMod,
+                     ReadersCounterFun)
   when is_pid(Pid) andalso
        ?IS_STRING(Dir) andalso
+       is_atom(ManifestMod) andalso
        is_function(ReadersCounterFun) ->
     true = ets:insert(osiris_reader_context_cache,
-                      {Pid, Dir, Name, Shared, Ref, ReadersCounterFun}),
+                      {Pid, Dir, Name, Shared, Ref, ManifestMod,
+                       ReadersCounterFun}),
     ok.
 
 is_dir(Dir) ->

@@ -47,6 +47,18 @@
 -define(FILE_OPTS_WRITE, [raw, binary, write, read]).
 -define(INDEX_RECORD_SIZE_B, 29).
 
+%% record chunk_info does not map exactly to an index record (field 'num' differs)
+-record(chunk_info,
+        {id :: osiris:offset(),
+         timestamp :: non_neg_integer(),
+         epoch :: osiris:epoch(),
+         num :: non_neg_integer(),
+         type :: osiris_log:chunk_type(),
+         %% size of data + filter + trailer
+         size :: non_neg_integer(),
+         %% position in segment file
+         pos :: integer()
+        }).
 
 %% chunk types
 -define(CHNK_USER, 0).
