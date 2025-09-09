@@ -52,7 +52,8 @@
          evaluate_retention/2,
          directory/1,
          delete_directory/1,
-         make_counter/1]).
+         make_counter/1,
+         generate_log/4]).
 
 -export([dump_init/1,
          dump_init_idx/1,
@@ -3336,6 +3337,38 @@ ra_fill(Fd, Pos, #ra{size = Sz} = Ra) ->
         Err ->
             Err
     end.
+
+generate_log(Msg, MsgsPerChunk, NumMessages, Directory) ->
+    Name = filename:basename(Directory),
+
+    ORef = osiris_log_shared:new(),
+    Conf = #{dir => Directory,
+             name => Name,
+             epoch => 1,
+             readers_counter_fun => fun(_) -> ok end,
+             shared => ORef,
+             options => #{}},
+
+    W0 = osiris_log:init(Conf),
+    W1 = write_in_chunks(NumMessages, MsgsPerChunk, Msg, W0),
+    osiris_log:close(W1),
+    ok.
+
+write_in_chunks(ToWrite, MsgsPerChunk, Msg, W0) when ToWrite > 0 ->
+    ChId = osiris_log:next_offset(W0),
+    MsgsInChunk = case ToWrite < MsgsPerChunk of
+                      true ->
+                          ToWrite;
+                      false ->
+                          MsgsPerChunk
+                  end,
+    W1 = osiris_log:write(lists:duplicate(MsgsInChunk, Msg), W0),
+    Shared = osiris_log:get_shared(W0),
+    osiris_log_shared:set_committed_chunk_id(Shared, ChId),
+    osiris_log_shared:set_last_chunk_id(Shared, ChId),
+    write_in_chunks(ToWrite - MsgsPerChunk, MsgsPerChunk, Msg, W1);
+write_in_chunks(_, _, _, W) ->
+    W.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
