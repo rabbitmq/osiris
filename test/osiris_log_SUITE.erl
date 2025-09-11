@@ -285,7 +285,6 @@ add_filter(Filter, MatchUnfiltered, #{options := Opts} = Conf) ->
     Conf#{options => Opts#{filter_spec => #{filters => [Filter],
                                             match_unfiltered => MatchUnfiltered}}}.
 
-
 subbatch(Config) ->
     Conf = ?config(osiris_conf, Config),
     S0 = osiris_log:init(Conf),
@@ -308,7 +307,6 @@ subbatch(Config) ->
     osiris_log:close(S1),
     osiris_log:close(R1),
     ok.
-
 
 subbatch_compressed(Config) ->
     Conf = ?config(osiris_conf, Config),
@@ -353,6 +351,7 @@ iterator_read_chunk(Config) ->
     HoOffs = ChId + 1,
     BatchOffs = ChId + 2,
     {{ChId, <<"hi">>}, I1} = osiris_log:iterator_next(I0),
+
     {{HoOffs, <<"ho">>}, I2} = osiris_log:iterator_next(I1),
     {{BatchOffs, Batch}, I} = osiris_log:iterator_next(I2),
     ?assertMatch(end_of_chunk, osiris_log:iterator_next(I)),
@@ -402,10 +401,11 @@ iterator_read_chunk_with_read_ahead(Config) ->
              W1;
         (read, #{r := R0, tracer := T}) ->
              %% small chunk, managed to read it with the filter read-ahead
-             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0),
+             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0, 2),
              {{_, <<"ho">>}, I1} = osiris_log:iterator_next(I0),
              {{_, <<"hi">>}, I2} = osiris_log:iterator_next(I1),
              ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
+             ct:pal("I0 ~p", [I2]),
              ?assertEqual(1, osiris_tracer:call_count(T)),
              R1
      end,
@@ -415,7 +415,7 @@ iterator_read_chunk_with_read_ahead(Config) ->
              W1;
         (read, #{r := R0, tracer := T}) ->
              %% not enough read-ahead data, we have to read from file
-             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0),
+             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0, 2),
              {{_, <<"bar">>}, I1} = osiris_log:iterator_next(I0),
              {{_, <<"foo">>}, I2} = osiris_log:iterator_next(I1),
              ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
@@ -449,7 +449,7 @@ iterator_read_chunk_with_read_ahead(Config) ->
              {{_, <<"aaa">>}, I1} = osiris_log:iterator_next(I0),
              {{_, E1}, I2} = osiris_log:iterator_next(I1),
              ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
-             ?assertEqual(2, osiris_tracer:call_count(T)),
+             ?assertEqual(1, osiris_tracer:call_count(T)),
              R1
      end
     ],
