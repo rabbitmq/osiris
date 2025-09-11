@@ -1414,10 +1414,12 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
                    next_offset :: offset(),
                    %% entries left
                    num_left :: non_neg_integer(),
+                   data_left :: non_neg_integer(),
                    %% any trailing data from last read
                    %% we try to capture at least the size of the next record
-                   data :: undefined | binary(),
-                   next_record_pos :: non_neg_integer()}).
+                   data_cache :: undefined | binary(),
+                   next_record_pos :: non_neg_integer(),
+                   ra :: #ra{} | undefined}).
 -opaque chunk_iterator() :: #iterator{}.
 -define(REC_MATCH_SIMPLE(Len, Rem),
         <<0:1, Len:31/unsigned, Rem/binary>>).
@@ -1429,7 +1431,7 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
 
 -define(REC_HDR_SZ_SIMPLE_B, 4).
 -define(REC_HDR_SZ_SUBBATCH_B, 11).
--define(ITER_READ_AHEAD_B, 64).
+% -define(ITER_READ_AHEAD_B, 64).
 
 
 -spec chunk_iterator(state()) ->
@@ -1455,7 +1457,6 @@ chunk_iterator(#?MODULE{cfg = #cfg{},
         {ok,
          #{type := ChType,
            chunk_id := ChId,
-           crc := _Crc,
            num_entries := NumEntries,
            num_records := NumRecords,
            data_size := DataSize,
@@ -1467,8 +1468,8 @@ chunk_iterator(#?MODULE{cfg = #cfg{},
             case needs_handling(RType, Selector, ChType) of
                 true ->
                     DataPos = Pos + ?HEADER_SIZE_B + FilterSize,
-                    {Data, Ra1} = iter_read_ahead(Fd, DataPos, CreditHint,
-                                                  DataSize, NumEntries, Ra),
+                    {Data, Ra1} = iter_read_ahead(Fd, DataPos, 4,
+                                                  CreditHint, DataSize, NumEntries, Ra),
                     Read = Read1#read{next_offset = ChId + NumRecords,
                                       position = NextPos,
                                       read_ahead = Ra1,
@@ -1476,10 +1477,12 @@ chunk_iterator(#?MODULE{cfg = #cfg{},
                                                                      FilterSize)},
                     State = State1#?MODULE{mode = Read},
                     Iterator = #iterator{fd = Fd,
-                                         data = Data,
+                                         data_cache = Data,
                                          next_offset = ChId,
                                          num_left = NumEntries,
-                                         next_record_pos = DataPos},
+                                         data_left = DataSize,
+                                         next_record_pos = DataPos,
+                                         ra = Ra1},
                     {ok, Header, Iterator, State};
                 false ->
                     %% skip
@@ -1494,60 +1497,76 @@ chunk_iterator(#?MODULE{cfg = #cfg{},
 
 -spec iterator_next(chunk_iterator()) ->
     end_of_chunk | {offset_entry(), chunk_iterator()}.
-iterator_next(#iterator{num_left = 0}) ->
+iterator_next(#iterator{} = I) ->
+    iterator_next(I, 1).
+
+-spec iterator_next(chunk_iterator(), CreditHint :: non_neg_integer()) ->
+    end_of_chunk | {offset_entry(), chunk_iterator()}.
+iterator_next(#iterator{num_left = 0}, _CreditHint) ->
     end_of_chunk;
 iterator_next(#iterator{fd = Fd,
                         next_offset = NextOffs,
                         num_left = Num,
-                        data = ?REC_MATCH_SIMPLE(Len, Rem0),
-                        next_record_pos = Pos} = I0) ->
-    {Record, Rem} =
-        case Rem0 of
-            <<Record0:Len/binary, Rem1/binary>> ->
-                {Record0, Rem1};
-            _ ->
-                %% not enough in Rem0 to read the entire record
-                %% so we need to read it from disk
-                {ok, <<Record0:Len/binary, Rem1/binary>>} =
-                    file:pread(Fd, Pos + ?REC_HDR_SZ_SIMPLE_B,
-                               Len + ?ITER_READ_AHEAD_B),
-                {Record0, Rem1}
-        end,
-
-    I = I0#iterator{next_offset = NextOffs + 1,
-                    num_left = Num - 1,
-                    data = Rem,
-                    next_record_pos = Pos + ?REC_HDR_SZ_SIMPLE_B + Len},
-    {{NextOffs, Record}, I};
+                        data_left = DataLeft,
+                        data_cache = ?REC_MATCH_SIMPLE(Len, Rem0),
+                        next_record_pos = Pos0,
+                        ra = Ra} = I0, CreditHint) ->
+    Pos = Pos0 + ?REC_HDR_SZ_SIMPLE_B,
+    case Rem0 of
+        <<Record:Len/binary, Rem/binary>> ->
+            I = I0#iterator{next_offset = NextOffs + 1,
+                            num_left = Num - 1,
+                            data_left = DataLeft - (Len + ?REC_HDR_SZ_SIMPLE_B),
+                            data_cache = Rem,
+                            next_record_pos = Pos + Len},
+            {{NextOffs, Record}, I};
+        _ ->
+            MinReqSize = Len + ?REC_HDR_SZ_SIMPLE_B,
+            {Data, Ra1} = iter_read_ahead(Fd, Pos0, MinReqSize, CreditHint,
+                                          DataLeft, Num, Ra),
+            iterator_next(I0#iterator{ra = Ra1,
+                                      data_cache = Data},
+                          CreditHint)
+    end;
 iterator_next(#iterator{fd = Fd,
                         next_offset = NextOffs,
                         num_left = Num,
-                        data = ?REC_MATCH_SUBBATCH(CompType, NumRecs,
-                                                   UncompressedLen,
-                                                   Len, Rem0),
-                        next_record_pos = Pos} = I0) ->
-    {Data, Rem} =
+                        data_left = DataLeft,
+                        data_cache = ?REC_MATCH_SUBBATCH(CompType, NumRecs,
+                                                         UncompressedLen,
+                                                         Len, Rem0),
+                        next_record_pos = Pos,
+                        ra = Ra} = I0, CreditHint) ->
         case Rem0 of
-            <<Record0:Len/binary, Rem1/binary>> ->
-                {Record0, Rem1};
+            <<Data:Len/binary, Rem/binary>> ->
+                Record = {batch, NumRecs, CompType, UncompressedLen, Data},
+                I = I0#iterator{next_offset = NextOffs + NumRecs,
+                                num_left = Num - 1,
+                                data_left = DataLeft - (Len + ?REC_HDR_SZ_SUBBATCH_B),
+                                data_cache = Rem,
+                                next_record_pos = Pos + ?REC_HDR_SZ_SUBBATCH_B + Len},
+                {{NextOffs, Record}, I};
             _ ->
                 %% not enough in Rem0 to read the entire record
                 %% so we need to read it from disk
-                {ok, <<Record0:Len/binary, Rem1/binary>>} =
-                    file:pread(Fd, Pos + ?REC_HDR_SZ_SUBBATCH_B,
-                               Len + ?ITER_READ_AHEAD_B),
-                {Record0, Rem1}
-        end,
-    Record = {batch, NumRecs, CompType, UncompressedLen, Data},
-    I = I0#iterator{next_offset = NextOffs + NumRecs,
-                    num_left = Num - 1,
-                    data = Rem,
-                    next_record_pos = Pos + ?REC_HDR_SZ_SUBBATCH_B + Len},
-    {{NextOffs, Record}, I};
+                MinReqSize = Len + ?REC_HDR_SZ_SUBBATCH_B,
+                {Data, Ra1} = iter_read_ahead(Fd, Pos, MinReqSize, CreditHint,
+                                              DataLeft, Num, Ra),
+                iterator_next(I0#iterator{ra = Ra1,
+                                          data_cache = Data},
+                              CreditHint)
+        end;
 iterator_next(#iterator{fd = Fd,
-                        next_record_pos = Pos} = I) ->
-    {ok, Data} = file:pread(Fd, Pos, ?ITER_READ_AHEAD_B),
-    iterator_next(I#iterator{data = Data}).
+                        num_left = Num,
+                        data_left = DataLeft,
+                        ra = Ra,
+                        next_record_pos = Pos} = I0, CreditHint) ->
+    MinReq = min(?REC_HDR_SZ_SUBBATCH_B, DataLeft),
+    {Data, Ra1} = iter_read_ahead(Fd, Pos, MinReq, CreditHint,
+                                  DataLeft, Num, Ra),
+    iterator_next(I0#iterator{ra = Ra1,
+                              data_cache = Data},
+                  CreditHint).
 
 -spec read_chunk(state()) ->
     {ok, binary(), state()} |
@@ -3256,44 +3275,41 @@ dump_crc_check(Fd) ->
             dump_crc_check(Fd)
     end.
 
-iter_read_ahead(Fd, Pos, Credit, DataSize, NumEntries, Ra0)
-  when Ra0 =/= undefined ->
-    case ra_read(Pos, DataSize, Ra0) of
+iter_guess_size(NumEntries, NumEntries, DataSize) ->
+    DataSize;
+iter_guess_size(Credit0, NumEntries, DataSize) ->
+    Credit = min(Credit0, NumEntries),
+    (DataSize div NumEntries * Credit).
+
+iter_read_ahead(Fd, Pos, MinReqSize, Credit0, DataSize, NumEntries, Ra0)
+  when Ra0 =/= undefined andalso
+       is_integer(Credit0) andalso
+       MinReqSize =< DataSize ->
+    case ra_read(Pos, MinReqSize, Ra0) of
         undefined ->
+            %% if ra can fill the whole remaining data size we we do that first
+            %% as we may read ahead beyond the end of chunk and save further
+            %% read calls
             case ra_can_fill(DataSize, Ra0) of
                 true ->
                     {ok, Ra} = ra_fill(Fd, Pos, Ra0),
-                    iter_read_ahead(Fd, Pos, Credit,
+                    iter_read_ahead(Fd, Pos, MinReqSize, Credit0,
                                     DataSize, NumEntries, Ra);
                 false ->
-                    %% proceed without read ahead
-                    iter_read_ahead(Fd, Pos, Credit,
-                                    DataSize, NumEntries, undefined)
+                    %% else do a readahead up to the end of the chunk but no
+                    %% larger than 4096 or smaller than request size
+                    MinSize = max(MinReqSize, min(4096, DataSize)),
+                    Size = max(MinSize, iter_guess_size(Credit0, NumEntries,
+                                                        DataSize)),
+                    {ok, Data} = file:pread(Fd, Pos, Size),
+                    {Data, #ra{}}
             end;
         Data ->
             {Data, Ra0}
     end;
-iter_read_ahead(_Fd, _Pos, 1,
-                _DataSize, _NumEntries, undefined) ->
-    %% FIXME is it about credit = 1 or number of entries = 1?
-    %% no point reading ahead if there is only one entry to be read at this
-    %% time
-    {undefined, #ra{}};
-iter_read_ahead(Fd, Pos, Credit,
-                DataSize, NumEntries, undefined)
-  when Credit == all orelse NumEntries == 1 ->
-    {ok, Data} = file:pread(Fd, Pos, DataSize),
-    % validate_crc(ChunkId, Crc, Data),
-    {Data, #ra{}};
-iter_read_ahead(Fd, Pos, Credit0,
-                DataSize, NumEntries, undefined) ->
-    %% read ahead, assumes roughly equal entry sizes which may not be the case
-    %% TODO round up to nearest block?
-    %% We can only practically validate CRC if we read the whole data
-    Credit = min(Credit0, NumEntries),
-    Size = DataSize div NumEntries * Credit,
-    {ok, Data} = file:pread(Fd, Pos, Size + ?ITER_READ_AHEAD_B),
-    {Data, #ra{}}.
+iter_read_ahead(Fd, Pos, MinSize, all,
+                DataSize, NumEntries, Ra) ->
+    iter_read_ahead(Fd, Pos, MinSize, NumEntries, DataSize, NumEntries, Ra).
 
 list_dir(Dir) ->
     case prim_file:list_dir(Dir) of
