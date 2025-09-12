@@ -3306,9 +3306,9 @@ iter_guess_size(Credit0, NumEntries, DataSize) ->
 iter_read_ahead(Fd, Pos, MinReqSize, Credit0, DataSize, NumEntries, Ra0)
   when is_integer(Credit0) andalso
        MinReqSize =< DataSize ->
-    %% if the minimum request size can be server from read ahead then we
+    %% if the minimum request size can be served from read ahead then we
     %% return only that, ra_read never returns partial reads so speculatively
-    %% reading ahead further hear could reduce efficiency of read ahead buffer
+    %% reading ahead further here could reduce efficiency of read ahead buffer
     case ra_read(Pos, MinReqSize, Ra0) of
         undefined ->
             %% If the read ahead config can fill the entire DataSize it
@@ -3323,7 +3323,7 @@ iter_read_ahead(Fd, Pos, MinReqSize, Credit0, DataSize, NumEntries, Ra0)
                     %% if the read ahead buffer cannot be filled
                     %% we do an iterator local readahead
                     %% if there are plenty of credits we estimate the readahead
-                    %% needed to server that, else we read up to the readahead
+                    %% needed to serve that, else we read up to the readahead
                     %% limit but not beyond the end of the chunk and not less
                     %% that the minimum request size
                     MinSize = max(MinReqSize, min(?READ_AHEAD_LIMIT, DataSize)),
