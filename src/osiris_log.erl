@@ -31,6 +31,7 @@
          read_header/1,
          chunk_iterator/1,
          chunk_iterator/2,
+         chunk_iterator/3,
          iterator_next/1,
          read_chunk/1,
          read_chunk_parsed/1,
@@ -1423,7 +1424,7 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
                    %% we try to capture at least the size of the next record
                    data_cache :: undefined | binary(),
                    next_record_pos :: non_neg_integer(),
-                   ra :: #ra{} | undefined}).
+                   ra :: #ra{}}).
 -opaque chunk_iterator() :: #iterator{}.
 -define(REC_MATCH_SIMPLE(Len, Rem),
         <<0:1, Len:31/unsigned, Rem/binary>>).
@@ -1449,13 +1450,30 @@ chunk_iterator(State) ->
     {ok, header_map(), chunk_iterator(), state()} |
     {end_of_stream, state()} |
     {error, {invalid_chunk_header, term()}}.
+chunk_iterator(State, Credit) ->
+    chunk_iterator(State, Credit, undefined).
+
+
+-spec chunk_iterator(state(), pos_integer() | all,
+                     chunk_iterator() | undefined) ->
+    {ok, header_map(), chunk_iterator(), state()} |
+    {end_of_stream, state()} |
+    {error, {invalid_chunk_header, term()}}.
 chunk_iterator(#?MODULE{cfg = #cfg{},
                         mode = #read{type = RType,
                                      chunk_selector = Selector,
-                                     filter_size = RaFs}} = State0,
-               CreditHint)
+                                     filter_size = RaFs} = Read0} = State00,
+               CreditHint, PrevChunkIterator)
   when (is_integer(CreditHint) andalso CreditHint > 0) orelse
        is_atom(CreditHint) ->
+    %% update the read ahead buffer from the prior iterator if passed in
+    State0 = case PrevChunkIterator of
+                 #iterator{ra = #ra{buf = Buf} = Ra0}
+                   when Buf =/= undefined ->
+                     State00#?MODULE{mode = Read0#read{read_ahead = Ra0}};
+                 _ ->
+                     State00
+             end,
     %% reads the next chunk of unparsed chunk data
     case catch read_header0(State0) of
         {ok,
@@ -2938,7 +2956,7 @@ read_header_with_ra(#?MODULE{cfg = #cfg{directory = Dir,
                                         shared = Shared},
                              mode = #read{next_offset = NextChId0,
                                           position = Pos,
-                                          read_ahead = Ra0 = #ra{on = RaOn}} = Read0,
+                                          read_ahead = Ra0} = Read0,
                              current_file = CurFile,
                              fd = Fd} = State) ->
     case ra_read(Pos, ?HEADER_SIZE_B, Ra0) of
@@ -2969,7 +2987,7 @@ read_header_with_ra(#?MODULE{cfg = #cfg{directory = Dir,
                                 {ok, Fd2} ->
                                     ok = file:close(Fd),
                                     Read = Read0#read{next_offset = NextChId,
-                                                      read_ahead = #ra{on = RaOn},
+                                                      read_ahead = ra_clear(Ra0),
                                                       position = ?LOG_HEADER_SIZE},
                                     read_header0(State#?MODULE{current_file = SegFile,
                                                                fd = Fd2,
@@ -3286,27 +3304,33 @@ iter_guess_size(Credit0, NumEntries, DataSize) ->
     (DataSize div NumEntries * Credit).
 
 iter_read_ahead(Fd, Pos, MinReqSize, Credit0, DataSize, NumEntries, Ra0)
-  when Ra0 =/= undefined andalso
-       is_integer(Credit0) andalso
+  when is_integer(Credit0) andalso
        MinReqSize =< DataSize ->
+    %% if the minimum request size can be server from read ahead then we
+    %% return only that, ra_read never returns partial reads so speculatively
+    %% reading ahead further hear could reduce efficiency of read ahead buffer
     case ra_read(Pos, MinReqSize, Ra0) of
         undefined ->
-            %% if ra can fill the whole remaining data size we we do that first
-            %% as we may read ahead beyond the end of chunk and save further
-            %% read calls
+            %% If the read ahead config can fill the entire DataSize it
+            %% is worthwile to do so as it may save syscalls for the next
+            %% chunk
             case ra_can_fill(DataSize, Ra0) of
                 true ->
                     {ok, Ra} = ra_fill(Fd, Pos, Ra0),
                     iter_read_ahead(Fd, Pos, MinReqSize, Credit0,
                                     DataSize, NumEntries, Ra);
                 false ->
-                    %% else do a readahead up to the end of the chunk but no
-                    %% larger than 4096 or smaller than request size
-                    MinSize = max(MinReqSize, min(4096, DataSize)),
+                    %% if the read ahead buffer cannot be filled
+                    %% we do an iterator local readahead
+                    %% if there are plenty of credits we estimate the readahead
+                    %% needed to server that, else we read up to the readahead
+                    %% limit but not beyond the end of the chunk and not less
+                    %% that the minimum request size
+                    MinSize = max(MinReqSize, min(?READ_AHEAD_LIMIT, DataSize)),
                     Size = max(MinSize, iter_guess_size(Credit0, NumEntries,
                                                         DataSize)),
                     {ok, Data} = file:pread(Fd, Pos, Size),
-                    {Data, #ra{}}
+                    {Data, ra_clear(Ra0)}
             end;
         Data ->
             {Data, Ra0}
@@ -3350,6 +3374,9 @@ ra_update_size(_Filter, FilterSize, _LastDataSize, #ra{size = Sz} = Ra) ->
 
 ra_can_fill(ReqSize, #ra{size = Sz}) ->
     ReqSize =< Sz.
+
+ra_clear(#ra{} = Ra) ->
+    Ra#ra{buf = undefined}.
 
 ra_fill(Fd, Pos, #ra{size = Sz} = Ra) ->
     case file:pread(Fd, Pos, Sz) of
