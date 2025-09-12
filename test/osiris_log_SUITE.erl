@@ -94,8 +94,9 @@ all_tests() ->
      init_with_unexpected_file,
      overview_with_missing_segment,
      overview_with_missing_index_at_start,
-     read_header_ahead_offset_reader,
-     read_header_ahead_offset_reader_filter
+     read_ahead_send_file,
+     read_ahead_send_file_filter,
+     read_ahead_send_file_on_off
     ].
 
 groups() ->
@@ -1967,7 +1968,7 @@ overview_with_missing_index_at_start(Config) ->
                         filename:join(?config(dir, Config), "*.index")))),
     ok.
 
-read_header_ahead_offset_reader(Config) ->
+read_ahead_send_file(Config) ->
     RAL = 4096, %% read ahead limit
     HS = ?HEADER_SIZE_B,
     Tests =
@@ -1977,13 +1978,14 @@ read_header_ahead_offset_reader(Config) ->
              {_, W1} = write_committed(Entries, W0),
              W1;
         (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
-             %% first chunk, we read the header and the chunk
+             %% first chunk, we read the header and used sendfile
              Entries = [<<"hiiiiiiiii">>, <<"hooooooo">>],
              [_, _, D, _] = ra_fake_chunk(Entries),
              {ok, R1} = osiris_log:send_file(CS, R0),
              {ok, Read} = recv(SS, byte_size(D) + HS),
              ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
-             ?assertEqual(2, osiris_tracer:call_count(T)),
+             ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
+             ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
              R1
      end,
      fun(write, #{w := W0}) ->
@@ -2034,7 +2036,6 @@ read_header_ahead_offset_reader(Config) ->
                         end,
              {ok, Read} = recv(SS, byte_size(Expected) + HS),
              ?assertEqual(Expected, binary:part(Read, HS, byte_size(Read) - HS)),
-             ct:pal("call_count ~p", [osiris_tracer:calls(T)]),
              %% no read ahead from before, and need a second read for the filter
              ?assertEqual(2, osiris_tracer:call_count(T)),
              ?assertEqual(2, osiris_tracer:call_count(T, file, pread)),
@@ -2102,32 +2103,21 @@ read_header_ahead_offset_reader(Config) ->
                           RConf = Conf1#{shared => Shared, transport => tcp},
                           {ok, Rd0} = init_reader(RType, RConf),
 
-                          %% server, we will read stream data from this socket
-                          {ok, SLS} = gen_tcp:listen(0, [binary, {packet, 0},
-                                                         {active, false}]),
-                          {ok, Port} = inet:port(SLS),
-
-                          %% client, osiris will send to this socket
-                          {ok, CS} = gen_tcp:connect("localhost", Port,
-                                                     [binary, {packet, 0}]),
-
-                          {ok, SS} = gen_tcp:accept(SLS),
+                          {CS, SS, _} = CSC = client_server_connect(),
 
                           #{w := Wr1, r := Rd1} = run_read_ahead_tests(Tests, RType,
                                                                        FSize, Wr0, Rd0,
                                                                        #{ss => SS,
                                                                          cs => CS}),
 
-                          ok = gen_tcp:close(CS),
-                          ok = gen_tcp:close(SS),
-                          ok = gen_tcp:close(SLS),
+                          client_server_close(CSC),
 
                           osiris_log:close(Rd1),
                           osiris_log:close(Wr1)
                   end, [{FSize, RType} || FSize <- FilterSizes, RType <- RTypes]),
     ok.
 
-read_header_ahead_offset_reader_filter(Config) ->
+read_ahead_send_file_filter(Config) ->
     RAL = 4096, %% read ahead limit
     HS = ?HEADER_SIZE_B,
     %% we store the entry size on 4 bytes, so we must substract them from the data size
@@ -2289,24 +2279,13 @@ read_header_ahead_offset_reader_filter(Config) ->
                end
               ],
 
-              %% server, we will read stream data from this socket
-              {ok, SLS} = gen_tcp:listen(0, [binary, {packet, 0},
-                                             {active, false}]),
-              {ok, Port} = inet:port(SLS),
-
-              %% client, osiris will send to this socket
-              {ok, CS} = gen_tcp:connect("localhost", Port,
-                                         [binary, {packet, 0}]),
-
-              {ok, SS} = gen_tcp:accept(SLS),
+              {CS, SS, _} = CSC = client_server_connect(),
 
               #{w := Wr1, r := Rd1} = run_read_ahead_tests(Tests, offset, FSize,
                                                            Wr0, Rd0, #{ss => SS,
                                                                        cs => CS}),
 
-              ok = gen_tcp:close(CS),
-              ok = gen_tcp:close(SS),
-              ok = gen_tcp:close(SLS),
+              client_server_close(CSC),
 
               osiris_log:close(Rd1),
               osiris_log:close(Wr1)
@@ -2314,116 +2293,72 @@ read_header_ahead_offset_reader_filter(Config) ->
 
     ok.
 
-% read_header_ahead_offset_reader_filter(Config) ->
-%     RAL = 4096, %% read ahead limit
-%     %% we store the entry size on 4 bytes, so we must substract them from the data size
-%     MaxEntrySize = RAL - 4,
-%     DFS = ?DEFAULT_FILTER_SIZE,
-%     FilterSizes = [DFS, DFS * 2],
-%     Conf0 = ?config(osiris_conf, Config),
-%     #{dir := Dir0} = Conf0,
-%     lists:foreach(
-%       fun(FSize) ->
-%               Dir1 = filename:join(Dir0, integer_to_list(FSize)),
-%               Conf1 = Conf0#{dir => Dir1,
-%                              filter_size => FSize},
-%               Wr0 = osiris_log:init(Conf1),
-%               Shared = osiris_log:get_shared(Wr0),
-%               Conf = Conf1#{shared => Shared},
-%               {ok, Rd0} = osiris_log:init_offset_reader(first, Conf),
-%               %% we start by using the default filter size in the read ahead hints
-%               Rd1 = osiris_log:read_ahead_hints(Rd0, 1, DFS),
-%               %% compute the max entry size
-%               %% (meaning we don't read ahead enough above this entry size)
-%               %% first we don't know the actual filter size in the stream,
-%               %% so we assume the default filter size
-%               %% this "reduces" the max size of data we can read in the case
-%               %% of a larger-than-default filter size, because of the extra
-%               %% bytes that belong to the filter
-%               MES1 = MaxEntrySize - (FSize - DFS),
-%               %% then the max entry becomes accurate, whatever the actual filter size
-%               MES2 = MaxEntrySize,
+read_ahead_send_file_on_off(Config) ->
+    HS = ?HEADER_SIZE_B,
+    Tests =
+    [
+     fun(write, #{w := W0}) ->
+             Entries = [<<"hiiiiiiiii">>, <<"hooooooo">>],
+             {_, W1} = write_committed(Entries, W0),
+             W1;
+        (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
+             %% first chunk, we read the header and used sendfile
+             Entries = [<<"hiiiiiiiii">>, <<"hooooooo">>],
+             [_, _, D, _] = ra_fake_chunk(Entries),
+             {ok, R1} = osiris_log:send_file(CS, R0),
+             {ok, Read} = recv(SS, byte_size(D) + HS),
+             ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+             ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
+             ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+             R1
+     end,
+     fun(write, #{w := W0}) ->
+             {_, W1} = write_committed([<<"hi">>, <<"ho">>], W0),
+             W1;
+        (read, #{r := R0, cs := CS, ss := SS, tracer := T, ra_on := RaOn}) ->
+             [_, _, D, _] = ra_fake_chunk([<<"hi">>, <<"ho">>]),
+             {ok, R1} = osiris_log:send_file(CS, R0),
+             {ok, Read} = recv(SS, byte_size(D) + HS),
+             ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+             case RaOn of
+                 true ->
+                     ?assertEqual(1, osiris_tracer:call_count(T));
+                 false ->
+                     ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
+                     ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile))
+             end,
+             R1
+     end
+    ],
 
-%               Tests =
-%               [
-%                fun(#{w := W0, r := R0}) ->
-%                        %% data do not fit in the read ahead
-%                        EData = binary:copy(<<"a">>, MES1 + 1),
-%                        Entries = [{<<"banana">>, EData}],
-%                        {_, W1} = write_committed(Entries, W0),
-%                        {ok, H, Content, R1} = osiris_log:read_header0(R0),
-%                        ?assertEqual(undefined, Content),
-%                        {H, W1, R1}
-%                end,
-%                fun(#{w := W0, r := R0}) ->
-%                        %% data exactly fits in the read ahead
-%                        EData = binary:copy(<<"a">>, MES1),
-%                        Entries = [{<<"banana">>, EData}],
-%                        {_, W1} = write_committed(Entries, W0),
-%                        {ok, H, Content, R1} = osiris_log:read_header0(R0),
-%                        [_, _, D, _] = fake_chunk(Entries, ?LINE, 1, 100),
-%                        ?assertEqual(iolist_to_binary(D), Content),
-%                        {H, W1, R1}
-%                end,
-%                fun(#{w := W0, r := R}) ->
-%                        %% assume we are now using the correct filter size
-%                        %% (this setting stays the same for the next tests)
-%                        R0 = osiris_log:read_ahead_hints(R, 1, FSize),
-%                        %% data just bigger than the first limit
-%                        EData = binary:copy(<<"a">>, MES1 + 1),
-%                        Entries = [{<<"banana">>, EData}],
-%                        {_, W1} = write_committed(Entries, W0),
-%                        {ok, H, Content, R1} = osiris_log:read_header0(R0),
-%                        case FSize =:= DFS of
-%                            true ->
-%                                %% default filter size: still does not fit
-%                                ?assertEqual(undefined, Content);
-%                            false ->
-%                                %% with the correct filter size, we now read
-%                                %% a bit further than with the first limit
-%                                [_, _, D, _] = fake_chunk(Entries, ?LINE, 1, 100),
-%                                ?assertEqual(iolist_to_binary(D), Content)
-%                        end,
-%                        {H, W1, R1}
-%                end,
-%                fun(#{w := W0, r := R0}) ->
-%                        %% data exactly fits in the read ahead
-%                        EData = binary:copy(<<"a">>, MES1),
-%                        Entries = [{<<"banana">>, EData}],
-%                        {_, W1} = write_committed(Entries, W0),
-%                        {ok, H, Content, R1} = osiris_log:read_header0(R0),
-%                        [_, _, D, _] = fake_chunk(Entries, ?LINE, 1, 100),
-%                        ?assertEqual(iolist_to_binary(D), Content),
-%                        {H, W1, R1}
-%                end,
-%                fun(#{w := W0, r := R0}) ->
-%                        %% we use the "new" max entry size
-%                        %% data do not fit in the read ahead
-%                        EData = binary:copy(<<"a">>, MES2 + 1),
-%                        Entries = [{<<"banana">>, EData}],
-%                        {_, W1} = write_committed(Entries, W0),
-%                        {ok, H, Content, R1} = osiris_log:read_header0(R0),
-%                        ?assertEqual(undefined, Content),
-%                        {H, W1, R1}
-%                end,
-%                fun(#{w := W0, r := R0}) ->
-%                        %% we use the "new" max entry size
-%                        %% data exactly fits in the read ahead
-%                        EData = binary:copy(<<"a">>, MES2),
-%                        Entries = [{<<"banana">>, EData}],
-%                        {_, W1} = write_committed(Entries, W0),
-%                        {ok, H, Content, R1} = osiris_log:read_header0(R0),
-%                        [_, _, D, _] = fake_chunk(Entries, ?LINE, 1, 100),
-%                        ?assertEqual(iolist_to_binary(D), Content),
-%                        {H, W1, R1}
-%                end
-%               ],
-%               #{w := Wr1, r := Rd2} = run_read_ahead_tests(Tests, offset, FSize,
-%                                                            Wr0, Rd1),
-%               osiris_log:close(Rd2),
-%               osiris_log:close(Wr1)
-%       end, FilterSizes),
-%     ok.
+    RaOnOff = [true, false],
+    RTypes = [offset, data],
+    FSize = ?DEFAULT_FILTER_SIZE,
+    Conf0 = ?config(osiris_conf, Config),
+    #{dir := Dir0} = Conf0,
+    lists:foreach(fun({RaOn, RType}) ->
+                          Dir1 = filename:join(Dir0, io_lib:format("ra_on_~p", [RaOn])),
+                          Conf1 = Conf0#{dir => Dir1},
+                          Wr0 = osiris_log:init(Conf1),
+                          Shared = osiris_log:get_shared(Wr0),
+                          RConf = Conf1#{shared => Shared, transport => tcp,
+                                         options => #{read_ahead => RaOn}},
+                          {ok, Rd0} = init_reader(RType, RConf),
+
+                          {CS, SS, _} = CSC = client_server_connect(),
+
+                          #{w := Wr1, r := Rd1} = run_read_ahead_tests(Tests, RType,
+                                                                       FSize, Wr0, Rd0,
+                                                                       #{ss => SS,
+                                                                         cs => CS,
+                                                                         ra_on => RaOn}),
+
+                          client_server_close(CSC),
+
+                          osiris_log:close(Rd1),
+                          osiris_log:close(Wr1)
+                  end, [{RaOn, RType} || RaOn <- RaOnOff, RType <- RTypes]),
+    ok.
 
 %% Utility
 
@@ -2432,6 +2367,24 @@ init_reader(offset, Conf) ->
 init_reader(data, Conf) ->
     osiris_log:init_data_reader({0, empty}, Conf).
 
+client_server_connect() ->
+    %% server, we will read stream data from this socket
+    {ok, SLS} = gen_tcp:listen(0, [binary, {packet, 0},
+                                   {active, false}]),
+    {ok, Port} = inet:port(SLS),
+
+    %% client, osiris will send to this socket
+    {ok, CS} = gen_tcp:connect("localhost", Port,
+                               [binary, {packet, 0}]),
+
+    {ok, SS} = gen_tcp:accept(SLS),
+
+    {CS, SS, SLS}.
+
+client_server_close({CS, SS, SLS}) ->
+    ok = gen_tcp:close(CS),
+    ok = gen_tcp:close(SS),
+    ok = gen_tcp:close(SLS).
 
 run_read_ahead_tests(Tests, RType, FSize, Wr0, Rd0) ->
     run_read_ahead_tests(Tests, RType, FSize, Wr0, Rd0, #{}).

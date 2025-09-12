@@ -422,7 +422,8 @@
          filter_size = ?DEFAULT_FILTER_SIZE :: osiris_bloom:filter_size()
          }).
 -record(ra,
-        {size = ?HEADER_SIZE_B + ?DEFAULT_FILTER_SIZE :: non_neg_integer(),
+        {on = true :: boolean(),
+         size = ?HEADER_SIZE_B + ?DEFAULT_FILTER_SIZE :: non_neg_integer(),
          buf :: undefined | {Pos :: non_neg_integer(), binary()}
         }).
 -record(read,
@@ -1057,6 +1058,7 @@ init_data_reader_at(ChunkId, FilePos, File,
                       readers_counter_fun := CountersFun} = Config) ->
     case file:open(File, [raw, binary, read]) of
         {ok, Fd} ->
+            RaOn = ra_on(Config),
             Cnt = make_counter(Config),
             counters:put(Cnt, ?C_OFFSET, ChunkId - 1),
             CountersFun(1),
@@ -1074,7 +1076,8 @@ init_data_reader_at(ChunkId, FilePos, File,
                             next_offset = ChunkId,
                             chunk_selector = all,
                             position = FilePos,
-                            transport = maps:get(transport, Config, tcp)},
+                            transport = maps:get(transport, Config, tcp),
+                            read_ahead = #ra{on = RaOn}},
                       fd = Fd}};
         Err ->
             Err
@@ -1274,8 +1277,7 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                         name := Name,
                         shared := Shared,
                         readers_counter_fun := ReaderCounterFun,
-                        options := Options} =
-                      Conf) ->
+                        options := Options} = Conf) ->
     {ok, Fd} = open(SegmentFile, [raw, binary, read]),
     Cnt = make_counter(Conf),
     ReaderCounterFun(1),
@@ -1285,6 +1287,7 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                         _ ->
                             undefined
                     end,
+    RaOn = ra_on(Conf),
     {ok, #?MODULE{cfg = #cfg{directory = Dir,
                              counter = Cnt,
                              counter_id = counter_id(Conf),
@@ -1298,7 +1301,8 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                                                          user_data),
                                next_offset = NextChunkId,
                                transport = maps:get(transport, Options, tcp),
-                               filter = FilterMatcher},
+                               filter = FilterMatcher,
+                               read_ahead = #ra{on = RaOn}},
                   fd = Fd}}.
 
 %% Searches the index files backwards for the ID of the last user chunk.
@@ -2934,7 +2938,7 @@ read_header_with_ra(#?MODULE{cfg = #cfg{directory = Dir,
                                         shared = Shared},
                              mode = #read{next_offset = NextChId0,
                                           position = Pos,
-                                          read_ahead = Ra0} = Read0,
+                                          read_ahead = Ra0 = #ra{on = RaOn}} = Read0,
                              current_file = CurFile,
                              fd = Fd} = State) ->
     case ra_read(Pos, ?HEADER_SIZE_B, Ra0) of
@@ -2965,7 +2969,7 @@ read_header_with_ra(#?MODULE{cfg = #cfg{directory = Dir,
                                 {ok, Fd2} ->
                                     ok = file:close(Fd),
                                     Read = Read0#read{next_offset = NextChId,
-                                                      read_ahead = #ra{},
+                                                      read_ahead = #ra{on = RaOn},
                                                       position = ?LOG_HEADER_SIZE},
                                     read_header0(State#?MODULE{current_file = SegFile,
                                                                fd = Fd2,
@@ -3326,13 +3330,14 @@ ra_read(ReadPos, Len, #ra{buf = {Pos, Data}})
 ra_read(_Pos, _Len, _Ra) ->
     undefined.
 
-ra_update_size(undefined, _FilterSize, LastDataSize, #ra{size = Sz} = Ra)
+ra_update_size(undefined, _FilterSize, LastDataSize,
+               #ra{on = true, size = Sz} = Ra)
   when Sz < ?READ_AHEAD_LIMIT andalso
        LastDataSize < ?READ_AHEAD_LIMIT ->
     %% no filter and last data size was small so enable data read ahead
     Ra#ra{size = ?READ_AHEAD_LIMIT};
 ra_update_size(undefined, _FilterSize, LastDataSize,
-               #ra{size = ?READ_AHEAD_LIMIT} = Ra)
+               #ra{on = true, size = ?READ_AHEAD_LIMIT} = Ra)
   when LastDataSize < ?READ_AHEAD_LIMIT ->
     Ra;
 ra_update_size(_Filter, FilterSize, _LastDataSize, #ra{size = Sz} = Ra) ->
@@ -3353,6 +3358,11 @@ ra_fill(Fd, Pos, #ra{size = Sz} = Ra) ->
         Err ->
             Err
     end.
+
+ra_on(#{options := #{read_ahead := false}}) ->
+    false;
+ra_on(_) ->
+    true.
 
 generate_log(Msg, MsgsPerChunk, NumMessages, Directory) ->
     Name = filename:basename(Directory),
