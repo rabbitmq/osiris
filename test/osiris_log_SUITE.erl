@@ -39,6 +39,7 @@ all_tests() ->
      subbatch_compressed,
      iterator_read_chunk,
      iterator_read_chunk_with_read_ahead,
+     iterator_read_chunk_with_read_ahead_2,
      iterator_read_chunk_mixed_sizes_with_credit,
      read_chunk_parsed,
      read_chunk_parsed_2,
@@ -385,13 +386,62 @@ iterator_read_chunk_mixed_sizes_with_credit(Config) ->
     osiris_log:close(S1),
     ok.
 
+iterator_read_chunk_with_read_ahead_2(Config) ->
+    %% the test makes sure reading ahead on header reading does not break
+    %% the iterator
+    Conf = ?config(osiris_conf, Config),
+    Writer = osiris_log:init(Conf),
+    Shared = osiris_log:get_shared(Writer),
+    RConf = Conf#{shared => Shared},
+    {ok, R} = osiris_log:init_offset_reader(0, RConf),
+    D1 = crypto:strong_rand_bytes(1024),
+    D2 = crypto:strong_rand_bytes(1024),
+    D3 = crypto:strong_rand_bytes(1024),
+    D4 = crypto:strong_rand_bytes(1024),
+    D5 = crypto:strong_rand_bytes(1024),
+    D6 = crypto:strong_rand_bytes(1024),
+    Tests =
+    [
+     fun(write, #{w := W0}) ->
+             %% this enables read ahead
+             {_, W1} = write_committed([D2, D1], W0),
+             {_, W2} = write_committed([D5, D4, D3], W1),
+             {_, W3} = write_committed([D6], W2),
+             W3;
+        (read, #{r := R0, tracer := T} = Ctx) ->
+             %% small chunk should enable read ahead
+             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0, 1),
+             {{_, D1}, I1} = osiris_log:iterator_next(I0),
+             {{_, D2}, I2} = osiris_log:iterator_next(I1),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
+
+             {ok, _, I3, R2} = osiris_log:chunk_iterator(R1, 1, I2),
+             {{_, D3}, I4} = osiris_log:iterator_next(I3),
+             {{_, D4}, I5} = osiris_log:iterator_next(I4),
+             {{_, D5}, I6} = osiris_log:iterator_next(I5),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I6)),
+
+             {ok, _, I7, R3} = osiris_log:chunk_iterator(R2, 1, I6),
+             {{_, D6}, I8} = osiris_log:iterator_next(I7),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I8)),
+
+             ?assertEqual(3, osiris_tracer:call_count(T)),
+             Ctx#{r => R3, i => I8}
+     end
+    ],
+    #{w := Wr1, r := Rd1} = run_read_ahead_tests(Tests, offset,
+                                                 ?DEFAULT_FILTER_SIZE, Writer, R),
+    osiris_log:close(Rd1),
+    osiris_log:close(Wr1),
+    ok.
+
 iterator_read_chunk_with_read_ahead(Config) ->
     %% the test makes sure reading ahead on header reading does not break
     %% the iterator
     RAL = 4096, %% read ahead limit
     Conf = ?config(osiris_conf, Config),
-    W = osiris_log:init(Conf),
-    Shared = osiris_log:get_shared(W),
+    Writer = osiris_log:init(Conf),
+    Shared = osiris_log:get_shared(Writer),
     RConf = Conf#{shared => Shared},
     {ok, R} = osiris_log:init_offset_reader(0, RConf),
     Tests =
@@ -400,43 +450,42 @@ iterator_read_chunk_with_read_ahead(Config) ->
              EntriesRev = [<<"hi">>, <<"ho">>],
              {_, W1} = write_committed(EntriesRev, W0),
              W1;
-        (read, #{r := R0, tracer := T}) ->
+        (read, #{r := R0, tracer := T} = Ctx) ->
              %% small chunk, managed to read it with the filter read-ahead
              {ok, _, I0, R1} = osiris_log:chunk_iterator(R0, 2),
              {{_, <<"ho">>}, I1} = osiris_log:iterator_next(I0),
              {{_, <<"hi">>}, I2} = osiris_log:iterator_next(I1),
              ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
-             ct:pal("I0 ~p", [I2]),
              ?assertEqual(1, osiris_tracer:call_count(T)),
-             R1
+             Ctx#{r => R1, i => I2}
      end,
      fun(write, #{w := W0}) ->
              EntriesRev = [<<"foo">>, <<"bar">>],
              {_, W1} = write_committed(EntriesRev, W0),
              W1;
-        (read, #{r := R0, tracer := T}) ->
+        (read, #{r := R0, tracer := T, i := PrevI} = Ctx) ->
              %% not enough read-ahead data, we have to read from file
-             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0, 2),
+             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0, 2, PrevI),
              {{_, <<"bar">>}, I1} = osiris_log:iterator_next(I0),
              {{_, <<"foo">>}, I2} = osiris_log:iterator_next(I1),
              ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
              ?assertEqual(1, osiris_tracer:call_count(T)),
-             R1
+             Ctx#{r => R1, i => I2}
      end,
      fun(write, #{w := W0}) ->
              E1 = binary:copy(<<"b">>, RAL - 200),
              EntriesRev = [E1 , <<"aaa">>],
              {_, W1} = write_committed(EntriesRev, W0),
              W1;
-        (read, #{r := R0, tracer := T}) ->
+        (read, #{r := R0, tracer := T, i := PrevI} = Ctx) ->
              %% this one has been read ahead
              E1 = binary:copy(<<"b">>, RAL - 200),
-             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0),
+             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0, 1, PrevI),
              {{_, <<"aaa">>}, I1} = osiris_log:iterator_next(I0),
              {{_, E1}, I2} = osiris_log:iterator_next(I1),
              ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
              ?assertEqual(0, osiris_tracer:call_count(T)),
-             R1
+             Ctx#{r => R1, i => I2}
      end,
      fun(write, #{w := W0}) ->
              %% this one is too big to be read ahead
@@ -444,19 +493,37 @@ iterator_read_chunk_with_read_ahead(Config) ->
              EntriesRev = [E1 , <<"aaa">>],
              {_, W1} = write_committed(EntriesRev, W0),
              W1;
-        (read, #{r := R0, tracer := T}) ->
+        (read, #{r := R0, tracer := T, i := PrevI} = Ctx) ->
              E1 = binary:copy(<<"b">>, RAL * 2),
-             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0),
+             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0, 1, PrevI),
              {{_, <<"aaa">>}, I1} = osiris_log:iterator_next(I0),
              {{_, E1}, I2} = osiris_log:iterator_next(I1),
              ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
              ?assertEqual(1, osiris_tracer:call_count(T)),
-             R1
+             Ctx#{r => R1, i => I2}
+     end,
+     fun(write, #{w := W0}) ->
+             EntriesRev = [<<"hiiiiiiiiiiiiiiiii">>,
+                           <<"hooooooooooooooooo">>],
+             {_, W1} = write_committed(EntriesRev, W0),
+             {_, W} = write_committed([<<"hum">>], W1),
+             W;
+        (read, #{r := R0, tracer := T, i := PrevI} = Ctx) ->
+             %% small chunk, managed to read it with the filter read-ahead
+             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0, 1, PrevI),
+             {{_, <<"hooooooooooooooooo">>}, I1} = osiris_log:iterator_next(I0),
+             {{_, <<"hiiiiiiiiiiiiiiiii">>}, I2} = osiris_log:iterator_next(I1),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
+             {ok, _, I3, R2} = osiris_log:chunk_iterator(R1, 1, I2),
+             {{_, <<"hum">>}, I4} = osiris_log:iterator_next(I3),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I4)),
+             ?assertEqual(2, osiris_tracer:call_count(T)),
+             Ctx#{r => R2, i => I4}
      end
     ],
 
     #{w := Wr1, r := Rd1} = run_read_ahead_tests(Tests, offset,
-                                                 ?DEFAULT_FILTER_SIZE, W, R),
+                                                 ?DEFAULT_FILTER_SIZE, Writer, R),
     osiris_log:close(Rd1),
     osiris_log:close(Wr1),
     ok.
@@ -545,9 +612,6 @@ read_header(Config) ->
                    data_size := _,
                    trailer_size := 0},
                  H1),
-    % debugger:start(),
-    % int:i(osiris_log),
-    % int:break(osiris_log, 2908),
     {ok, H2, R3} = osiris_log:read_header(R2),
     ?assertMatch(#{chunk_id := 2,
                    epoch := 1,
@@ -2400,9 +2464,18 @@ run_read_ahead_tests(Tests, RType, FSize, Wr0, Rd0, Ctx0) ->
                             ct:pal("Read ahead test ~p, reading...", [N]),
                             Tracer = osiris_tracer:start([{file, pread, '_'},
                                                           {file, sendfile, '_'}]),
-                            R0 = F(read, Ctx#{tracer => Tracer}),
+                            Res = F(read, Ctx#{tracer => Tracer}),
                             osiris_tracer:stop(Tracer),
-                            {N + 1, Ctx#{r => R0, rtype => RType, fsize => FSize}}
+                            CtxOut = case is_map(Res) of
+                                         true ->
+                                             %% full context returned
+                                             Res;
+                                         false ->
+                                             %% assume osiris log reader
+                                             Ctx#{r => Res}
+                                     end,
+
+                            {N + 1, CtxOut}
                     end, {1, Ctx0#{r => Rd0, rtype => RType, fsize => FSize}}, Tests),
     maps:merge(W, R).
 
