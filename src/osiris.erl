@@ -66,8 +66,11 @@
     {abs, offset()} |
     offset() |
     {timestamp, timestamp()}.
+-type retention_fun() :: fun((IdxFile :: file:filename_all()) -> boolean()).
 -type retention_spec() ::
-    {max_bytes, non_neg_integer()} | {max_age, milliseconds()}.
+    {max_bytes, non_neg_integer()} |
+    {max_age, milliseconds()} |
+    {'fun', retention_fun()}.
 -type writer_id() :: binary().
 -type batch() :: {batch, NumRecords :: non_neg_integer(),
                   compression_type(),
