@@ -2207,14 +2207,15 @@ evaluate_retention(Dir, Specs) when is_binary(Dir) ->
     ?DEBUG_(<<>>," (~w) completed in ~fms", [Specs, Time/1_000]),
     Result.
 
-evaluate_retention0(IdxFiles, []) ->
-    IdxFiles;
-evaluate_retention0(IdxFiles, [{max_bytes, MaxSize} | Specs]) ->
-    RemIdxFiles = eval_max_bytes(IdxFiles, MaxSize),
-    evaluate_retention0(RemIdxFiles, Specs);
-evaluate_retention0(IdxFiles, [{max_age, Age} | Specs]) ->
-    RemIdxFiles = eval_age(IdxFiles, Age),
-    evaluate_retention0(RemIdxFiles, Specs).
+evaluate_retention0(IdxFiles, Specs) ->
+    lists:foldl(
+      fun ({max_bytes, MaxSize}, RemIdxFiles) ->
+              eval_max_bytes(RemIdxFiles, MaxSize);
+          ({max_age, Age}, RemIdxFiles) ->
+              eval_age(RemIdxFiles, Age);
+          ({'fun', Fun}, RemIdxFiles) ->
+              eval_retention_fun(RemIdxFiles, Fun)
+      end, IdxFiles, Specs).
 
 eval_age([_] = IdxFiles, _Age) ->
     IdxFiles;
@@ -2278,6 +2279,13 @@ file_size_or_zero(Path) ->
         {error, enoent} ->
             0
     end.
+
+eval_retention_fun([], _) ->
+    [];
+eval_retention_fun(IdxFiles, Fun) ->
+    {ToDelete, ToKeep} = Fun(IdxFiles),
+    _ = [ok = delete_segment_from_index(Idx) || Idx <- ToDelete],
+    ToKeep.
 
 last_epoch_chunk_ids(Name, IdxFiles) ->
     T1 = erlang:monotonic_time(),

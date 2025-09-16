@@ -66,8 +66,12 @@
     {abs, offset()} |
     offset() |
     {timestamp, timestamp()}.
+-type retention_fun() :: fun((IdxFiles :: [file:filename_all()]) ->
+    {ToDelete :: [file:filename_all()], ToKeep :: [file:filename_all()]}).
 -type retention_spec() ::
-    {max_bytes, non_neg_integer()} | {max_age, milliseconds()}.
+    {max_bytes, non_neg_integer()} |
+    {max_age, milliseconds()} |
+    {'fun', retention_fun()}.
 -type writer_id() :: binary().
 -type batch() :: {batch, NumRecords :: non_neg_integer(),
                   compression_type(),
@@ -89,6 +93,7 @@
               tracking_id/0,
               offset_spec/0,
               retention_spec/0,
+              retention_fun/0,
               timestamp/0,
               writer_id/0,
               data/0,
