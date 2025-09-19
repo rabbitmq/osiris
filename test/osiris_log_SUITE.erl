@@ -2199,7 +2199,7 @@ read_ahead_send_file_filter(Config) ->
     RAL = 4096, %% read ahead limit
     HS = ?HEADER_SIZE_B,
     %% we store the entry size on 4 bytes, so we must substract them from the data size
-    MaxEntrySize = RAL - 4 - HS,
+    MaxEntrySize = RAL - 11 - HS,
     DFS = ?DEFAULT_FILTER_SIZE,
     % FilterSizes = [DFS * 2],
     FilterSizes = [DFS, DFS * 2],
@@ -2307,8 +2307,25 @@ read_ahead_send_file_filter(Config) ->
                   {_, W1} = write_committed(Entries, W0),
                   W1;
              (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
-                  %% we still read ahead, so we read a small chunk at once
+                  %% read ahead is disabled, but will be reenabled
                   Entries = [{<<"banana">>, <<"aaa">>}],
+                  [_, _, D, _] = ra_fake_chunk(Entries),
+                  {ok, R1} = osiris_log:send_file(CS, R0),
+                  {ok, Read} = recv(SS, byte_size(D) + HS),
+                  ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+                  ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
+                  ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+                  R1
+          end,
+          fun(write, #{w := W0}) ->
+                  EData = binary:copy(<<"b">>, MES1 div 2),
+                  Entries = [{<<"banana">>, EData}],
+                  {_, W1} = write_committed(Entries, W0),
+                  W1;
+             (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
+                  %% previous chunk enabled read ahead
+                  EData = binary:copy(<<"b">>, MES1 div 2),
+                  Entries = [{<<"banana">>, EData}],
                   [_, _, D, _] = ra_fake_chunk(Entries),
                   {ok, R1} = osiris_log:send_file(CS, R0),
                   {ok, Read} = recv(SS, byte_size(D) + HS),
@@ -2324,7 +2341,6 @@ read_ahead_send_file_filter(Config) ->
                   W1;
              (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
                   %% large chunk, we had the header already,
-                  %% but we must use sendfile for the data
                   EData = binary:copy(<<"b">>, MES1 * 2),
                   Entries = [{<<"banana">>, EData}],
                   [_, _, D, _] = ra_fake_chunk(Entries),
@@ -2332,25 +2348,6 @@ read_ahead_send_file_filter(Config) ->
                   {ok, Read} = recv(SS, byte_size(D) + HS),
                   ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
                   ?assertEqual(0, osiris_tracer:call_count(T, file, pread)),
-                  ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
-                  R1
-          end,
-          fun(write, #{w := W0}) ->
-                  EData = binary:copy(<<"b">>, MES1 div 2),
-                  Entries = [{<<"banana">>, EData}],
-                  {_, W1} = write_committed(Entries, W0),
-                  W1;
-             (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
-                  %% we don't read ahead anymore because the previous chunk was large
-                  %% so we read the header and use sendfile,
-                  %% even for a small chunk
-                  EData = binary:copy(<<"b">>, MES1 div 2),
-                  Entries = [{<<"banana">>, EData}],
-                  [_, _, D, _] = ra_fake_chunk(Entries),
-                  {ok, R1} = osiris_log:send_file(CS, R0),
-                  {ok, Read} = recv(SS, byte_size(D) + HS),
-                  ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
-                  ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
                   ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
                   R1
           end

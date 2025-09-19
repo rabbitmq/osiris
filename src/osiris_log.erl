@@ -3354,15 +3354,17 @@ ra_read(ReadPos, Len, #ra{buf = {Pos, Data}})
 ra_read(_Pos, _Len, _Ra) ->
     undefined.
 
-ra_update_size(undefined, _FilterSize, LastDataSize,
+ra_update_size(undefined, FilterSize, LastDataSize,
                #ra{on = true, size = Sz} = Ra)
   when Sz < ?READ_AHEAD_LIMIT andalso
-       LastDataSize < ?READ_AHEAD_LIMIT ->
+       LastDataSize =< (?READ_AHEAD_LIMIT - ?HEADER_SIZE_B -
+                       FilterSize - ?REC_HDR_SZ_SUBBATCH_B) ->
     %% no filter and last data size was small so enable data read ahead
     Ra#ra{size = ?READ_AHEAD_LIMIT};
-ra_update_size(undefined, _FilterSize, LastDataSize,
+ra_update_size(undefined, FilterSize, LastDataSize,
                #ra{on = true, size = ?READ_AHEAD_LIMIT} = Ra)
-  when LastDataSize < ?READ_AHEAD_LIMIT ->
+  when LastDataSize =< (?READ_AHEAD_LIMIT - ?HEADER_SIZE_B -
+                        FilterSize - ?REC_HDR_SZ_SUBBATCH_B) ->
     Ra;
 ra_update_size(_Filter, FilterSize, _LastDataSize, #ra{size = Sz} = Ra) ->
     case FilterSize + ?HEADER_SIZE_B of
@@ -3444,6 +3446,16 @@ ra_update_size_test() ->
 
     ?assertMatch(#ra{size = DefSize},
                  ra_update_size("a filter", ?DEFAULT_FILTER_SIZE, 100, Ra0)),
+
+    %% we need to ensure that if we enable read ahead we can at least fulfil
+    %% the prior chunk including header filter and record length header
+    MaxEnablingDataSize = ?READ_AHEAD_LIMIT - ?HEADER_SIZE_B - ?DEFAULT_FILTER_SIZE - ?REC_HDR_SZ_SUBBATCH_B,
+    ?assertMatch(#ra{size = DefSize},
+                 ra_update_size(undefined, ?DEFAULT_FILTER_SIZE, MaxEnablingDataSize + 1 ,
+                                Ra0)),
+    ?assertMatch(#ra{size = ?READ_AHEAD_LIMIT},
+                 ra_update_size(undefined, ?DEFAULT_FILTER_SIZE, MaxEnablingDataSize,
+                                Ra0)),
     ok.
 
 part_test() ->
