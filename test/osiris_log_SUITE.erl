@@ -38,6 +38,8 @@ all_tests() ->
      subbatch,
      subbatch_compressed,
      iterator_read_chunk,
+     iterator_read_chunk_with_read_ahead,
+     iterator_read_chunk_with_read_ahead_2,
      iterator_read_chunk_mixed_sizes_with_credit,
      read_chunk_parsed,
      read_chunk_parsed_2,
@@ -92,7 +94,10 @@ all_tests() ->
      init_partial_writes,
      init_with_unexpected_file,
      overview_with_missing_segment,
-     overview_with_missing_index_at_start
+     overview_with_missing_index_at_start,
+     read_ahead_send_file,
+     read_ahead_send_file_filter,
+     read_ahead_send_file_on_off
     ].
 
 groups() ->
@@ -268,6 +273,9 @@ write_batch_with_filters_variable_size(Config) ->
     osiris_log_shared:set_committed_chunk_id(Shared, 2), %% second chunk index
     {ok, F0} = osiris_log:init_offset_reader(0, add_filter(<<"banana">>, Conf)),
     {[{0, <<"hi">>}, _], F1} = osiris_log:read_chunk_parsed(F0),
+    % debugger:start(),
+    % int:i(osiris_log),
+    % int:break(osiris_log, 2908),
     {[{2, <<"hi">>}, _], F2} = osiris_log:read_chunk_parsed(F1),
     osiris_log:close(F2),
     ok.
@@ -278,7 +286,6 @@ add_filter(Filter, #{options := Opts} = Conf) ->
 add_filter(Filter, MatchUnfiltered, #{options := Opts} = Conf) ->
     Conf#{options => Opts#{filter_spec => #{filters => [Filter],
                                             match_unfiltered => MatchUnfiltered}}}.
-
 
 subbatch(Config) ->
     Conf = ?config(osiris_conf, Config),
@@ -302,7 +309,6 @@ subbatch(Config) ->
     osiris_log:close(S1),
     osiris_log:close(R1),
     ok.
-
 
 subbatch_compressed(Config) ->
     Conf = ?config(osiris_conf, Config),
@@ -342,14 +348,17 @@ iterator_read_chunk(Config) ->
     EntriesRev = [Batch,
                   <<"ho">>,
                   {<<"filter">>, <<"hi">>}],
-    {ChId, _S1} = write_committed(EntriesRev, S0),
-    {ok, _H, I0, _R2} = osiris_log:chunk_iterator(R1),
+    {ChId, S1} = write_committed(EntriesRev, S0),
+    {ok, _H, I0, R2} = osiris_log:chunk_iterator(R1),
     HoOffs = ChId + 1,
     BatchOffs = ChId + 2,
     {{ChId, <<"hi">>}, I1} = osiris_log:iterator_next(I0),
+
     {{HoOffs, <<"ho">>}, I2} = osiris_log:iterator_next(I1),
     {{BatchOffs, Batch}, I} = osiris_log:iterator_next(I2),
     ?assertMatch(end_of_chunk, osiris_log:iterator_next(I)),
+    osiris_log:close(R2),
+    osiris_log:close(S1),
     ok.
 
 iterator_read_chunk_mixed_sizes_with_credit(Config) ->
@@ -363,16 +372,174 @@ iterator_read_chunk_mixed_sizes_with_credit(Config) ->
     EntriesRev = [Big,
                   <<"ho">>,
                   {<<"filter">>, <<"hi">>}],
-    {ChId, _S1} = write_committed(EntriesRev, S0),
+    {ChId, S1} = write_committed(EntriesRev, S0),
     %% this is a less than ideal case where we have one large and two very
-    %% small entries inthe same batch. The read ahead only
-    {ok, _H, I0, _R2} = osiris_log:chunk_iterator(R1, 2),
+    %% small entries in the same batch. We read ahead only the 2 first entries.
+    {ok, _H, I0, R2} = osiris_log:chunk_iterator(R1, 2),
     HoOffs = ChId + 1,
     BigOffs = ChId + 2,
     {{ChId, <<"hi">>}, I1} = osiris_log:iterator_next(I0),
     {{HoOffs, <<"ho">>}, I2} = osiris_log:iterator_next(I1),
     {{BigOffs, Big}, I} = osiris_log:iterator_next(I2),
     ?assertMatch(end_of_chunk, osiris_log:iterator_next(I)),
+    osiris_log:close(R2),
+    osiris_log:close(S1),
+    ok.
+
+iterator_read_chunk_with_read_ahead(Config) ->
+    RAL = 4096, %% read ahead limit
+    Conf = ?config(osiris_conf, Config),
+    Writer = osiris_log:init(Conf),
+    Shared = osiris_log:get_shared(Writer),
+    RConf = Conf#{shared => Shared},
+    {ok, R} = osiris_log:init_offset_reader(0, RConf),
+    Tests =
+    [
+     fun(write, #{w := W0}) ->
+             EntriesRev = [<<"hi">>, <<"ho">>],
+             {_, W1} = write_committed(EntriesRev, W0),
+             W1;
+        (read, #{r := R0, tracer := T} = Ctx) ->
+             %% small chunk, managed to read it with the filter read-ahead
+             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0, 2),
+             {{_, <<"ho">>}, I1} = osiris_log:iterator_next(I0),
+             {{_, <<"hi">>}, I2} = osiris_log:iterator_next(I1),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
+             ?assertEqual(1, osiris_tracer:call_count(T)),
+             Ctx#{r => R1, i => I2}
+     end,
+     fun(write, #{w := W0}) ->
+             EntriesRev = [<<"foo">>, <<"bar">>],
+             {_, W1} = write_committed(EntriesRev, W0),
+             W1;
+        (read, #{r := R0, tracer := T, i := PrevI} = Ctx) ->
+             %% not enough read-ahead data, we have to read from file
+             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0, 2, PrevI),
+             {{_, <<"bar">>}, I1} = osiris_log:iterator_next(I0),
+             {{_, <<"foo">>}, I2} = osiris_log:iterator_next(I1),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
+             ?assertEqual(1, osiris_tracer:call_count(T)),
+             Ctx#{r => R1, i => I2}
+     end,
+     fun(write, #{w := W0}) ->
+             E1 = binary:copy(<<"b">>, RAL - 200),
+             EntriesRev = [E1 , <<"aaa">>],
+             {_, W1} = write_committed(EntriesRev, W0),
+             W1;
+        (read, #{r := R0, tracer := T, i := PrevI} = Ctx) ->
+             %% this one has been read ahead
+             E1 = binary:copy(<<"b">>, RAL - 200),
+             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0, 1, PrevI),
+             {{_, <<"aaa">>}, I1} = osiris_log:iterator_next(I0),
+             {{_, E1}, I2} = osiris_log:iterator_next(I1),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
+             ?assertEqual(0, osiris_tracer:call_count(T)),
+             Ctx#{r => R1, i => I2}
+     end,
+     fun(write, #{w := W0}) ->
+             %% this one is too big to be read ahead
+             E1 = binary:copy(<<"b">>, RAL * 2),
+             EntriesRev = [E1 , <<"aaa">>],
+             {_, W1} = write_committed(EntriesRev, W0),
+             W1;
+        (read, #{r := R0, tracer := T, i := PrevI} = Ctx) ->
+             E1 = binary:copy(<<"b">>, RAL * 2),
+             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0, 1, PrevI),
+             {{_, <<"aaa">>}, I1} = osiris_log:iterator_next(I0),
+             {{_, E1}, I2} = osiris_log:iterator_next(I1),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
+             ?assertEqual(1, osiris_tracer:call_count(T)),
+             Ctx#{r => R1, i => I2}
+     end,
+     fun(write, #{w := W0}) ->
+             EntriesRev = [<<"hiiiiiiiiiiiiiiiii">>,
+                           <<"hooooooooooooooooo">>],
+             {_, W1} = write_committed(EntriesRev, W0),
+             {_, W} = write_committed([<<"hum">>], W1),
+             W;
+        (read, #{r := R0, tracer := T, i := PrevI} = Ctx) ->
+             %% small chunk, managed to read it with the filter read-ahead
+             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0, 1, PrevI),
+             {{_, <<"hooooooooooooooooo">>}, I1} = osiris_log:iterator_next(I0),
+             {{_, <<"hiiiiiiiiiiiiiiiii">>}, I2} = osiris_log:iterator_next(I1),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
+             {ok, _, I3, R2} = osiris_log:chunk_iterator(R1, 1, I2),
+             {{_, <<"hum">>}, I4} = osiris_log:iterator_next(I3),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I4)),
+             ?assertEqual(2, osiris_tracer:call_count(T)),
+             Ctx#{r => R2, i => I4}
+     end
+    ],
+
+    #{w := Wr1, r := Rd1} = run_read_ahead_tests(Tests, offset,
+                                                 ?DEFAULT_FILTER_SIZE, Writer, R),
+    osiris_log:close(Rd1),
+    osiris_log:close(Wr1),
+    ok.
+
+iterator_read_chunk_with_read_ahead_2(Config) ->
+    %% this tests a specific optimization in read ahead
+    Conf0 = ?config(osiris_conf, Config),
+    #{dir := Dir0} = Conf0,
+    D1 = crypto:strong_rand_bytes(1024),
+    D2 = crypto:strong_rand_bytes(1024),
+    D3 = crypto:strong_rand_bytes(1024),
+    D4 = crypto:strong_rand_bytes(1024),
+    D5 = crypto:strong_rand_bytes(1024),
+    D6 = crypto:strong_rand_bytes(1024),
+    Tests =
+    [
+     fun(write, #{w := W0}) ->
+             %% this enables read ahead
+             {_, W1} = write_committed([D2, D1], W0),
+             {_, W2} = write_committed([D5, D4, D3], W1),
+             {_, W3} = write_committed([D6], W2),
+             W3;
+        (read, #{r := R0, tracer := T, ra := Ra} = Ctx) ->
+             %% small chunk should enable read ahead
+             {ok, _, I0, R1} = osiris_log:chunk_iterator(R0, 1),
+             {{_, D1}, I1} = osiris_log:iterator_next(I0),
+             {{_, D2}, I2} = osiris_log:iterator_next(I1),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2)),
+
+             {ok, _, I3, R2} = osiris_log:chunk_iterator(R1, 1, I2),
+             {{_, D3}, I4} = osiris_log:iterator_next(I3),
+             {{_, D4}, I5} = osiris_log:iterator_next(I4),
+             {{_, D5}, I6} = osiris_log:iterator_next(I5),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I6)),
+
+             {ok, _, I7, R3} = osiris_log:chunk_iterator(R2, 1, I6),
+             {{_, D6}, I8} = osiris_log:iterator_next(I7),
+             ?assertMatch(end_of_chunk, osiris_log:iterator_next(I8)),
+
+             case Ra of
+                 true ->
+                     ?assertEqual(3, osiris_tracer:call_count(T));
+                 false ->
+                     ?assertEqual(6, osiris_tracer:call_count(T))
+             end,
+
+             Ctx#{r => R3, i => I8}
+     end
+    ],
+
+    RaOnOff = [true, false],
+    [begin
+         Dir1 = filename:join(Dir0, io_lib:format("~p", [Ra])),
+         Conf1 = Conf0#{dir => Dir1},
+         Writer = osiris_log:init(Conf1),
+         Shared = osiris_log:get_shared(Writer),
+         RConf = Conf1#{shared => Shared, options => #{read_ahead => Ra}},
+         {ok, R} = osiris_log:init_offset_reader(0, RConf),
+
+         #{w := Wr1, r := Rd1} = run_read_ahead_tests(Tests, offset,
+                                                      ?DEFAULT_FILTER_SIZE,
+                                                      Writer, R,
+                                                      #{ra => Ra}),
+         osiris_log:close(Rd1),
+         osiris_log:close(Wr1)
+     end || Ra <- RaOnOff],
+
     ok.
 
 read_chunk_parsed(Config) ->
@@ -1071,7 +1238,7 @@ accept_chunk_inital_offset(Config) ->
     Conf = ?config(osiris_conf, Config),
 
 
-    Ch1 = fake_chunk([<<"blob1">>], ?LINE, 1, 100),
+    Ch1 = fake_chunk_bin([<<"blob1">>], ?LINE, 1, 100),
 
     F0 = osiris_log:init(Conf#{initial_offset => 100}, acceptor),
     F1 = osiris_log:accept_chunk(Ch1, F0),
@@ -1092,7 +1259,7 @@ accept_chunk_iolist_header_in_first_element(Config) ->
     Conf = ?config(osiris_conf, Config),
 
 
-    <<Head:48/binary, Res/binary>> = fake_chunk([{<<"filter">>, <<"blob1">>}],
+    <<Head:48/binary, Res/binary>> = fake_chunk_bin([{<<"filter">>, <<"blob1">>}],
                                                 ?LINE, 1, 100),
     Ch1 = [Head, Res],
     F0 = osiris_log:init(Conf#{initial_offset => 100}, acceptor),
@@ -1879,7 +2046,448 @@ overview_with_missing_index_at_start(Config) ->
                         filename:join(?config(dir, Config), "*.index")))),
     ok.
 
+read_ahead_send_file(Config) ->
+    RAL = 4096, %% read ahead limit
+    HS = ?HEADER_SIZE_B,
+    Tests =
+    [
+     fun(write, #{w := W0}) ->
+             Entries = [<<"hiiiiiiiii">>, <<"hooooooo">>],
+             {_, W1} = write_committed(Entries, W0),
+             W1;
+        (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
+             %% first chunk, we read the header and used sendfile
+             Entries = [<<"hiiiiiiiii">>, <<"hooooooo">>],
+             [_, _, D, _] = ra_fake_chunk(Entries),
+             {ok, R1} = osiris_log:send_file(CS, R0),
+             {ok, Read} = recv(SS, byte_size(D) + HS),
+             ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+             ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
+             ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+             R1
+     end,
+     fun(write, #{w := W0}) ->
+             {_, W1} = write_committed([<<"hi">>, <<"ho">>], W0),
+             W1;
+        (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
+             %% small chunk, we'll read it ahead, no sendfile
+             [_, _, D, _] = ra_fake_chunk([<<"hi">>, <<"ho">>]),
+             {ok, R1} = osiris_log:send_file(CS, R0),
+             {ok, Read} = recv(SS, byte_size(D) + HS),
+             ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+             ?assertEqual(1, osiris_tracer:call_count(T)),
+             R1
+     end,
+     fun(write, #{w := W0}) ->
+             Entries = [<<"foo">>, binary:copy(<<"b">>, RAL * 2)],
+             {_, W1} = write_committed(Entries, W0),
+             W1;
+        (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
+             %% large chunk, we read ahead the header before,
+             %% but we'll use sendfile for the data
+             Entries = [<<"foo">>, binary:copy(<<"b">>, RAL * 2)],
+             [_, _, D, _] = ra_fake_chunk(Entries),
+             {ok, R1} = osiris_log:send_file(CS, R0),
+             {ok, Read} = recv(SS, byte_size(D) + HS),
+             ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+             ?assertEqual(0, osiris_tracer:call_count(T, file, pread)),
+             ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+             R1
+     end,
+     fun(write, #{w := W0}) ->
+             Entries = [<<"ho">>, {<<"banana">>, <<"hi">>}],
+             {_, W1} = write_committed(Entries, W0),
+             W1;
+        (read, #{r := R0, cs := CS, ss := SS, fsize := FSize, rtype := RType,
+                 tracer := T}) ->
+             %% chunk with a non-empty filter
+             %% data are small enough, they should be read with the header
+             {ok, R1} = osiris_log:send_file(CS, R0),
+             Entries = [<<"ho">>, {<<"banana">>, <<"hi">>}],
+             [_, BloomD, ED, _] = ra_fake_chunk(Entries, FSize),
+             Expected = case RType of
+                            data ->
+                                %% we expect the bloom filter data
+                                <<BloomD/binary, ED/binary>>;
+                            offset ->
+                                ED
+                        end,
+             {ok, Read} = recv(SS, byte_size(Expected) + HS),
+             ?assertEqual(Expected, binary:part(Read, HS, byte_size(Read) - HS)),
+             %% no read ahead from before, and need a second read for the filter
+             ?assertEqual(2, osiris_tracer:call_count(T)),
+             ?assertEqual(2, osiris_tracer:call_count(T, file, pread)),
+             R1
+     end,
+     fun(write, #{w := W0}) ->
+             Entries = [binary:copy(<<"a">>, RAL div 2 - HS * 3)],
+             {_, W1} = write_committed(Entries, W0),
+             W1;
+        (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
+             %% chunk about half the size of the read ahead limit
+             %% we read it ahead already
+             {ok, R1} = osiris_log:send_file(CS, R0),
+             Entries = [binary:copy(<<"a">>, RAL div 2 - HS * 3)],
+             [_, _, D, _] = ra_fake_chunk(Entries),
+             {ok, Read} = recv(SS, byte_size(D) + HS),
+             ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+             ?assertEqual(0, osiris_tracer:call_count(T)),
+             R1
+     end,
+     fun(write, #{w := W0}) ->
+             Entries = [binary:copy(<<"b">>, RAL div 2 - HS * 3)],
+             {_, W1} = write_committed(Entries, W0),
+             W1;
+        (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
+             %% chunk about half the size of the read ahead limit
+             %% we read it ahead already
+             {ok, R1} = osiris_log:send_file(CS, R0),
+             Entries = [binary:copy(<<"b">>, RAL div 2 - HS * 3)],
+             [_, _, D, _] = ra_fake_chunk(Entries),
+             {ok, Read} = recv(SS, byte_size(D) + HS),
+             ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+             ?assertEqual(0, osiris_tracer:call_count(T)),
+             R1
+     end,
+     fun(write, #{w := W0}) ->
+             Entries = [binary:copy(<<"c">>, RAL + 1000)],
+             {_, W1} = write_committed(Entries, W0),
+             W1;
+        (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
+             %% this one is too big to be read ahead fully
+             {ok, R1} = osiris_log:send_file(CS, R0),
+             Entries = [binary:copy(<<"c">>, RAL + 1000)],
+             [_, _, D, _] = ra_fake_chunk(Entries),
+             {ok, Read} = recv(SS, byte_size(D) + HS),
+             ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+             %% we had the header already, no need to read
+             ?assertEqual(0, osiris_tracer:call_count(T, file, pread)),
+             %% send the data with sendfile
+             ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+             R1
+     end
+    ],
+
+    FilterSizes = [?DEFAULT_FILTER_SIZE, ?DEFAULT_FILTER_SIZE * 2],
+    RTypes = [data, offset],
+    Conf0 = ?config(osiris_conf, Config),
+    #{dir := Dir0} = Conf0,
+    [begin
+         Dir1 = filename:join(Dir0, io_lib:format("~p~p", [FSize, RType])),
+         Conf1 = Conf0#{dir => Dir1,
+                        filter_size => FSize},
+         Wr0 = osiris_log:init(Conf1),
+         Shared = osiris_log:get_shared(Wr0),
+         RConf = Conf1#{shared => Shared, transport => tcp},
+         {ok, Rd0} = init_reader(RType, RConf),
+
+         {CS, SS, _} = CSC = client_server_connect(),
+
+         #{w := Wr1, r := Rd1} = run_read_ahead_tests(Tests, RType,
+                                                      FSize, Wr0, Rd0,
+                                                      #{ss => SS,
+                                                        cs => CS}),
+
+         client_server_close(CSC),
+
+         osiris_log:close(Rd1),
+         osiris_log:close(Wr1)
+     end || FSize <- FilterSizes, RType <- RTypes],
+    ok.
+
+read_ahead_send_file_filter(Config) ->
+    RAL = 4096, %% read ahead limit
+    HS = ?HEADER_SIZE_B,
+    %% we store the entry size on 4 bytes, so we must substract them from the data size
+    MaxEntrySize = RAL - 11 - HS,
+    DFS = ?DEFAULT_FILTER_SIZE,
+    % FilterSizes = [DFS * 2],
+    FilterSizes = [DFS, DFS * 2],
+    Conf0 = ?config(osiris_conf, Config),
+    #{dir := Dir0} = Conf0,
+
+    [begin
+         Dir1 = filename:join(Dir0, integer_to_list(FSize)),
+         Conf1 = Conf0#{dir => Dir1,
+                        filter_size => FSize},
+         Wr0 = osiris_log:init(Conf1),
+         Shared = osiris_log:get_shared(Wr0),
+         RConf = Conf1#{shared => Shared, transport => tcp},
+         {ok, Rd0} = osiris_log:init_offset_reader(first, RConf),
+
+         %% compute the max entry size
+         %% (meaning we don't read ahead enough above this entry size)
+         %% first we don't know the actual filter size in the stream,
+         %% so we assume the default filter size
+         %% this "reduces" the max size of data we can read in the case
+         %% of a larger-than-default filter size, because of the extra
+         %% bytes that belong to the filter
+         MES1 = MaxEntrySize - FSize,
+         %% then the max entry becomes accurate, whatever the actual filter size
+         MES2 = MaxEntrySize,
+         ct:pal("Using MES1 ~p, MES2 ~p for filter size ~p",
+                [MES1, MES2, FSize]),
+
+         Tests =
+         [
+          fun(write, #{w := W0}) ->
+                  Entries = [{<<"banana">>, <<"aaa">>}],
+                  {_, W1} = write_committed(Entries, W0),
+                  W1;
+             (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
+                  Entries = [{<<"banana">>, <<"aaa">>}],
+                  [_, _, D, _] = ra_fake_chunk(Entries),
+                  {ok, R1} = osiris_log:send_file(CS, R0),
+                  {ok, Read} = recv(SS, byte_size(D) + HS),
+                  ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+                  case FSize =:= DFS of
+                      true ->
+                          %% just read the header
+                          ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
+                          %% no read ahead data yet, used sendfile
+                          ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile));
+                      false ->
+                          %% read the header, but the filter data did not fit,
+                          %% so read again
+                          ?assertEqual(2, osiris_tracer:call_count(T, file, pread)),
+                          %% read the data in the second pread call
+                          ?assertEqual(0, osiris_tracer:call_count(T, file, sendfile))
+                  end,
+                  R1
+          end,
+          fun(write, #{w := W0}) ->
+                  EData = binary:copy(<<"a">>, MES1),
+                  Entries = [{<<"banana">>, EData}],
+                  {_, W1} = write_committed(Entries, W0),
+                  W1;
+             (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
+                  %% data just fit in the read ahead
+                  EData = binary:copy(<<"a">>, MES1),
+                  Entries = [{<<"banana">>, EData}],
+                  [_, _, D, _] = ra_fake_chunk(Entries),
+                  {ok, R1} = osiris_log:send_file(CS, R0),
+                  {ok, Read} = recv(SS, byte_size(D) + HS),
+                  ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+                  case FSize =:= DFS of
+                      true ->
+                          %% just read the header
+                          ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
+                          %% data just fit in the read ahead, no sendfile
+                          ?assertEqual(0, osiris_tracer:call_count(T, file, sendfile));
+                      false ->
+                          %% read the header ahead previously
+                          %% (because it could not read the filter at first,
+                          %% which triggered the read-ahead)
+                          ?assertEqual(0, osiris_tracer:call_count(T, file, pread)),
+                          ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile))
+                  end,
+                  R1
+          end,
+          fun(write, #{w := W0}) ->
+                  EData = binary:copy(<<"b">>, MES1 + 1),
+                  Entries = [{<<"banana">>, EData}],
+                  {_, W1} = write_committed(Entries, W0),
+                  W1;
+             (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
+                  %% data do not fit in the read ahead
+                  EData = binary:copy(<<"b">>, MES1 + 1),
+                  Entries = [{<<"banana">>, EData}],
+                  [_, _, D, _] = ra_fake_chunk(Entries),
+                  {ok, R1} = osiris_log:send_file(CS, R0),
+                  {ok, Read} = recv(SS, byte_size(D) + HS),
+                  ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+                  %% just read the header
+                  ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
+                  %% large chunk, used sendfile
+                  ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+                  R1
+          end,
+          fun(write, #{w := W0}) ->
+                  Entries = [{<<"banana">>, <<"aaa">>}],
+                  {_, W1} = write_committed(Entries, W0),
+                  W1;
+             (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
+                  %% read ahead is disabled, but will be reenabled
+                  Entries = [{<<"banana">>, <<"aaa">>}],
+                  [_, _, D, _] = ra_fake_chunk(Entries),
+                  {ok, R1} = osiris_log:send_file(CS, R0),
+                  {ok, Read} = recv(SS, byte_size(D) + HS),
+                  ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+                  ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
+                  ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+                  R1
+          end,
+          fun(write, #{w := W0}) ->
+                  EData = binary:copy(<<"b">>, MES1 div 2),
+                  Entries = [{<<"banana">>, EData}],
+                  {_, W1} = write_committed(Entries, W0),
+                  W1;
+             (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
+                  %% previous chunk enabled read ahead
+                  EData = binary:copy(<<"b">>, MES1 div 2),
+                  Entries = [{<<"banana">>, EData}],
+                  [_, _, D, _] = ra_fake_chunk(Entries),
+                  {ok, R1} = osiris_log:send_file(CS, R0),
+                  {ok, Read} = recv(SS, byte_size(D) + HS),
+                  ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+                  ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
+                  ?assertEqual(0, osiris_tracer:call_count(T, file, sendfile)),
+                  R1
+          end,
+          fun(write, #{w := W0}) ->
+                  EData = binary:copy(<<"b">>, MES1 * 2),
+                  Entries = [{<<"banana">>, EData}],
+                  {_, W1} = write_committed(Entries, W0),
+                  W1;
+             (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
+                  %% large chunk, we had the header already,
+                  EData = binary:copy(<<"b">>, MES1 * 2),
+                  Entries = [{<<"banana">>, EData}],
+                  [_, _, D, _] = ra_fake_chunk(Entries),
+                  {ok, R1} = osiris_log:send_file(CS, R0),
+                  {ok, Read} = recv(SS, byte_size(D) + HS),
+                  ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+                  ?assertEqual(0, osiris_tracer:call_count(T, file, pread)),
+                  ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+                  R1
+          end
+         ],
+
+         {CS, SS, _} = CSC = client_server_connect(),
+
+         #{w := Wr1, r := Rd1} = run_read_ahead_tests(Tests, offset, FSize,
+                                                      Wr0, Rd0, #{ss => SS,
+                                                                  cs => CS}),
+
+         client_server_close(CSC),
+
+         osiris_log:close(Rd1),
+         osiris_log:close(Wr1)
+     end || FSize <- FilterSizes],
+
+    ok.
+
+read_ahead_send_file_on_off(Config) ->
+    HS = ?HEADER_SIZE_B,
+    Tests =
+    [
+     fun(write, #{w := W0}) ->
+             Entries = [<<"hiiiiiiiii">>, <<"hooooooo">>],
+             {_, W1} = write_committed(Entries, W0),
+             W1;
+        (read, #{r := R0, cs := CS, ss := SS, tracer := T}) ->
+             %% first chunk, we read the header and used sendfile
+             Entries = [<<"hiiiiiiiii">>, <<"hooooooo">>],
+             [_, _, D, _] = ra_fake_chunk(Entries),
+             {ok, R1} = osiris_log:send_file(CS, R0),
+             {ok, Read} = recv(SS, byte_size(D) + HS),
+             ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+             ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
+             ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+             R1
+     end,
+     fun(write, #{w := W0}) ->
+             {_, W1} = write_committed([<<"hi">>, <<"ho">>], W0),
+             W1;
+        (read, #{r := R0, cs := CS, ss := SS, tracer := T, ra_on := RaOn}) ->
+             [_, _, D, _] = ra_fake_chunk([<<"hi">>, <<"ho">>]),
+             {ok, R1} = osiris_log:send_file(CS, R0),
+             {ok, Read} = recv(SS, byte_size(D) + HS),
+             ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
+             case RaOn of
+                 true ->
+                     ?assertEqual(1, osiris_tracer:call_count(T));
+                 false ->
+                     ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
+                     ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile))
+             end,
+             R1
+     end
+    ],
+
+    RaOnOff = [true, false],
+    RTypes = [offset, data],
+    FSize = ?DEFAULT_FILTER_SIZE,
+    Conf0 = ?config(osiris_conf, Config),
+    #{dir := Dir0} = Conf0,
+    [begin
+         Dir1 = filename:join(Dir0, io_lib:format("ra_on_~p", [RaOn])),
+         Conf1 = Conf0#{dir => Dir1},
+         Wr0 = osiris_log:init(Conf1),
+         Shared = osiris_log:get_shared(Wr0),
+         RConf = Conf1#{shared => Shared, transport => tcp,
+                        options => #{read_ahead => RaOn}},
+         {ok, Rd0} = init_reader(RType, RConf),
+
+         {CS, SS, _} = CSC = client_server_connect(),
+
+         #{w := Wr1, r := Rd1} = run_read_ahead_tests(Tests, RType,
+                                                      FSize, Wr0, Rd0,
+                                                      #{ss => SS,
+                                                        cs => CS,
+                                                        ra_on => RaOn}),
+
+         client_server_close(CSC),
+
+         osiris_log:close(Rd1),
+         osiris_log:close(Wr1)
+     end || RaOn <- RaOnOff, RType <- RTypes],
+    ok.
+
 %% Utility
+
+init_reader(offset, Conf) ->
+    osiris_log:init_offset_reader(first, Conf);
+init_reader(data, Conf) ->
+    osiris_log:init_data_reader({0, empty}, Conf).
+
+client_server_connect() ->
+    %% server, we will read stream data from this socket
+    {ok, SLS} = gen_tcp:listen(0, [binary, {packet, 0},
+                                   {active, false}]),
+    {ok, Port} = inet:port(SLS),
+
+    %% client, osiris will send to this socket
+    {ok, CS} = gen_tcp:connect("localhost", Port,
+                               [binary, {packet, 0}]),
+
+    {ok, SS} = gen_tcp:accept(SLS),
+
+    {CS, SS, SLS}.
+
+client_server_close({CS, SS, SLS}) ->
+    ok = gen_tcp:close(CS),
+    ok = gen_tcp:close(SS),
+    ok = gen_tcp:close(SLS).
+
+run_read_ahead_tests(Tests, RType, FSize, Wr0, Rd0) ->
+    run_read_ahead_tests(Tests, RType, FSize, Wr0, Rd0, #{}).
+
+run_read_ahead_tests(Tests, RType, FSize, Wr0, Rd0, Ctx0) ->
+    {_, W} = lists:foldl(fun(F, {N, Ctx}) ->
+                                 ct:pal("Read ahead test ~p, writing...", [N]),
+                                 W  = F(write, Ctx),
+                                 {N + 1, Ctx#{w => W}}
+                         end, {1, Ctx0#{w => Wr0}}, Tests),
+    {_, R} =
+        lists:foldl(fun(F, {N, Ctx}) ->
+                            ct:pal("Read ahead test ~p, reading...", [N]),
+                            Tracer = osiris_tracer:start([{file, pread, '_'},
+                                                          {file, sendfile, '_'}]),
+                            Res = F(read, Ctx#{tracer => Tracer}),
+                            osiris_tracer:stop(Tracer),
+                            CtxOut = case is_map(Res) of
+                                         true ->
+                                             %% full context returned
+                                             Res;
+                                         false ->
+                                             %% assume osiris log reader
+                                             Ctx#{r => Res}
+                                     end,
+
+                            {N + 1, CtxOut}
+                    end, {1, Ctx0#{r => Rd0, rtype => RType, fsize => FSize}}, Tests),
+    maps:merge(W, R).
 
 truncate_at(File, Pos) ->
     {ok, Fd} = file:open(File, [raw, binary, read, write]),
@@ -1977,7 +2585,37 @@ delete_dir(Dir) ->
             ok
     end.
 
+ra_fake_chunk(Blobs) ->
+    ra_fake_chunk(Blobs, ?DEFAULT_FILTER_SIZE).
+
+ra_fake_chunk(Blobs, FSize) ->
+    [HD, BloomD, ED, TD] = fake_chunk(Blobs, ?LINE, 1, 100, FSize),
+    [iolist_to_binary(HD), iolist_to_binary(BloomD),
+     iolist_to_binary(ED), iolist_to_binary(TD)].
+
+fake_chunk_bin(Blobs, Ts, Epoch, NextChId) ->
+    iolist_to_binary(fake_chunk(Blobs, Ts, Epoch, NextChId)).
+
 fake_chunk(Blobs, Ts, Epoch, NextChId) ->
-    iolist_to_binary(
-      element(1,
-              osiris_log:make_chunk(Blobs, <<>>, 0, Ts, Epoch, NextChId, 16))).
+    fake_chunk(Blobs, Ts, Epoch, NextChId, ?DEFAULT_FILTER_SIZE).
+
+fake_chunk(Blobs, Ts, Epoch, NextChId, FSize) ->
+    element(1,
+            osiris_log:make_chunk(Blobs, <<>>, 0, Ts, Epoch, NextChId,
+                                  FSize)).
+
+recv(Socket, Expected) ->
+    recv(Socket, Expected, <<>>).
+
+recv(_Socket, 0, Acc) ->
+    Acc;
+recv(Socket, Expected, Acc) ->
+    case gen_tcp:recv(Socket, Expected, 10_000) of
+        {ok, Data} when byte_size(Data) == Expected ->
+            {ok, Data};
+        {ok, Data} when byte_size(Data) < Expected ->
+            {ok, recv(Socket, Expected - byte_size(Data),
+                      <<Acc/binary, Data/binary>>)};
+        Other ->
+            Other
+    end.

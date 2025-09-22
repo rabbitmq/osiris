@@ -9,6 +9,7 @@
 
          init_matcher/1,
          is_match/2,
+         filter_size/1,
 
          bit_set/2,
          make_hash/2
@@ -89,6 +90,10 @@ is_match(<<>>, #matcher{hashes = [Hash1 | _]}) ->
 is_match(_Filter, undefined) ->
     %% if no reader filter is set
     true.
+
+-spec filter_size(mstate()) -> non_neg_integer().
+filter_size(#matcher{current_bit_size = BitSz}) ->
+    BitSz div 8.
 
 
 -spec init(filter_size()) -> state().

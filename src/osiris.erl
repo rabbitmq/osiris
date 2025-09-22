@@ -82,7 +82,8 @@
 -type entry() :: binary() | batch().
 -type reader_options() :: #{transport => tcp | ssl,
                             chunk_selector => all | user_data,
-                            filter_spec => osiris_bloom:filter_spec()
+                            filter_spec => osiris_bloom:filter_spec(),
+                            read_ahead => boolean()
                            }.
 
 -export_type([name/0,
