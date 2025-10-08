@@ -12,7 +12,7 @@
 
 -export([init/1,
          init/2,
-         init_acceptor/3,
+         init_acceptor/2,
          write/2,
          write/3,
          write/5,
@@ -405,6 +405,9 @@
       position => non_neg_integer(),
       next_position => non_neg_integer()}.
 -type transport() :: tcp | ssl.
+-type overview() ::
+    #{range := range(),
+      epoch_offsets := [{epoch(), offset()}]}.
 
 %% holds static or rarely changing fields
 -record(cfg,
@@ -478,7 +481,8 @@
               config/0,
               counter_spec/0,
               transport/0,
-              header_map/0]).
+              header_map/0,
+              overview/0]).
 
 -spec directory(osiris:config() | list()) -> file:filename_all().
 directory(#{name := Name, dir := Dir}) ->
@@ -862,9 +866,9 @@ evaluate_tracking_snapshot(#?MODULE{mode = #write{type = writer}} = State0, Trk0
     end.
 
 % -spec
--spec init_acceptor(range(), list(), config()) ->
+-spec init_acceptor(overview(), config()) ->
     state().
-init_acceptor(Range, EpochOffsets0,
+init_acceptor(#{range := Range, epoch_offsets := EpochOffsets0},
               #{name := Name, dir := Dir} = Conf) ->
     %% truncate to first common last epoch offset
     %% * if the last local chunk offset has the same epoch but is lower
@@ -2116,7 +2120,7 @@ build_segment_info(SegFile, LastChunkPos, IdxFile) ->
     end.
 
 -spec overview(file:filename_all()) ->
-    {range(), [{epoch(), offset()}]}.
+    overview().
 overview(Dir) ->
     Files = list_dir(Dir),
     %% index files with matching segment
@@ -2125,11 +2129,11 @@ overview(Dir) ->
     %% explicitly filter these out
     case index_files_with_segment(lists:sort(Files), Dir, []) of
         [] ->
-            {empty, []};
+            #{range => empty,
+              epoch_offsets => []};
         IdxFiles ->
-            Range = offset_range_from_idx_files(IdxFiles),
-            EpochOffsets = last_epoch_chunk_ids(<<>>, IdxFiles),
-            {Range, EpochOffsets}
+            #{range => offset_range_from_idx_files(IdxFiles),
+              epoch_offsets => last_epoch_chunk_ids(<<>>, IdxFiles)}
     end.
 
 index_files_with_segment([], _, Acc) ->
