@@ -116,6 +116,9 @@ start_link(Config) ->
     Opts = [{reversed_batch, true}],
     gen_batch_server:start_link(undefined, Mod, Config, Opts).
 
+-spec overview(pid()) ->
+    {ok, osiris_log:overview()} |
+    {error, no_process}.
 overview(Pid) when node(Pid) == node() ->
     case erlang:is_process_alive(Pid) of
         true ->
