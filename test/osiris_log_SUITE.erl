@@ -697,6 +697,7 @@ write_multi_log(Config) ->
     OffRef = osiris_log:get_shared(S1),
     %% takes a single offset tracking data into account
     osiris_log_shared:set_committed_chunk_id(OffRef, NextOffset),
+    osiris_log_shared:set_last_chunk_id(OffRef, NextOffset - 10),
     %% ensure all records can be read
     {ok, R0} =
         osiris_log:init_offset_reader(first, Conf#{shared => OffRef}),
