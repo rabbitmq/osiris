@@ -55,7 +55,8 @@
          delete_directory/1,
          counter_fields/0,
          make_counter/1,
-         generate_log/4]).
+         generate_log/4,
+         parse_header/2]).
 
 -export([dump_init/1,
          dump_init_idx/1,
@@ -392,19 +393,19 @@
 -type offset_spec() :: osiris:offset_spec().
 -type retention_spec() :: osiris:retention_spec().
 -type header_map() ::
-    #{chunk_id => offset(),
-      epoch => epoch(),
-      type => chunk_type(),
-      crc => integer(),
-      num_records => non_neg_integer(),
-      num_entries => non_neg_integer(),
-      timestamp => osiris:timestamp(),
-      data_size => non_neg_integer(),
-      trailer_size => non_neg_integer(),
-      filter_size => 16..255,
-      header_data => binary(),
-      position => non_neg_integer(),
-      next_position => non_neg_integer()}.
+    #{chunk_id := offset(),
+      epoch := epoch(),
+      type := chunk_type(),
+      crc := integer(),
+      num_records := non_neg_integer(),
+      num_entries := non_neg_integer(),
+      timestamp := osiris:timestamp(),
+      data_size := non_neg_integer(),
+      trailer_size := non_neg_integer(),
+      filter_size := 16..255,
+      header_data := binary(),
+      position := non_neg_integer(),
+      next_position := non_neg_integer()}.
 -type transport() :: tcp | ssl.
 
 %% holds static or rarely changing fields
@@ -2991,7 +2992,8 @@ read_header_with_ra(#?MODULE{cfg = #cfg{directory = Dir,
     case ra_read(Pos, ?HEADER_SIZE_B, Ra0) of
         Bin when is_binary(Bin) andalso
                  byte_size(Bin) == ?HEADER_SIZE_B ->
-            parse_header(Bin, State);
+            {ok, Header} = parse_header(Bin, Pos),
+            read_header_with_ra0(Header, State);
         undefined ->
             case ra_fill(Fd, Pos, Ra0) of
                 {ok, Ra} ->
@@ -3028,60 +3030,36 @@ read_header_with_ra(#?MODULE{cfg = #cfg{directory = Dir,
             end
     end.
 
-parse_header(<<?MAGIC:4/unsigned,
-               ?VERSION:4/unsigned,
-               ChType:8/unsigned,
-               NumEntries:16/unsigned,
-               NumRecords:32/unsigned,
-               Timestamp:64/signed,
-               Epoch:64/unsigned,
-               NextChId0:64/unsigned,
-               Crc:32/integer,
-               DataSize:32/unsigned,
-               TrailerSize:32/unsigned,
-               FilterSize:8/unsigned,
-               _Reserved:24>> = HeaderData0,
-             #?MODULE{cfg = #cfg{counter = CntRef},
-                      fd = Fd,
-                      mode = #read{next_offset = NextChId0,
-                                   position = Pos,
-                                   filter = Filter,
-                                   read_ahead = Ra0} = Read0} = State0) ->
-
+read_header_with_ra0(#{chunk_id := NextChId0,
+                       num_records := NumRecords,
+                       data_size := DataSize,
+                       filter_size := FilterSize,
+                       next_position := NextPos} = Header,
+                     #?MODULE{cfg = #cfg{counter = CntRef},
+                              fd = Fd,
+                              mode = #read{next_offset = NextChId0,
+                                           position = Pos,
+                                           filter = Filter,
+                                           read_ahead = Ra0} = Read0} = State0) ->
     Ra1 = ra_update_size(Filter, FilterSize, DataSize, Ra0),
     case ra_read(Pos + ?HEADER_SIZE_B, FilterSize, Ra1) of
         undefined ->
             {ok, Ra} = ra_fill(Fd, Pos + ?HEADER_SIZE_B, Ra1),
-            parse_header(HeaderData0,
-                         State0#?MODULE{mode = Read0#read{read_ahead = Ra}});
+            State = State0#?MODULE{mode = Read0#read{read_ahead = Ra}},
+            read_header_with_ra0(Header, State);
         ChunkFilter ->
             counters:put(CntRef, ?C_OFFSET, NextChId0 + NumRecords),
             counters:add(CntRef, ?C_CHUNKS, 1),
-            NextPos = Pos + ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
 
             case osiris_bloom:is_match(ChunkFilter, Filter) of
                 true ->
-                    <<HeaderData:?HEADER_SIZE_B/binary, _/binary>> = HeaderData0,
                     State = case Ra1 of
                                 Ra0 ->
                                     State0;
                                 Ra ->
                                     State0#?MODULE{mode = Read0#read{read_ahead = Ra}}
                             end,
-                    {ok, #{chunk_id => NextChId0,
-                           epoch => Epoch,
-                           type => ChType,
-                           crc => Crc,
-                           num_records => NumRecords,
-                           num_entries => NumEntries,
-                           timestamp => Timestamp,
-                           data_size => DataSize,
-                           trailer_size => TrailerSize,
-                           header_data => HeaderData,
-                           filter_size => FilterSize,
-                           next_position => NextPos,
-                           position => Pos},
-                     State};
+                    {ok, Header, State};
                 false ->
                     Read = Read0#read{next_offset = NextChId0 + NumRecords,
                                       position = NextPos,
@@ -3097,6 +3075,40 @@ parse_header(<<?MAGIC:4/unsigned,
                     read_header0(State0#?MODULE{mode = Read})
             end
     end.
+
+-spec parse_header(binary(), Pos :: pos_integer()) ->
+    {ok, header_map()} |
+    {error, invalid_chunk_header}.
+parse_header(<<?MAGIC:4/unsigned,
+               ?VERSION:4/unsigned,
+               ChType:8/unsigned,
+               NumEntries:16/unsigned,
+               NumRecords:32/unsigned,
+               Timestamp:64/signed,
+               Epoch:64/unsigned,
+               NextChId0:64/unsigned,
+               Crc:32/integer,
+               DataSize:32/unsigned,
+               TrailerSize:32/unsigned,
+               FilterSize:8/unsigned,
+               _Reserved:24>> = HeaderData,
+             Pos) ->
+    NextPos = Pos + ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
+    {ok, #{chunk_id => NextChId0,
+           epoch => Epoch,
+           type => ChType,
+           crc => Crc,
+           num_records => NumRecords,
+           num_entries => NumEntries,
+           timestamp => Timestamp,
+           data_size => DataSize,
+           trailer_size => TrailerSize,
+           header_data => HeaderData,
+           filter_size => FilterSize,
+           next_position => NextPos,
+           position => Pos}};
+parse_header(_, _) ->
+    {error, invalid_chunk_header}.
 
 %% keep the previous value if the current one is 0 (i.e. no filter in the chunk)
 read_ahead_fsize(Previous, 0) ->
