@@ -12,7 +12,7 @@
 
 -export([init/1,
          init/2,
-         init_acceptor/3,
+         init_acceptor/2,
          write/2,
          write/3,
          write/5,
@@ -47,14 +47,25 @@
          get_default_max_segment_size_bytes/0,
          counters_ref/1,
          close/1,
-         overview/1,
          format_status/1,
+
          update_retention/2,
          evaluate_retention/2,
          directory/1,
          delete_directory/1,
          make_counter/1,
-         generate_log/4]).
+         generate_log/4,
+         parse_header/2]).
+
+-behaviour(osiris_log_manifest).
+%% osiris_log_manifest implementations
+-export([overview/1,
+         acceptor_manifest/2,
+         writer_manifest/1,
+         recover_tracking/3,
+         handle_event/2,
+         close_manifest/1,
+         delete/1]).
 
 -export([dump_init/1,
          dump_init_idx/1,
@@ -391,20 +402,23 @@
 -type offset_spec() :: osiris:offset_spec().
 -type retention_spec() :: osiris:retention_spec().
 -type header_map() ::
-    #{chunk_id => offset(),
-      epoch => epoch(),
-      type => chunk_type(),
-      crc => integer(),
-      num_records => non_neg_integer(),
-      num_entries => non_neg_integer(),
-      timestamp => osiris:timestamp(),
-      data_size => non_neg_integer(),
-      trailer_size => non_neg_integer(),
-      filter_size => 16..255,
-      header_data => binary(),
-      position => non_neg_integer(),
-      next_position => non_neg_integer()}.
+    #{chunk_id := offset(),
+      epoch := epoch(),
+      type := chunk_type(),
+      crc := integer(),
+      num_records := non_neg_integer(),
+      num_entries := non_neg_integer(),
+      timestamp := osiris:timestamp(),
+      data_size := non_neg_integer(),
+      trailer_size := non_neg_integer(),
+      filter_size := 16..255,
+      header_data := binary(),
+      position := non_neg_integer(),
+      next_position := non_neg_integer()}.
 -type transport() :: tcp | ssl.
+-type overview() ::
+    #{range := range(),
+      epoch_offsets := [{epoch(), offset()}]}.
 
 %% holds static or rarely changing fields
 -record(cfg,
@@ -420,7 +434,8 @@
          %% that will be included in snapshots written to new segments
          readers_counter_fun = fun(_) -> ok end :: function(),
          shared :: atomics:atomics_ref(),
-         filter_size = ?DEFAULT_FILTER_SIZE :: osiris_bloom:filter_size()
+         filter_size = ?DEFAULT_FILTER_SIZE :: osiris_bloom:filter_size(),
+         manifest_module = ?MODULE :: module()
          }).
 -record(ra,
         {on = true :: boolean(),
@@ -440,7 +455,8 @@
         {type = writer :: writer | acceptor,
          segment_size = {?LOG_HEADER_SIZE, 0} :: {non_neg_integer(), non_neg_integer()},
          current_epoch :: non_neg_integer(),
-         tail_info = {0, empty} :: osiris:tail_info()
+         tail_info = {0, empty} :: osiris:tail_info(),
+         manifest :: osiris_log_manifest:state()
         }).
 -record(?MODULE,
         {cfg :: #cfg{},
@@ -452,7 +468,7 @@
 %% record chunk_info does not map exactly to an index record (field 'num' differs)
 -record(chunk_info,
         {id :: offset(),
-         timestamp :: non_neg_integer(),
+         timestamp :: osiris:timestamp(),
          epoch :: epoch(),
          num :: non_neg_integer(),
          type :: chunk_type(),
@@ -471,11 +487,14 @@
 -opaque state() :: #?MODULE{}.
 
 -export_type([state/0,
+              chunk_type/0,
               chunk_iterator/0,
               range/0,
               config/0,
               counter_spec/0,
-              transport/0]).
+              transport/0,
+              header_map/0,
+              overview/0]).
 
 -spec directory(osiris:config() | list()) -> file:filename_all().
 directory(#{name := Name, dir := Dir}) ->
@@ -494,20 +513,11 @@ init(Config) ->
 -spec init(config(), writer | acceptor) -> state().
 init(#{dir := Dir,
        name := Name,
-       epoch := Epoch} = Config,
+       epoch := Epoch} = Config0,
      WriterType) ->
     %% scan directory for segments if in write mode
-    MaxSizeBytes = maps:get(max_segment_size_bytes, Config,
-                            ?DEFAULT_MAX_SEGMENT_SIZE_B),
-    MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks,
-                                        ?DEFAULT_MAX_SEGMENT_SIZE_C),
-    Retention = maps:get(retention, Config, []),
-    FilterSize = maps:get(filter_size, Config, ?DEFAULT_FILTER_SIZE),
     ?INFO("Stream: ~ts will use ~ts for osiris log data directory",
           [Name, Dir]),
-    ?DEBUG_(Name, "max_segment_size_bytes: ~b,
-           max_segment_size_chunks ~b, retention ~w, filter size ~b",
-            [MaxSizeBytes, MaxSizeChunks, Retention, FilterSize]),
     ok = filelib:ensure_dir(Dir),
     case file:make_dir(Dir) of
         ok ->
@@ -517,7 +527,25 @@ init(#{dir := Dir,
         Err ->
             throw(Err)
     end,
+    ok = maybe_fix_corrupted_files(Config0),
 
+    ManifestMod = manifest_module(),
+    {Manifest0, Config} = case Config0 of
+                              #{manifest := M} ->
+                                  {M, Config0};
+                              _ ->
+                                  ManifestMod:writer_manifest(Config0)
+                          end,
+
+    MaxSizeBytes = maps:get(max_segment_size_bytes, Config,
+                            ?DEFAULT_MAX_SEGMENT_SIZE_B),
+    MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks,
+                                        ?DEFAULT_MAX_SEGMENT_SIZE_C),
+    Retention = maps:get(retention, Config, []),
+    FilterSize = maps:get(filter_size, Config, ?DEFAULT_FILTER_SIZE),
+    ?DEBUG_(Name, "max_segment_size_bytes: ~b,
+           max_segment_size_chunks ~b, retention ~w, filter size ~b",
+            [MaxSizeBytes, MaxSizeChunks, Retention, FilterSize]),
     Cnt = make_counter(Config),
     %% initialise offset counter to -1 as 0 is the first offset in the log and
     %% it hasn't necessarily been written yet, for an empty log the first offset
@@ -539,8 +567,8 @@ init(#{dir := Dir,
                counter = Cnt,
                counter_id = counter_id(Config),
                shared = Shared,
-               filter_size = FilterSize},
-    ok = maybe_fix_corrupted_files(Config),
+               filter_size = FilterSize,
+               manifest_module = ManifestMod},
     DefaultNextOffset = case Config of
                             #{initial_offset := IO}
                               when WriterType == acceptor ->
@@ -557,6 +585,7 @@ init(#{dir := Dir,
                                           #write{type = WriterType,
                                                  tail_info = {DefaultNextOffset,
                                                               empty},
+                                                 manifest = Manifest0,
                                                  current_epoch = Epoch}});
         {NumSegments,
          #seg_info{first = #chunk_info{id = FstChId,
@@ -598,11 +627,14 @@ init(#{dir := Dir,
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, IdxEof} = file:position(IdxFd, eof),
             NumChunks = (IdxEof - ?IDX_HEADER_SIZE) div ?INDEX_RECORD_SIZE_B,
+            Event = {segment_opened, undefined, filename:basename(Filename)},
+            Manifest = ManifestMod:handle_event(Event, Manifest0),
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
                                 tail_info = TailInfo,
                                 segment_size = {Size, NumChunks},
+                                manifest = Manifest,
                                 current_epoch = Epoch},
                      current_file = filename:basename(Filename),
                      fd = SegFd,
@@ -622,10 +654,13 @@ init(#{dir := Dir,
             {ok, _} = file:position(IdxFd, ?IDX_HEADER_SIZE),
             osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
             osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
+            Event = {segment_opened, undefined, filename:basename(Filename)},
+            Manifest = ManifestMod:handle_event(Event, Manifest0),
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
                                 tail_info = {DefaultNextOffset, empty},
+                                manifest = Manifest,
                                 current_epoch = Epoch},
                      current_file = filename:basename(Filename),
                      fd = SegFd,
@@ -859,10 +894,10 @@ evaluate_tracking_snapshot(#?MODULE{mode = #write{type = writer}} = State0, Trk0
     end.
 
 % -spec
--spec init_acceptor(range(), list(), config()) ->
+-spec init_acceptor(overview(), config()) ->
     state().
-init_acceptor(Range, EpochOffsets0,
-              #{name := Name, dir := Dir} = Conf) ->
+init_acceptor(#{range := Range, epoch_offsets := EpochOffsets0} = Overview0,
+              #{name := Name, dir := Dir} = Conf0) ->
     %% truncate to first common last epoch offset
     %% * if the last local chunk offset has the same epoch but is lower
     %% than the last chunk offset then just attach at next offset.
@@ -873,6 +908,9 @@ init_acceptor(Range, EpochOffsets0,
     EpochOffsets =
         lists:reverse(
             lists:sort(EpochOffsets0)),
+    Overview = Overview0#{epoch_offsets := EpochOffsets},
+
+    {Manifest, Conf} = (manifest_module()):acceptor_manifest(Overview, Conf0),
 
     %% then truncate to
     IdxFiles = sorted_index_files(Dir),
@@ -884,7 +922,8 @@ init_acceptor(Range, EpochOffsets0,
                      {O, _} -> O
                  end,
     init(Conf#{initial_offset => InitOffset,
-               index_files => RemIdxFiles}, acceptor).
+               index_files => RemIdxFiles,
+               manifest => Manifest}, acceptor).
 
 chunk_id_index_scan(IdxFile, ChunkId)
   when ?IS_STRING(IdxFile) ->
@@ -1814,11 +1853,19 @@ needs_handling(_, _, _) ->
 
 -spec close(state()) -> ok.
 close(#?MODULE{cfg = #cfg{counter_id = CntId,
+                          manifest_module = ManifestMod,
                           readers_counter_fun = Fun},
                fd = SegFd,
-               index_fd = IdxFd}) ->
+               index_fd = IdxFd,
+               mode = Mode}) ->
     close_fd(IdxFd),
     close_fd(SegFd),
+    case Mode of
+        #write{manifest = Manifest} ->
+            ok = ManifestMod:close_manifest(Manifest);
+        _ ->
+            ok
+    end,
     Fun(-1),
     case CntId of
         undefined ->
@@ -1827,14 +1874,17 @@ close(#?MODULE{cfg = #cfg{counter_id = CntId,
             osiris_counters:delete(CntId)
     end.
 
-delete_directory(#{name := Name,
-                   dir := _} = Config) ->
+delete_directory(Config) ->
+    (manifest_module()):delete(Config).
+
+delete(#{name := Name,
+         dir := _} = Config) ->
     Dir = directory(Config),
     ?DEBUG_(Name, " deleting directory ~ts", [Dir]),
     delete_dir(Dir);
-delete_directory(#{name := Name}) ->
-    delete_directory(Name);
-delete_directory(Name) when ?IS_STRING(Name) ->
+delete(#{name := Name}) ->
+    delete(Name);
+delete(Name) when ?IS_STRING(Name) ->
     Dir = directory(Name),
     ?DEBUG_(Name, " deleting directory ~ts", [Dir]),
     delete_dir(Dir).
@@ -2115,7 +2165,7 @@ build_segment_info(SegFile, LastChunkPos, IdxFile) ->
     end.
 
 -spec overview(file:filename_all()) ->
-    {range(), [{epoch(), offset()}]}.
+    overview().
 overview(Dir) ->
     Files = list_dir(Dir),
     %% index files with matching segment
@@ -2124,11 +2174,11 @@ overview(Dir) ->
     %% explicitly filter these out
     case index_files_with_segment(lists:sort(Files), Dir, []) of
         [] ->
-            {empty, []};
+            #{range => empty,
+              epoch_offsets => []};
         IdxFiles ->
-            Range = offset_range_from_idx_files(IdxFiles),
-            EpochOffsets = last_epoch_chunk_ids(<<>>, IdxFiles),
-            {Range, EpochOffsets}
+            #{range => offset_range_from_idx_files(IdxFiles),
+              epoch_offsets => last_epoch_chunk_ids(<<>>, IdxFiles)}
     end.
 
 index_files_with_segment([], _, Acc) ->
@@ -2179,11 +2229,19 @@ format_status(#?MODULE{cfg = #cfg{directory = Dir,
 -spec update_retention([retention_spec()], state()) -> state().
 update_retention(Retention,
                  #?MODULE{cfg = #cfg{name = Name,
+                                     manifest_module = ?MODULE,
                                      retention = Retention0} = Cfg} = State0)
     when is_list(Retention) ->
     ?DEBUG_(Name, " from: ~w to ~w", [Retention0, Retention]),
     State = State0#?MODULE{cfg = Cfg#cfg{retention = Retention}},
-    trigger_retention_eval(State).
+    trigger_retention_eval(State);
+update_retention(Retention,
+                 #?MODULE{cfg = #cfg{manifest_module = ManifestMod},
+                          mode = #write{manifest = Manifest0} = Write0} =
+                 State0) ->
+    Event = {retention_updated, Retention},
+    Manifest = ManifestMod:handle_event(Event, Manifest0),
+    State0#?MODULE{mode = Write0#write{manifest = Manifest}}.
 
 -spec evaluate_retention(file:filename_all(), [retention_spec()]) ->
     {range(), FirstTimestamp :: osiris:timestamp(),
@@ -2205,14 +2263,15 @@ evaluate_retention(Dir, Specs) when is_binary(Dir) ->
     ?DEBUG_(<<>>," (~w) completed in ~fms", [Specs, Time/1_000]),
     Result.
 
-evaluate_retention0(IdxFiles, []) ->
-    IdxFiles;
-evaluate_retention0(IdxFiles, [{max_bytes, MaxSize} | Specs]) ->
-    RemIdxFiles = eval_max_bytes(IdxFiles, MaxSize),
-    evaluate_retention0(RemIdxFiles, Specs);
-evaluate_retention0(IdxFiles, [{max_age, Age} | Specs]) ->
-    RemIdxFiles = eval_age(IdxFiles, Age),
-    evaluate_retention0(RemIdxFiles, Specs).
+evaluate_retention0(IdxFiles, Specs) ->
+    lists:foldl(
+      fun ({max_bytes, MaxSize}, RemIdxFiles) ->
+              eval_max_bytes(RemIdxFiles, MaxSize);
+          ({max_age, Age}, RemIdxFiles) ->
+              eval_age(RemIdxFiles, Age);
+          ({'fun', Fun}, RemIdxFiles) ->
+              eval_retention_fun(RemIdxFiles, Fun)
+      end, IdxFiles, Specs).
 
 eval_age([_] = IdxFiles, _Age) ->
     IdxFiles;
@@ -2275,6 +2334,17 @@ file_size_or_zero(Path) ->
             Size;
         {error, enoent} ->
             0
+    end.
+
+eval_retention_fun([], _) ->
+    [];
+eval_retention_fun([IdxFile | Rest], Fun) ->
+    case Fun(IdxFile) of
+        true ->
+            ok = delete_segment_from_index(IdxFile),
+            eval_retention_fun(Rest, Fun);
+        false ->
+            Rest
     end.
 
 last_epoch_chunk_ids(Name, IdxFiles) ->
@@ -2471,11 +2541,13 @@ write_chunk(Chunk,
             Epoch,
             NumRecords,
             #?MODULE{cfg = #cfg{counter = CntRef,
+                                manifest_module = ManifestMod,
                                 shared = Shared} = Cfg,
                      fd = Fd,
                      index_fd = IdxFd,
                      mode =
                          #write{segment_size = {SegSizeBytes, SegSizeChunks},
+                                manifest = Manifest0,
                                 tail_info = {Next, _}} =
                              Write} =
                 State) ->
@@ -2505,9 +2577,19 @@ write_chunk(Chunk,
             counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
             counters:add(CntRef, ?C_CHUNKS, 1),
             maybe_set_first_offset(Next, Cfg),
+            ChunkInfo = #{id => Next,
+                          timestamp => Timestamp,
+                          epoch => Epoch,
+                          num => NumRecords,
+                          type => ChType,
+                          size => Size,
+                          pos => Cur},
+            Event = {chunk_written, ChunkInfo, Chunk},
+            Manifest = ManifestMod:handle_event(Event, Manifest0),
             State#?MODULE{mode =
                           Write#write{tail_info = {NextOffset,
                                                    {Epoch, Next, Timestamp}},
+                                      manifest = Manifest,
                                       segment_size = {SegSizeBytes + Size,
                                                       SegSizeChunks + 1}}}
     end.
@@ -2716,10 +2798,13 @@ make_file_name(N, Suff) ->
 
 open_new_segment(#?MODULE{cfg = #cfg{name = Name,
                                      directory = Dir,
-                                     counter = Cnt},
+                                     counter = Cnt,
+                                     manifest_module = ManifestMod},
                           fd = OldFd,
                           index_fd = OldIdxFd,
+                          current_file = OldFilename,
                           mode = #write{type = _WriterType,
+                                        manifest = Manifest0,
                                         tail_info = {NextOffset, _}} = Write} =
                  State0) ->
     _ = close_fd(OldFd),
@@ -2740,11 +2825,15 @@ open_new_segment(#?MODULE{cfg = #cfg{name = Name,
     {ok, _} = file:position(IdxFd, eof),
     counters:add(Cnt, ?C_SEGMENTS, 1),
 
+    Event = {segment_opened, OldFilename, Filename},
+    Manifest = ManifestMod:handle_event(Event, Manifest0),
+
     State0#?MODULE{current_file = Filename,
                    fd = Fd,
-                   %% reset segment_size counter
                    index_fd = IdxFd,
-                   mode = Write#write{segment_size = {?LOG_HEADER_SIZE, 0}}}.
+                   mode = Write#write{manifest = Manifest,
+                                      %% reset segment_size counter
+                                      segment_size = {?LOG_HEADER_SIZE, 0}}}.
 
 open_index_read(File) ->
     {ok, Fd} = open(File, [read, raw, binary, read_ahead]),
@@ -2889,23 +2978,29 @@ skip(Len, [B | L]) when Len > 0 ->
 -spec recover_tracking(state()) ->
     osiris_tracking:state().
 recover_tracking(#?MODULE{cfg = #cfg{directory = Dir,
+                                     manifest_module = ManifestMod,
                                      tracking_config = TrkConfig},
-                          current_file = File}) ->
+                          current_file = File,
+                          mode = #write{manifest = Manifest}}) ->
+    Trk = osiris_tracking:init(undefined, TrkConfig),
+    SegmentFile = filename:join(Dir, File),
+    ManifestMod:recover_tracking(Trk, SegmentFile, Manifest).
+
+recover_tracking(Trk0, SegmentFile, undefined) ->
     %% we need to open a new file handle here as we cannot use the one that is
     %% being used for appending to the segment as pread _may_ move the file
     %% position on some systems (such as windows)
-    {ok, Fd} = open(filename:join(Dir, File), [read, raw, binary]),
+    {ok, Fd} = open(SegmentFile, [read, raw, binary]),
     _ = file:advise(Fd, 0, 0, random),
     %% TODO: if the first chunk in the segment isn't a tracking snapshot and
     %% there are prior segments we could scan at least two segments increasing
     %% the chance of encountering a snapshot and thus ensure we don't miss any
     %% tracking entries
-    Trk0 = osiris_tracking:init(undefined, TrkConfig),
-    Trk = recover_tracking(Fd, Trk0, ?LOG_HEADER_SIZE),
+    Trk = recover_tracking0(Fd, Trk0, ?LOG_HEADER_SIZE),
     _ = file:close(Fd),
     Trk.
 
-recover_tracking(Fd, Trk0, Pos0) ->
+recover_tracking0(Fd, Trk0, Pos0) ->
     case file:pread(Fd, Pos0, ?HEADER_SIZE_B) of
         {ok,
          <<?MAGIC:4/unsigned,
@@ -2932,18 +3027,18 @@ recover_tracking(Fd, Trk0, Pos0) ->
                     Trk = osiris_tracking:append_trailer(ChunkId, Data, Trk0),
                     %% A tracking delta chunk will not have any writer data
                     %% so no need to parse writers here
-                    recover_tracking(Fd, Trk, NextPos);
+                    recover_tracking0(Fd, Trk, NextPos);
                 ?CHNK_TRK_SNAPSHOT ->
                     {ok, <<0:1, S:31, Data:S/binary>>} =
                         file:pread(Fd, Pos + FSize, Size),
                     Trk = osiris_tracking:init(Data, Trk0),
-                    recover_tracking(Fd, Trk, NextPos);
+                    recover_tracking0(Fd, Trk, NextPos);
                 ?CHNK_USER when TSize > 0 ->
                     {ok, TData} = file:pread(Fd, Pos + FSize + Size, TSize),
                     Trk = osiris_tracking:append_trailer(ChunkId, TData, Trk0),
-                    recover_tracking(Fd, Trk, NextPos);
+                    recover_tracking0(Fd, Trk, NextPos);
                 ?CHNK_USER ->
-                    recover_tracking(Fd, Trk0, NextPos)
+                    recover_tracking0(Fd, Trk0, NextPos)
             end;
         eof ->
             Trk0
@@ -2971,7 +3066,8 @@ read_header_with_ra(#?MODULE{cfg = #cfg{directory = Dir,
     case ra_read(Pos, ?HEADER_SIZE_B, Ra0) of
         Bin when is_binary(Bin) andalso
                  byte_size(Bin) == ?HEADER_SIZE_B ->
-            parse_header(Bin, State);
+            {ok, Header} = parse_header(Bin, Pos),
+            read_header_with_ra0(Header, State);
         undefined ->
             case ra_fill(Fd, Pos, Ra0) of
                 {ok, Ra} ->
@@ -3008,60 +3104,36 @@ read_header_with_ra(#?MODULE{cfg = #cfg{directory = Dir,
             end
     end.
 
-parse_header(<<?MAGIC:4/unsigned,
-               ?VERSION:4/unsigned,
-               ChType:8/unsigned,
-               NumEntries:16/unsigned,
-               NumRecords:32/unsigned,
-               Timestamp:64/signed,
-               Epoch:64/unsigned,
-               NextChId0:64/unsigned,
-               Crc:32/integer,
-               DataSize:32/unsigned,
-               TrailerSize:32/unsigned,
-               FilterSize:8/unsigned,
-               _Reserved:24>> = HeaderData0,
-             #?MODULE{cfg = #cfg{counter = CntRef},
-                      fd = Fd,
-                      mode = #read{next_offset = NextChId0,
-                                   position = Pos,
-                                   filter = Filter,
-                                   read_ahead = Ra0} = Read0} = State0) ->
-
+read_header_with_ra0(#{chunk_id := NextChId0,
+                       num_records := NumRecords,
+                       data_size := DataSize,
+                       filter_size := FilterSize,
+                       next_position := NextPos} = Header,
+                     #?MODULE{cfg = #cfg{counter = CntRef},
+                              fd = Fd,
+                              mode = #read{next_offset = NextChId0,
+                                           position = Pos,
+                                           filter = Filter,
+                                           read_ahead = Ra0} = Read0} = State0) ->
     Ra1 = ra_update_size(Filter, FilterSize, DataSize, Ra0),
     case ra_read(Pos + ?HEADER_SIZE_B, FilterSize, Ra1) of
         undefined ->
             {ok, Ra} = ra_fill(Fd, Pos + ?HEADER_SIZE_B, Ra1),
-            parse_header(HeaderData0,
-                         State0#?MODULE{mode = Read0#read{read_ahead = Ra}});
+            State = State0#?MODULE{mode = Read0#read{read_ahead = Ra}},
+            read_header_with_ra0(Header, State);
         ChunkFilter ->
             counters:put(CntRef, ?C_OFFSET, NextChId0 + NumRecords),
             counters:add(CntRef, ?C_CHUNKS, 1),
-            NextPos = Pos + ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
 
             case osiris_bloom:is_match(ChunkFilter, Filter) of
                 true ->
-                    <<HeaderData:?HEADER_SIZE_B/binary, _/binary>> = HeaderData0,
                     State = case Ra1 of
                                 Ra0 ->
                                     State0;
                                 Ra ->
                                     State0#?MODULE{mode = Read0#read{read_ahead = Ra}}
                             end,
-                    {ok, #{chunk_id => NextChId0,
-                           epoch => Epoch,
-                           type => ChType,
-                           crc => Crc,
-                           num_records => NumRecords,
-                           num_entries => NumEntries,
-                           timestamp => Timestamp,
-                           data_size => DataSize,
-                           trailer_size => TrailerSize,
-                           header_data => HeaderData,
-                           filter_size => FilterSize,
-                           next_position => NextPos,
-                           position => Pos},
-                     State};
+                    {ok, Header, State};
                 false ->
                     Read = Read0#read{next_offset = NextChId0 + NumRecords,
                                       position = NextPos,
@@ -3077,6 +3149,40 @@ parse_header(<<?MAGIC:4/unsigned,
                     read_header0(State0#?MODULE{mode = Read})
             end
     end.
+
+-spec parse_header(binary(), Pos :: pos_integer()) ->
+    {ok, header_map()} |
+    {error, invalid_chunk_header}.
+parse_header(<<?MAGIC:4/unsigned,
+               ?VERSION:4/unsigned,
+               ChType:8/unsigned,
+               NumEntries:16/unsigned,
+               NumRecords:32/unsigned,
+               Timestamp:64/signed,
+               Epoch:64/unsigned,
+               NextChId0:64/unsigned,
+               Crc:32/integer,
+               DataSize:32/unsigned,
+               TrailerSize:32/unsigned,
+               FilterSize:8/unsigned,
+               _Reserved:24>> = HeaderData,
+             Pos) ->
+    NextPos = Pos + ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
+    {ok, #{chunk_id => NextChId0,
+           epoch => Epoch,
+           type => ChType,
+           crc => Crc,
+           num_records => NumRecords,
+           num_entries => NumEntries,
+           timestamp => Timestamp,
+           data_size => DataSize,
+           trailer_size => TrailerSize,
+           header_data => HeaderData,
+           filter_size => FilterSize,
+           next_position => NextPos,
+           position => Pos}};
+parse_header(_, _) ->
+    {error, invalid_chunk_header}.
 
 %% keep the previous value if the current one is 0 (i.e. no filter in the chunk)
 read_ahead_fsize(Previous, 0) ->
@@ -3402,6 +3508,9 @@ ra_on(#{options := #{read_ahead := false}}) ->
 ra_on(_) ->
     true.
 
+manifest_module() ->
+    application:get_env(osiris, log_manifest, ?MODULE).
+
 generate_log(Msg, MsgsPerChunk, NumMessages, Directory) ->
     Name = filename:basename(Directory),
 
@@ -3433,6 +3542,16 @@ write_in_chunks(ToWrite, MsgsPerChunk, Msg, W0) when ToWrite > 0 ->
     write_in_chunks(ToWrite - MsgsPerChunk, MsgsPerChunk, Msg, W1);
 write_in_chunks(_, _, _, W) ->
     W.
+
+%% Default implementation of osiris_log_manifest:
+writer_manifest(Config) ->
+    {undefined, Config}.
+acceptor_manifest(_Overview, Config) ->
+    {undefined, Config}.
+handle_event(_Event, undefined) ->
+    undefined.
+close_manifest(undefined) ->
+    ok.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
