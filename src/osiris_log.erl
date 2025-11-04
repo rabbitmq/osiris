@@ -423,10 +423,9 @@
          filter_size = ?DEFAULT_FILTER_SIZE :: osiris_bloom:filter_size()
          }).
 -record(ra,
-        {on = true :: boolean(),
-         size = ?HEADER_SIZE_B + ?DEFAULT_FILTER_SIZE :: non_neg_integer(),
+        {size = ?HEADER_SIZE_B + ?DEFAULT_FILTER_SIZE :: non_neg_integer(),
          buf :: undefined | {Pos :: non_neg_integer(), binary()},
-         limit = ?DEFAULT_READ_AHEAD_LIMIT :: pos_integer()
+         limit = ?DEFAULT_READ_AHEAD_LIMIT :: non_neg_integer()
         }).
 -record(read,
         {type :: data | offset,
@@ -3335,7 +3334,8 @@ iter_read_ahead(Fd, Pos, MinReqSize, Credit0, DataSize, NumEntries,
                     %% needed to serve that, else we read up to the readahead
                     %% limit but not beyond the end of the chunk and not less
                     %% that the minimum request size
-                    MinSize = max(MinReqSize, min(ReadAheadLimit, DataSize)),
+                    MinSize = max(MinReqSize, min(ra_limit(ReadAheadLimit),
+                                                  DataSize)),
                     Size = max(MinSize, iter_guess_size(Credit0, NumEntries,
                                                         DataSize)),
                     {ok, Data} = file:pread(Fd, Pos, Size),
@@ -3364,15 +3364,17 @@ ra_read(_Pos, _Len, _Ra) ->
     undefined.
 
 ra_update_size(undefined, FilterSize, LastDataSize,
-               #ra{on = true, size = Sz, limit = Limit} = Ra)
-  when Sz < Limit andalso
+               #ra{size = Sz, limit = Limit} = Ra)
+  when Limit > 0 andalso
+       Sz < Limit andalso
        LastDataSize =< (Limit - ?HEADER_SIZE_B -
                        FilterSize - ?REC_HDR_SZ_SUBBATCH_B) ->
     %% no filter and last data size was small so enable data read ahead
     Ra#ra{size = Limit};
 ra_update_size(undefined, FilterSize, LastDataSize,
-               #ra{on = true, size = Limit, limit = Limit} = Ra)
-  when LastDataSize =< (Limit - ?HEADER_SIZE_B -
+               #ra{size = Limit, limit = Limit} = Ra)
+  when Limit > 0 andalso
+       LastDataSize =< (Limit - ?HEADER_SIZE_B -
                         FilterSize - ?REC_HDR_SZ_SUBBATCH_B) ->
     Ra;
 ra_update_size(_Filter, FilterSize, _LastDataSize, #ra{size = Sz} = Ra) ->
@@ -3397,13 +3399,18 @@ ra_fill(Fd, Pos, #ra{size = Sz} = Ra) ->
             Err
     end.
 
+ra_limit(0) ->
+    ?DEFAULT_READ_AHEAD_LIMIT;
+ra_limit(L) ->
+    L.
+
 -spec ra(config()) -> #ra{}.
 ra(#{options := #{read_ahead := false}}) ->
-    #ra{on = false};
+    #ra{limit = 0};
 ra(#{options := #{read_ahead_limit := Limit}}) when is_integer(Limit) ->
     #ra{limit = Limit};
 ra(_) ->
-    #ra{on = true}.
+    #ra{limit = ?DEFAULT_READ_AHEAD_LIMIT}.
 
 generate_log(Msg, MsgsPerChunk, NumMessages, Directory) ->
     Name = filename:basename(Directory),
