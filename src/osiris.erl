@@ -83,8 +83,7 @@
 -type reader_options() :: #{transport => tcp | ssl,
                             chunk_selector => all | user_data,
                             filter_spec => osiris_bloom:filter_spec(),
-                            read_ahead => boolean(),
-                            read_ahead_limit => pos_integer()
+                            read_ahead => boolean() | non_neg_integer()
                            }.
 
 -export_type([name/0,
