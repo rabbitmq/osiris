@@ -82,6 +82,7 @@ all_tests() ->
      cluster_deduplication,
      cluster_deduplication_order,
      writers_retention,
+     osiris_reader_set_current_file,
      single_node_reader_counters,
      cluster_reader_counters,
      combine_ips_hosts_test,
@@ -467,6 +468,17 @@ single_node_offset_listener(Config) ->
     end,
     flush(),
     ok.
+
+osiris_reader_set_current_file(Config) ->
+    Name = ?config(cluster_name, Config),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          replica_nodes => []},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    {ok, Log0} = osiris:init_reader(Leader, next, {offset_reader_1, []}),
+    ?assertNot(undefined =:= osiris_log:get_current_file(Log0)).
 
 single_node_reader_counters(Config) ->
     Name = ?config(cluster_name, Config),
