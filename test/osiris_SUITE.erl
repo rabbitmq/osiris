@@ -478,7 +478,7 @@ osiris_reader_set_current_file(Config) ->
           replica_nodes => []},
     {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
     {ok, Log0} = osiris:init_reader(Leader, next, {offset_reader_1, []}),
-    ?assertNot(undefined =:= osiris_log:get_current_file(Log0)).
+    ?assertEqual(<<"00000000000000000000.segment">>, osiris_log:get_current_file(Log0)).
 
 single_node_reader_counters(Config) ->
     Name = ?config(cluster_name, Config),

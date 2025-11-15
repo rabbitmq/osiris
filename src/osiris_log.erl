@@ -1074,7 +1074,7 @@ init_data_reader_at(ChunkId, FilePos, File,
                            readers_counter_fun = CountersFun,
                            shared = Shared
                           },
-                      current_file = File,
+                      current_file = filename:basename(File),
                       mode =
                       #read{type = data,
                             next_offset = ChunkId,
@@ -1298,15 +1298,15 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                              readers_counter_fun = ReaderCounterFun,
                              shared = Shared
                             },
-                  current_file = SegmentFile,
+                  current_file = filename:basename(SegmentFile),
                   mode = #read{type = offset,
                                position = FilePos,
                                chunk_selector = maps:get(chunk_selector, Options,
                                                          user_data),
                                next_offset = NextChunkId,
                                transport = maps:get(transport, Options, tcp),
-                               filter = FilterMatcher,                               
-                               read_ahead = ra(Conf)},                  
+                               filter = FilterMatcher,
+                               read_ahead = ra(Conf)},
                   fd = Fd}}.
 
 %% Searches the index files backwards for the ID of the last user chunk.
