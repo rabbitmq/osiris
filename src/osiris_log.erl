@@ -420,7 +420,8 @@
          %% that will be included in snapshots written to new segments
          readers_counter_fun = fun(_) -> ok end :: function(),
          shared :: atomics:atomics_ref(),
-         filter_size = ?DEFAULT_FILTER_SIZE :: osiris_bloom:filter_size()
+         filter_size = ?DEFAULT_FILTER_SIZE :: osiris_bloom:filter_size(),
+         compression :: undefined | {zstd, zstd:context()}
          }).
 -record(ra,
         {size = ?HEADER_SIZE_B + ?DEFAULT_FILTER_SIZE :: non_neg_integer(),
@@ -1064,6 +1065,13 @@ init_data_reader_at(ChunkId, FilePos, File,
             Cnt = make_counter(Config),
             counters:put(Cnt, ?C_OFFSET, ChunkId - 1),
             CountersFun(1),
+            Compression = case Config of
+                              #{compression := zstd} ->
+                                 {ok, Ctx} = zstd:context(compress),
+                                 {zstd, Ctx};
+                              _ ->
+                                  undefined
+                          end,
             {ok,
              #?MODULE{cfg =
                       #cfg{directory = Dir,
@@ -1071,7 +1079,8 @@ init_data_reader_at(ChunkId, FilePos, File,
                            counter_id = counter_id(Config),
                            name = Name,
                            readers_counter_fun = CountersFun,
-                           shared = Shared
+                           shared = Shared,
+                           compression = Compression
                           },
                       mode =
                       #read{type = data,
@@ -1716,7 +1725,8 @@ send_file(Sock, State) ->
     {error, term()} |
     {end_of_stream, state()}.
 send_file(Sock,
-          #?MODULE{mode = #read{type = RType,
+          #?MODULE{cfg = #cfg{compression = Compression},
+                   mode = #read{type = RType,
                                 chunk_selector = Selector,
                                 transport = Transport,
                                 filter_size = RaFs}} = State0,
@@ -1755,19 +1765,32 @@ send_file(Sock,
                     FrameHeader = Callback(Header, ToSend + byte_size(HeaderData)),
                     case ra_read(DataPos, ToSend, Ra) of
                         Data when byte_size(Data) == ToSend ->
-                            case send(Transport, Sock, [FrameHeader, HeaderData, Data]) of
+                            case send(Transport, Compression, Sock, [FrameHeader, HeaderData, Data]) of
                                 ok ->
                                     State = State1#?MODULE{mode = Read},
                                     {ok, State};
                                 Err ->
                                     Err
                             end;
+                        _ when Compression =/= undefined ->
+                            case file:pread(Fd, DataPos, ToSend) of
+                                {ok, Data} ->
+                                    case send(Transport, Compression, Sock, [FrameHeader, HeaderData, Data]) of
+                                        ok ->
+                                            State = State1#?MODULE{mode = Read},
+                                            {ok, State};
+                                        Err ->
+                                            Err
+                                    end;
+                                Err ->
+                                    Err
+                            end;
                         _ ->
                             %% the read ahead buffer could not satisfy the
                             %% data read
-                            case send(Transport, Sock, [FrameHeader, HeaderData]) of
+                            case send(Transport, Compression, Sock, [FrameHeader, HeaderData]) of
                                 ok ->
-                                    case sendfile(Transport, Fd, Sock,
+                                    case sendfile(Transport, Compression, Fd, Sock,
                                                   DataPos, ToSend) of
                                         ok ->
                                             State = State1#?MODULE{mode = Read},
@@ -2526,30 +2549,40 @@ max_segment_size_reached(
     CurrentSizeBytes >= MaxSizeBytes orelse
     CurrentSizeChunks >= MaxSizeChunks.
 
-sendfile(_Transport, _Fd, _Sock, _Pos, 0) ->
+sendfile(_Transport, _Compression, _Fd, _Sock, _Pos, 0) ->
     ok;
-sendfile(tcp = Transport, Fd, Sock, Pos, ToSend) ->
+sendfile(tcp = Transport, undefined, Fd, Sock, Pos, ToSend) ->
     case file:sendfile(Fd, Sock, Pos, ToSend, []) of
         {ok, 0} ->
             %% TODO add counter for this?
-            sendfile(Transport, Fd, Sock, Pos, ToSend);
+            sendfile(Transport, undefined, Fd, Sock, Pos, ToSend);
         {ok, BytesSent} ->
-            sendfile(Transport, Fd, Sock, Pos + BytesSent, ToSend - BytesSent);
+            sendfile(Transport, undefined, Fd, Sock, Pos + BytesSent, ToSend - BytesSent);
         {error, _} = Err ->
             Err
     end;
-sendfile(ssl, Fd, Sock, Pos, ToSend) ->
+sendfile(Transport, Compression, Fd, Sock, Pos, ToSend) ->
     case file:pread(Fd, Pos, ToSend) of
         {ok, Data} ->
-            ssl:send(Sock, Data);
+            send(Transport, Compression, Sock, Data);
         {error, _} = Err ->
             Err
     end.
 
-send(tcp, Sock, Data) ->
-    gen_tcp:send(Sock, Data);
-send(ssl, Sock, Data) ->
-    ssl:send(Sock, Data).
+send(tcp, Compression, Sock, Data) ->
+    gen_tcp:send(Sock, compress_data(Compression, Data));
+send(ssl, Compression, Sock, Data) ->
+    ssl:send(Sock, compress_data(Compression, Data)).
+
+compress_data({zstd, Ctx}, Data) ->
+    CompressedData = zstd:compress(Data, Ctx),
+    Header = <<?COMPRESSED_MAGIC:4/unsigned,
+               ?COMPRESSED_VERSION:4/unsigned,
+               3:8/unsigned,
+               (iolist_size(CompressedData)):32/unsigned>>,
+    [Header | CompressedData];
+compress_data(undefined, Data) ->
+    Data.
 
 last_timestamp_in_index_file(IdxFile) ->
     case file:open(IdxFile, [raw, binary, read]) of

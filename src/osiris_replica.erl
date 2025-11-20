@@ -679,6 +679,35 @@ parse_chunk(<<?MAGIC:4/unsigned,
     TotalSize = ?HEADER_SIZE_B + FSize + Size + TSize,
     <<Chunk:TotalSize/binary, _/binary>> = All,
     parse_chunk(Rem, undefined, [{{FirstOffset, Timestamp}, Chunk} | Acc]);
+parse_chunk(<<?COMPRESSED_MAGIC:4/unsigned,
+              ?COMPRESSED_VERSION:4/unsigned,
+              CompressionType:8/unsigned,
+              CompressedLen:32/unsigned,
+              CompressedData:CompressedLen/binary,
+              Rem/binary>>,
+            undefined, Acc) ->
+    Chunk =  case CompressionType of
+                 3 -> %% zstd
+                     zstd_decompress(CompressedData);
+                 1 ->
+                     zlib:gunzip(CompressedData)
+             end,
+    <<?MAGIC:4/unsigned,
+      ?VERSION:4/unsigned,
+      _ChType:8/unsigned,
+      _NumEntries:16/unsigned,
+      _NumRecords:32/unsigned,
+      Timestamp:64/signed,
+      _Epoch:64/unsigned,
+      FirstOffset:64/unsigned,
+      _Rest/binary>> = Chunk,
+    parse_chunk(Rem, undefined, [{{FirstOffset, Timestamp}, Chunk} | Acc]);
+parse_chunk(<<?COMPRESSED_MAGIC:4/unsigned,
+              ?COMPRESSED_VERSION:4/unsigned,
+              _Partial/binary>> = All,
+            undefined, Acc) ->
+    %% This could be more efficient: decompression functions can take iodata.
+    {All, lists:reverse(Acc)};
 parse_chunk(Bin, undefined, Acc)
     when byte_size(Bin) =< ?HEADER_SIZE_B ->
     {Bin, lists:reverse(Acc)};
@@ -713,6 +742,14 @@ parse_chunk(Bin, {FirstOffsetTs, IOData, RemSize}, Acc) ->
     %% there is not enough data to complete the partial chunk
     {{FirstOffsetTs, [Bin | IOData], RemSize - byte_size(Bin)},
      lists:reverse(Acc)}.
+
+-if(?OTP_RELEASE >= 28).
+zstd_decompress(Data) ->
+    iolist_to_binary(zstd:decompress(Data)).
+-else.
+zstd_decompress(_Data) ->
+    erlang:error(zstd_not_supported).
+-endif.
 
 notify_offset_listeners(#?MODULE{cfg = #cfg{reference = Ref,
                                             event_formatter = EvtFmt},

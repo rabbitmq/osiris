@@ -123,7 +123,7 @@ init(#{hosts := Hosts,
                    [Host, Port]),
             CntId = {?MODULE, ExtRef, Host, Port},
             CntSpec = {CntId, ?COUNTER_FIELDS},
-            Config = #{counter_spec => CntSpec, transport => Transport},
+            Config = #{counter_spec => CntSpec, transport => Transport, compression => zstd},
             %% send token to replica to complete connection setup
             ok = send(Transport, Sock, Token),
             Ret = osiris_writer:init_data_reader(LeaderPid, TailInfo, Config),

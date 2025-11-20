@@ -47,6 +47,9 @@
 -define(FILE_OPTS_WRITE, [raw, binary, write, read]).
 -define(INDEX_RECORD_SIZE_B, 29).
 
+%% signature of chunks compressed
+-define(COMPRESSED_MAGIC, 7).
+-define(COMPRESSED_VERSION, 0).
 
 %% chunk types
 -define(CHNK_USER, 0).
