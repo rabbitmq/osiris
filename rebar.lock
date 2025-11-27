@@ -1,11 +1,11 @@
 {"1.2.0",
-[{<<"gen_batch_server">>,{pkg,<<"gen_batch_server">>,<<"0.8.8">>},0},
- {<<"seshat">>,{pkg,<<"seshat">>,<<"1.0.0">>},0}]}.
+[{<<"gen_batch_server">>,{pkg,<<"gen_batch_server">>,<<"0.8.9">>},0},
+ {<<"seshat">>,{pkg,<<"seshat">>,<<"1.0.1">>},0}]}.
 [
 {pkg_hash,[
- {<<"gen_batch_server">>, <<"7840A1FA63EE1EFFC83E8A91D22664847A2BA1192D30EAFFFD914ACB51578068">>},
- {<<"seshat">>, <<"7CFD882C6BD0DA4B8C91AA339351727FE982EF7260A7B4E5B2A3E6551BE30E52">>}]},
+ {<<"gen_batch_server">>, <<"1C6BC0F530BF8C17E8B4ACC20C2CC369FFA5BEE2B46DE01E21410745F24B1BC9">>},
+ {<<"seshat">>, <<"FA7A8E89218D19394F7DDC47BA6725471103D654CD0BD0A98E5FDD922A943EAC">>}]},
 {pkg_hash_ext,[
- {<<"gen_batch_server">>, <<"C3E6A1A2A0FB62AEE631A98CFA0FD8903E9562422CBF72043953E2FB1D203017">>},
- {<<"seshat">>, <<"95018806AB04E10563157532F01C523F202C50DEC0E72C6C999064CE829CFF24">>}]}
+ {<<"gen_batch_server">>, <<"C8581FE4A4B6BCCF91E53CE6A8C7E6C27C8C591BAB5408B160166463F5579C22">>},
+ {<<"seshat">>, <<"38324FE8C5782C69D73B334DD00B20E16C0D99EEF3E7B4005C519FE9BC0E34FC">>}]}
 ].
