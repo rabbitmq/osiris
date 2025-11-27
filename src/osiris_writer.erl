@@ -42,11 +42,15 @@
 -define(C_COMMITTED_OFFSET, ?C_NUM_LOG_FIELDS + 1).
 -define(C_READERS, ?C_NUM_LOG_FIELDS + 2).
 -define(C_EPOCH, ?C_NUM_LOG_FIELDS + 3).
+-define(C_REPLICATION_DIFF, ?C_NUM_LOG_FIELDS + 4).
 -define(ADD_COUNTER_FIELDS,
         [
          {committed_offset, ?C_COMMITTED_OFFSET, counter, "Last committed offset"},
          {readers, ?C_READERS, counter, "Number of readers"},
-         {epoch, ?C_EPOCH, counter, "Current epoch"}
+         {epoch, ?C_EPOCH, counter, "Current epoch"},
+         {replication_diff, ?C_REPLICATION_DIFF, gauge,
+          "Cumulative difference in last-written offset between writer and "
+          "replicas"}
         ]
        ).
 
@@ -298,6 +302,11 @@ handle_batch(Commands,
                                  end, [LastChId], State2#?MODULE.replica_state),
 
             COffs = agreed_commit(AllChIds),
+
+            counters:put(Cnt, ?C_REPLICATION_DIFF,
+                         maps:fold(fun (_, {O, _}, Acc) ->
+                                           Acc + LastChId - O
+                                   end, 0, State2#?MODULE.replica_state)),
 
             RemDupes = handle_duplicates(COffs, Dupes ++ Dupes0, Cfg),
             %% if committed offset has increased - update
