@@ -85,6 +85,8 @@ all_tests() ->
      osiris_reader_set_current_file,
      single_node_reader_counters,
      cluster_reader_counters,
+     replication_counters,
+     replication_counters_unacked_replicas,
      combine_ips_hosts_test,
      empty_last_segment,
      replica_reader_nodedown_noproc,
@@ -538,6 +540,80 @@ cluster_reader_counters(Config) ->
 
     [stop_peer(Ref) || {Ref, _} <- PeerStates].
 
+replication_counters(Config) ->
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    PeerStates = [start_child_node(N, PrivDir, application:get_all_env(osiris))
+                  || N <- [s1, s2]],
+    [{Replica1Ref, Replica1Node}, {Replica2Ref, Replica2Node}] = PeerStates,
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          %% the writer runs locally so that its counters can be read directly
+          leader_node => node(),
+          replica_nodes => [Replica1Node, Replica2Node],
+          features => #{committed_offset_calculate => true}},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+
+    Num = 100,
+    write_n(Leader, Num, #{}),
+    %% once every replica has confirmed everything there is nothing outstanding
+    await_condition(fun() ->
+                            #{replica_staleness := S,
+                              replication_backlog := B} = repl_counters(Name),
+                            B =:= 0 andalso S < 1000
+                    end, 100, 20),
+
+    %% with one replica gone the backlog grows by every offset written after it
+    %% stopped. The writer keeps quorum so writes are still confirmed
+    stop_peer(Replica2Ref),
+    write_n(Leader, Num, #{}),
+    await_condition(fun() ->
+                            #{replica_staleness := S,
+                              replication_backlog := B} = repl_counters(Name),
+                            B =:= Num andalso S > 0
+                    end, 100, 20),
+
+    stop_peer(Replica1Ref),
+    ok.
+
+replication_counters_unacked_replicas(Config) ->
+    Name = ?config(cluster_name, Config),
+    Conf0 = #{name => Name,
+              reference => Name,
+              epoch => 1,
+              leader_node => node(),
+              replica_nodes => []},
+    Num = 100,
+    {ok, Writer0} = osiris:start_writer(Conf0),
+    write_n(Writer0, Num, #{}),
+    ok = osiris:stop_cluster(Conf0),
+
+    %% these replicas are configured but never start, so they never ack
+    Conf = Conf0#{replica_nodes => ['replica1@localhost', 'replica2@localhost']},
+    {ok, Writer} = osiris:start_writer(Conf),
+    ?assertMatch(#{replica_staleness := 0, replication_backlog := 0},
+                 repl_counters(Name)),
+
+    %% writes are not confirmed without a quorum but are still written locally
+    [ok = osiris:write(Writer, undefined, N, <<N:?BIN_SIZE/integer>>)
+     || N <- lists:seq(0, Num - 1)],
+    %% only the offsets written since this writer started count towards the
+    %% backlog of a replica which has never acked, and such a replica cannot
+    %% contribute to staleness at all
+    await_condition(fun() ->
+                            #{replica_staleness := S,
+                              replication_backlog := B} = repl_counters(Name),
+                            B =:= 2 * Num andalso S =:= 0
+                    end, 100, 20),
+
+    %% the configured replica nodes do not exist, so only stop the writer
+    ok = osiris:stop_member(node(), Conf),
+    ok.
+
+repl_counters(Name) ->
+    osiris_counters:counters({osiris_writer, Name},
+                             [replica_staleness, replication_backlog]).
 
 combine_ips_hosts_test(_Config) ->
   Ip = ["192.168.23.23"],
