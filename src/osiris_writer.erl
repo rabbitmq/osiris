@@ -42,11 +42,14 @@
 -define(C_COMMITTED_OFFSET, ?C_NUM_LOG_FIELDS + 1).
 -define(C_READERS, ?C_NUM_LOG_FIELDS + 2).
 -define(C_EPOCH, ?C_NUM_LOG_FIELDS + 3).
+-define(C_REPLICA_STALENESS, ?C_NUM_LOG_FIELDS + 4).
 -define(ADD_COUNTER_FIELDS,
         [
          {committed_offset, ?C_COMMITTED_OFFSET, counter, "Last committed offset"},
          {readers, ?C_READERS, counter, "Number of readers"},
-         {epoch, ?C_EPOCH, counter, "Current epoch"}
+         {epoch, ?C_EPOCH, counter, "Current epoch"},
+         {replica_staleness, ?C_REPLICA_STALENESS, gauge,
+          "Timestamp difference between last chunk written and oldest last chunk of any replica"}
         ]
        ).
 
@@ -288,7 +291,14 @@ handle_batch(Commands,
 
             LastChId =
                 case osiris_log:tail_info(State2#?MODULE.log) of
-                    {_, {_, TailChId, _TailTs}} ->
+                    {_, {_, TailChId, TailTs}} ->
+                        {Max, Min} = maps:fold(fun(_, {_, Ts}, {Max, Min}) ->
+                                                       {max(Ts, Max),
+                                                        min(Ts, Min)}
+                                               end,
+                                               {TailTs, TailTs},
+                                               State2#?MODULE.replica_state),
+                        counters:put(Cnt, ?C_REPLICA_STALENESS, Max - Min),
                         TailChId;
                     _ ->
                         -1
