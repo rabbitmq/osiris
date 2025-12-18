@@ -20,11 +20,13 @@
 -spec init() -> ok.
 init() ->
     _ = seshat:new_group(osiris),
+    ok = osiris_writer:init_fields_spec(),
+    ok = osiris_replica_reader:init_fields_spec(),
+    ok = osiris_replica:init_fields_spec(),
     ok.
 
--spec new(name(), [{Name :: atom(), Position :: non_neg_integer(),
-                    Type :: atom(), Description :: term()}]) ->
-                 counters:counters_ref().
+-spec new(name(), seshat:fields_spec()) ->
+    counters:counters_ref().
 new(Name, Fields) ->
     seshat:new(osiris, Name, Fields).
 

@@ -33,6 +33,8 @@
          terminate/2,
          code_change/3,
          format_status/1]).
+%% for internal use
+-export([init_fields_spec/0]).
 
 %% holds static or rarely changing fields
 -record(cfg,
@@ -79,6 +81,7 @@
          {packets, ?C_PACKETS, counter, "Number of packets"},
          {readers, ?C_READERS, counter, "Number of readers"},
          {epoch, ?C_EPOCH, counter, "Current epoch"}]).
+-define(FIELDSPEC_KEY, osiris_replica_seshat_fields_spec).
 
 -define(DEFAULT_ONE_TIME_TOKEN_TIMEOUT, 30000).
 -define(TOKEN_SIZE, 32).
@@ -179,12 +182,12 @@ handle_continue(#{name := Name0,
             Transport = application:get_env(osiris, replication_transport, tcp),
             Self = self(),
             CntName = {?MODULE, ExtRef},
+            CntSpec = {CntName, {persistent_term, ?FIELDSPEC_KEY}},
 
             Dir = osiris_log:directory(Config),
             Log = osiris_log:init_acceptor(LeaderRange, LeaderEpochOffs,
                                            Config#{dir => Dir,
-                                                   counter_spec =>
-                                                   {CntName, ?ADD_COUNTER_FIELDS}}),
+                                                   counter_spec => CntSpec}),
             CntRef = osiris_log:counters_ref(Log),
             {NextOffset, LastChunk} = TailInfo = osiris_log:tail_info(Log),
 
@@ -789,3 +792,7 @@ listen(tcp, Port, Options) ->
     gen_tcp:listen(Port, Options);
 listen(ssl, Port, Options) ->
     ssl:listen(Port, Options).
+
+init_fields_spec() ->
+    persistent_term:put(?FIELDSPEC_KEY,
+                        ?ADD_COUNTER_FIELDS ++ osiris_log:counter_fields()).

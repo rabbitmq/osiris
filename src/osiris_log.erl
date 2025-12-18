@@ -53,6 +53,7 @@
          evaluate_retention/2,
          directory/1,
          delete_directory/1,
+         counter_fields/0,
          make_counter/1,
          generate_log/4]).
 
@@ -360,7 +361,7 @@
 -type offset() :: osiris:offset().
 -type epoch() :: osiris:epoch().
 -type range() :: empty | {From :: offset(), To :: offset()}.
--type counter_spec() :: {Tag :: term(), Fields :: [atom()]}.
+-type counter_spec() :: {Tag :: term(), Fields :: seshat:fields_spec()}.
 -type chunk_type() ::
     ?CHNK_USER |
     ?CHNK_TRK_DELTA |
@@ -2848,13 +2849,23 @@ validate_crc(ChunkId, Crc, IOData) ->
             exit({crc_validation_failure, {chunk_id, ChunkId}})
     end.
 
+-spec counter_fields() -> seshat:fields_spec().
+counter_fields() ->
+    ?COUNTER_FIELDS.
+
 -spec make_counter(osiris_log:config()) ->
     counters:counters_ref().
 make_counter(#{counter := Counter}) ->
     Counter;
-make_counter(#{counter_spec := {Name, Fields}}) ->
+make_counter(#{counter_spec := {Name, Spec0}}) ->
+    Spec = case Spec0 of
+               {persistent_term, _Key} ->
+                   Spec0;
+               _ when is_list(Spec0) ->
+                   ?COUNTER_FIELDS ++ Spec0
+           end,
     %% create a registered counter
-    osiris_counters:new(Name, ?COUNTER_FIELDS ++ Fields);
+    osiris_counters:new(Name, Spec);
 make_counter(_) ->
     %% if no spec is provided we create a local counter only
     counters:new(?C_NUM_LOG_FIELDS, []).
