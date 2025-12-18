@@ -27,7 +27,8 @@
          handle_info/2,
          terminate/2,
          code_change/3]).
--export([formatter/1]).
+-export([init_fields_spec/0,
+         formatter/1]).
 
 -record(state,
         {log :: osiris_log:state(),
@@ -48,6 +49,7 @@
          {offset_listeners, ?C_OFFSET_LISTENERS, counter, "Number of offset listeners"}
         ]
        ).
+-define(FIELDSPEC_KEY, osiris_replica_reader_seshat_fields_spec).
 
 %%%===================================================================
 %%% API functions
@@ -122,7 +124,7 @@ init(#{hosts := Hosts,
             ?INFO_(Name, "replica reader successfully connected to host ~0p port ~b",
                    [Host, Port]),
             CntId = {?MODULE, ExtRef, Host, Port},
-            CntSpec = {CntId, ?COUNTER_FIELDS},
+            CntSpec = {CntId, {persistent_term, ?FIELDSPEC_KEY}},
             Config = #{counter_spec => CntSpec, transport => Transport},
             %% send token to replica to complete connection setup
             ok = send(Transport, Sock, Token),
@@ -433,3 +435,6 @@ maybe_add_sni_option(H) when is_list(H) ->
 maybe_add_sni_option(_) ->
     [].
 
+init_fields_spec() ->
+    persistent_term:put(?FIELDSPEC_KEY,
+                        ?COUNTER_FIELDS ++ osiris_log:counter_fields()).

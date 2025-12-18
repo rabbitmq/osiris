@@ -26,6 +26,7 @@
          read_tracking/1,
          query_writers/2,
          query_replication_state/1,
+         init_fields_spec/0,
          init/1,
          handle_continue/2,
          handle_batch/2,
@@ -49,6 +50,7 @@
          {epoch, ?C_EPOCH, counter, "Current epoch"}
         ]
        ).
+-define(FIELDSPEC_KEY, osiris_writer_seshat_fields_spec).
 
 %% primary osiris process
 %% batch writes incoming data
@@ -179,6 +181,10 @@ query_writers(Pid, QueryFun) ->
 query_replication_state(Pid) when is_pid(Pid) ->
     gen_batch_server:call(Pid, query_replication_state).
 
+init_fields_spec() ->
+    persistent_term:put(?FIELDSPEC_KEY,
+                        osiris_log:counter_fields() ++ ?ADD_COUNTER_FIELDS).
+
 -spec init(osiris:config()) ->
     {ok, undefined, {continue, osiris:config()}}.
 init(#{name := Name0,
@@ -188,10 +194,11 @@ init(#{name := Name0,
     Shared = osiris_log_shared:new(),
     Dir = osiris_log:directory(Config0),
     CntName = {?MODULE, ExtRef},
+    CntSpec = {CntName, {persistent_term, ?FIELDSPEC_KEY}},
     Config = Config0#{name => Name,
                       dir => Dir,
                       shared => Shared,
-                      counter_spec => {CntName, ?ADD_COUNTER_FIELDS}},
+                      counter_spec => CntSpec},
     CntRef = osiris_log:make_counter(Config),
     {ok, undefined, {continue, Config#{counter => CntRef}}}.
 
