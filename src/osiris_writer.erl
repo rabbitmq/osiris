@@ -43,11 +43,13 @@
 -define(C_COMMITTED_OFFSET, ?C_NUM_LOG_FIELDS + 1).
 -define(C_READERS, ?C_NUM_LOG_FIELDS + 2).
 -define(C_EPOCH, ?C_NUM_LOG_FIELDS + 3).
+-define(C_COMMITTED_CHUNK_ID, ?C_NUM_LOG_FIELDS + 4).
 -define(ADD_COUNTER_FIELDS,
         [
          {committed_offset, ?C_COMMITTED_OFFSET, counter, "Last committed offset"},
          {readers, ?C_READERS, counter, "Number of readers"},
-         {epoch, ?C_EPOCH, counter, "Current epoch"}
+         {epoch, ?C_EPOCH, counter, "Current epoch"},
+         {committed_chunk_id, ?C_COMMITTED_CHUNK_ID, counter, "Last committed chunk ID"}
         ]
        ).
 -define(FIELDSPEC_KEY, osiris_writer_seshat_fields_spec).
@@ -68,14 +70,14 @@
         {cfg :: #cfg{},
          log :: osiris_log:state(),
          tracking :: osiris_tracking:state(),
-         replica_state = #{} :: #{node() => {osiris:offset(), osiris:timestamp()}},
+         replica_state = #{} :: #{node() => osiris:tail_info()},
          pending_corrs = queue:new() :: queue:queue(),
          duplicates = [] ::
              [{osiris:offset(), pid(), osiris:writer_id(), non_neg_integer()}],
          data_listeners = [] :: [{pid(), osiris:offset()}],
          offset_listeners = [] ::
              [{pid(), osiris:offset(), mfa() | undefined}],
-         committed_offset = -1 :: osiris:offset()}).
+         committed_chk_id = -1 :: osiris:offset()}). %% committed chunk ID
 
 -opaque state() :: #?MODULE{}.
 
@@ -142,10 +144,14 @@ register_data_listener(Pid, Offset) ->
     ok =
         gen_batch_server:cast(Pid, {register_data_listener, self(), Offset}).
 
--spec ack(identifier(), {osiris:offset(), osiris:timestamp()}) -> ok.
+-spec ack(identifier(), {osiris:offset(), osiris:timestamp()} |
+          osiris:tail_info()) -> ok.
 ack(LeaderPid, {Offset, _} = OffsetTs)
   when is_integer(Offset) andalso Offset >= 0 ->
-    gen_batch_server:cast(LeaderPid, {ack, node(), OffsetTs}).
+    gen_batch_server:cast(LeaderPid, {ack, node(), OffsetTs});
+ack(LeaderPid, {_, {_, Offset, _}} = TailInfo)
+  when is_integer(Offset) andalso Offset >= 0 ->
+    gen_batch_server:cast(LeaderPid, {ack, node(), TailInfo}).
 
 -spec write(Pid :: pid(), Data :: osiris:data()) -> ok.
 write(Pid, Data)
@@ -223,25 +229,26 @@ handle_continue(#{name := Name,
                                              counters:add(CntRef, ?C_READERS, Inc)
                                      end),
     Trk = osiris_log:recover_tracking(Log),
-    %% should this not be be chunk id rather than last offset?
-    LastOffs = osiris_log:next_offset(Log) - 1,
-    CommittedOffset =
+    {LastChunkId, NextOffset} =
         case osiris_log:tail_info(Log) of
-            {_, {_, TailChId, _}} when Replicas == [] ->
+            {TailNextOffs, {_, TailChId, _}} when Replicas == [] ->
                 %% only when there are no replicas can we
                 %% recover the committed offset from the last
                 %% batch offset in the log
-                TailChId;
+                {TailChId, TailNextOffs};
             _ ->
-                -1
+                {-1, 0}
         end,
-    ok = osiris_log:set_committed_chunk_id(Log, CommittedOffset),
-    counters:put(CntRef, ?C_COMMITTED_OFFSET, CommittedOffset),
+    LastOffset = NextOffset - 1,
+    ok = osiris_log:set_committed_chunk_id(Log, LastChunkId),
+    ok = osiris_log:set_committed_offset(Log, LastOffset),
+    counters:put(CntRef, ?C_COMMITTED_CHUNK_ID, LastChunkId),
+    counters:put(CntRef, ?C_COMMITTED_OFFSET, LastOffset),
     counters:put(CntRef, ?C_EPOCH, Epoch),
     EvtFmt = maps:get(event_formatter, Config, undefined),
-    ?INFO("osiris_writer:init/1: name: ~ts last offset: ~b "
+    ?INFO("osiris_writer:init/1: name: ~ts committed offset: ~b "
           "committed chunk id: ~b epoch: ~b",
-          [Name, LastOffs, CommittedOffset, Epoch]),
+          [Name, LastOffset, LastChunkId, Epoch]),
     {ok,
      #?MODULE{cfg =
                   #cfg{name = Name,
@@ -252,15 +259,15 @@ handle_continue(#{name := Name,
                        replicas = Replicas,
                        directory = Dir,
                        counter = CntRef},
-              committed_offset = CommittedOffset,
-              replica_state = maps:from_list([{R, {-1, 0}} || R <- Replicas]),
+              committed_chk_id = LastChunkId,
+              replica_state = maps:from_list([{R, {0, {0, -1, 0}}} || R <- Replicas]),
               log = Log,
               tracking = Trk}}.
 
 handle_batch(Commands,
              #?MODULE{cfg = #cfg{counter = Cnt} = Cfg,
                       duplicates = Dupes0,
-                      committed_offset = COffs0,
+                      committed_chk_id = ChkId0,
                       tracking = Trk0} =
                  State0) ->
 
@@ -293,28 +300,34 @@ handle_batch(Commands,
                                State1#?MODULE{tracking = Trk,
                                               log = Log}),
 
-            LastChId =
+            {LastChId, NextOffset} =
                 case osiris_log:tail_info(State2#?MODULE.log) of
-                    {_, {_, TailChId, _TailTs}} ->
-                        TailChId;
+                    {TailNextOffset, {_, TailChId, _TailTs}} ->
+                        {TailChId, TailNextOffset};
                     _ ->
-                        -1
+                        {-1, -1}
                 end,
-            AllChIds = maps:fold(fun (_, {O, _}, Acc) ->
-                                         [O | Acc]
-                                 end, [LastChId], State2#?MODULE.replica_state),
 
-            COffs = agreed_commit(AllChIds),
+                AllTailInfo = maps:fold(fun (_, {NO, {_, O, _}}, Acc) ->
+                                                [{O, NO} | Acc]
+                                        end,
+                                        [{LastChId, NextOffset}],
+                                        State2#?MODULE.replica_state),
 
-            RemDupes = handle_duplicates(COffs, Dupes ++ Dupes0, Cfg),
+            {ChkId, NOffs} = agreed_commit(AllTailInfo),
+
+            RemDupes = handle_duplicates(ChkId, Dupes ++ Dupes0, Cfg),
             %% if committed offset has increased - update
-            State = case COffs > COffs0 of
+            State = case ChkId > ChkId0 of
                         true ->
                             P = State2#?MODULE.pending_corrs,
-                            ok = osiris_log:set_committed_chunk_id(Log, COffs),
-                            counters:put(Cnt, ?C_COMMITTED_OFFSET, COffs),
-                            Pending = notify_writers(P, COffs, Cfg),
-                            State2#?MODULE{committed_offset = COffs,
+                            LastOffset = NOffs - 1,
+                            ok = osiris_log:set_committed_chunk_id(Log, ChkId),
+                            ok = osiris_log:set_committed_offset(Log, LastOffset),
+                            counters:put(Cnt, ?C_COMMITTED_CHUNK_ID, ChkId),
+                            counters:put(Cnt, ?C_COMMITTED_OFFSET, LastOffset),
+                            Pending = notify_writers(P, ChkId, Cfg),
+                            State2#?MODULE{committed_chk_id = ChkId,
                                            duplicates = RemDupes,
                                            pending_corrs = Pending};
                         false ->
@@ -346,7 +359,7 @@ format_status(#?MODULE{cfg = #cfg{name = Name,
                        replica_state = ReplicaState,
                        data_listeners = DataListeners,
                        offset_listeners = OffsetListeners,
-                       committed_offset = CommittedOffset}) ->
+                       committed_chk_id = CommittedChunkId}) ->
     #{name => Name,
       external_reference => ExtRef,
       replica_nodes => Replicas,
@@ -357,7 +370,7 @@ format_status(#?MODULE{cfg = #cfg{name = Name,
       num_pending_correlations => queue:len(PendingCorrs),
       num_data_listeners => length(DataListeners),
       num_offset_listeners => length(OffsetListeners),
-      committed_offset => CommittedOffset
+      committed_chunk_id => CommittedChunkId
      }.
 
 %% Internal
@@ -469,7 +482,7 @@ handle_command({cast,
         State0#?MODULE{offset_listeners =
                            [{Pid, Offset, EvtFormatter} | Listeners]},
     {State, Records, Replies, Corrs, Trk, Dupes};
-handle_command({cast, {ack, ReplicaNode, {Offset, _} = OffsetTs}},
+handle_command({cast, {ack, ReplicaNode, TailInfoOrOffsTs}},
                {#?MODULE{replica_state = ReplicaState0} = State0,
                 Records,
                 Replies,
@@ -477,10 +490,17 @@ handle_command({cast, {ack, ReplicaNode, {Offset, _} = OffsetTs}},
                 Trk,
                 Dupes}) ->
     % ?DEBUG("osiris_writer ack from ~w at ~b", [ReplicaNode, Offset]),
+    %% ack message can be a tail_info or a 2-term tuple
+    {Offset, TI} = case TailInfoOrOffsTs of
+                       {_NextOffset, {_Epoch, Offs, _Ts}} ->
+                           {Offs, TailInfoOrOffsTs};
+                       {Offs, Ts} ->
+                           {Offs, {0, {0, Offs, Ts}}}
+                   end,
     ReplicaState =
         case ReplicaState0 of
-            #{ReplicaNode := {O, _}} when Offset > O ->
-                ReplicaState0#{ReplicaNode => OffsetTs};
+            #{ReplicaNode := {_, {_, O, _}}} when Offset > O ->
+                ReplicaState0#{ReplicaNode => TI};
             _ ->
                 %% ignore anything else including acks from unknown replicas
                 ReplicaState0
@@ -493,8 +513,8 @@ handle_command({call, From, get_reader_context},
                                   name = Name,
                                   directory = Dir,
                                   counter = CntRef},
-                         log = Log,
-                         committed_offset = COffs} =
+                         committed_chk_id = CChkId,
+                         log = Log} =
                     State,
                 Records,
                 Replies,
@@ -506,7 +526,8 @@ handle_command({call, From, get_reader_context},
         {reply, From,
          #{dir => Dir,
            name => Name,
-           committed_offset => max(0, COffs),
+           committed_chunk_id => max(0, CChkId),
+           committed_offset => max(0, osiris_log:committed_offset(Log)),
            shared => Shared,
            reference => Ref,
            readers_counter_fun => fun(Inc) -> counters:add(CntRef, ?C_READERS, Inc) end
@@ -530,14 +551,17 @@ handle_command({call, From, query_replication_state},
                {#?MODULE{log = Log,
                          replica_state = R} = State, Records, Replies0,
                 Corrs, Trk, Dupes}) ->
+    Result0 = maps:map(fun(_, {_, {_, O, T}}) ->
+                               {O, T}
+                       end, R),
     %% need to merge pending tracking entries before read
-    Result = case osiris_log:tail_info(Log) of
-                 {0, empty} ->
-                     R#{node() => {-1, 0}};
-                 {_, {_E, O, T}} ->
-                     R#{node() => {O, T}}
-             end,
-    Replies = [{reply, From, Result} | Replies0],
+    Result1 = case osiris_log:tail_info(Log) of
+                  {0, empty} ->
+                      Result0#{node() => {-1, 0}};
+                  {_, {_E, O, T}} ->
+                      Result0#{node() => {O, T}}
+              end,
+    Replies = [{reply, From, Result1} | Replies0],
     {State, Records, Replies, Corrs, Trk, Dupes};
 handle_command({call, From, {update_retention, Retention}},
                {#?MODULE{log = Log0} = State,
@@ -566,7 +590,7 @@ notify_data_listeners(#?MODULE{log = Seg, data_listeners = L0} =
 notify_offset_listeners(#?MODULE{cfg =
                                      #cfg{reference = Ref,
                                           event_formatter = EvtFmt},
-                                 committed_offset = COffs,
+                                 committed_chk_id = COffs,
                                  offset_listeners = L0} =
                             State) ->
     {Notify, L} =
@@ -621,9 +645,11 @@ wrap_osiris_event(undefined, Evt) ->
 wrap_osiris_event({M, F, A}, Evt) ->
     apply(M, F, [Evt | A]).
 
--spec agreed_commit([osiris:offset()]) -> osiris:offset().
+-spec agreed_commit([{osiris:offset(), osiris:offset()}]) -> {osiris:offset(), osiris:offset()}.
 agreed_commit(Indexes) ->
-    SortedIdxs = lists:sort(fun erlang:'>'/2, Indexes),
+    SortedIdxs = lists:sort(fun({O1, _}, {O2, _}) ->
+                                    O1 > O2
+                            end, Indexes),
     Nth = length(SortedIdxs) div 2 + 1,
     lists:nth(Nth, SortedIdxs).
 

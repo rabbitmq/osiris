@@ -36,9 +36,10 @@
          read_chunk/1,
          read_chunk_parsed/1,
          read_chunk_parsed/2,
-         committed_offset/1,
          committed_chunk_id/1,
+         committed_offset/1,
          set_committed_chunk_id/2,
+         set_committed_offset/2,
          last_chunk_id/1,
          get_current_epoch/1,
          get_directory/1,
@@ -1350,10 +1351,6 @@ last_user_chunk_id_in_index(NextPos, IdxFd) ->
             Error
     end.
 
--spec committed_offset(state()) -> integer().
-committed_offset(State) ->
-    committed_chunk_id(State).
-
 -spec committed_chunk_id(state()) -> integer().
 committed_chunk_id(#?MODULE{cfg = #cfg{shared = Ref}}) ->
     osiris_log_shared:committed_chunk_id(Ref).
@@ -1363,6 +1360,16 @@ set_committed_chunk_id(#?MODULE{mode = #write{},
                                 cfg = #cfg{shared = Ref}}, ChunkId)
   when is_integer(ChunkId) ->
     osiris_log_shared:set_committed_chunk_id(Ref, ChunkId).
+
+-spec set_committed_offset(state(), offset()) -> ok.
+set_committed_offset(#?MODULE{mode = #write{},
+                                  cfg = #cfg{shared = Ref}}, Offset)
+  when is_integer(Offset) ->
+    osiris_log_shared:set_committed_offset(Ref, Offset).
+
+-spec committed_offset(state()) -> integer().
+committed_offset(#?MODULE{cfg = #cfg{shared = Ref}}) ->
+    osiris_log_shared:committed_offset(Ref).
 
 -spec last_chunk_id(state()) -> integer().
 last_chunk_id(#?MODULE{cfg = #cfg{shared = Ref}}) ->
