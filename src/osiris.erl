@@ -40,6 +40,7 @@
       reference => term(),
       event_formatter => {module(), atom(), list()},
       retention => [osiris:retention_spec()],
+      features => features(),
       atom() => term()}.
 
 -type mfarg() :: {module(), atom(), list()}.
@@ -77,6 +78,7 @@
 -type data() :: iodata() |
                 batch() |
                 {filter_value(), iodata() | batch()}.
+-type features() :: #{committed_offset_calculate => boolean()}.
 
 %% returned when reading
 -type entry() :: binary() | batch().
@@ -307,13 +309,16 @@ configure_logger(Module) ->
     persistent_term:put('$osiris_logger', Module).
 
 -spec get_stats(pid()) -> #{committed_chunk_id => integer(),
-                            first_chunk_id => integer()}.
+                            first_chunk_id => integer(),
+                            last_chunk_id => integer(),
+                            committed_offset => integer()}.
 get_stats(Pid)
   when node(Pid) =:= node() ->
     #{shared := Shared} = osiris_util:get_reader_context(Pid),
     #{committed_chunk_id => osiris_log_shared:committed_chunk_id(Shared),
       first_chunk_id => osiris_log_shared:first_chunk_id(Shared),
-      last_chunk_id => osiris_log_shared:last_chunk_id(Shared)};
+      last_chunk_id => osiris_log_shared:last_chunk_id(Shared),
+      committed_offset => osiris_log_shared:committed_offset(Shared)};
 get_stats(Pid) when is_pid(Pid) ->
     erpc:call(node(Pid), ?MODULE, ?FUNCTION_NAME, [Pid]).
 

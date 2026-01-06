@@ -30,6 +30,11 @@
                                                             domain => [osiris]}),
        ok).
 
+%% tail info pattern matching
+-define(TAIL_INFO(ChunkId, Ts), {_, {_, ChunkId, Ts}}).
+-define(TAIL_INFO(ChunkId), ?TAIL_INFO(ChunkId, _)).
+-define(TAIL_INFO_NEXT(NextOffset, ChunkId), {NextOffset, {_, ChunkId, _}}).
+
 -define(IS_STRING(S), is_list(S) orelse is_binary(S)).
 
 -define(C_NUM_LOG_FIELDS, 5).

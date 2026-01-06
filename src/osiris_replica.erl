@@ -50,7 +50,8 @@
          reference :: term(),
          event_formatter :: undefined | mfa(),
          counter :: counters:counters_ref(),
-         token :: undefined | binary()}).
+         token :: undefined | binary(),
+         committed_offset_calculate :: boolean()}).
 
 -type parse_state() ::
     undefined |
@@ -75,12 +76,15 @@
 -define(C_PACKETS, ?C_NUM_LOG_FIELDS + 3).
 -define(C_READERS, ?C_NUM_LOG_FIELDS + 4).
 -define(C_EPOCH, ?C_NUM_LOG_FIELDS + 5).
+-define(C_COMMITTED_CHUNK_ID, ?C_NUM_LOG_FIELDS + 6).
 -define(ADD_COUNTER_FIELDS,
         [{committed_offset, ?C_COMMITTED_OFFSET, counter, "Last committed offset"},
          {forced_gcs, ?C_FORCED_GCS, counter, "Number of garbage collection runs"},
          {packets, ?C_PACKETS, counter, "Number of packets"},
          {readers, ?C_READERS, counter, "Number of readers"},
-         {epoch, ?C_EPOCH, counter, "Current epoch"}]).
+         {epoch, ?C_EPOCH, counter, "Current epoch"},
+         {committed_chunk_id, ?C_COMMITTED_CHUNK_ID, counter, "Last committed chunk ID"}
+        ]).
 -define(FIELDSPEC_KEY, osiris_replica_seshat_fields_spec).
 
 -define(DEFAULT_ONE_TIME_TOKEN_TIMEOUT, 30000).
@@ -194,10 +198,10 @@ handle_continue(#{name := Name0,
             case LastChunk of
                 empty ->
                     ok;
-                {_, LastChId, LastTs} ->
+                _ ->
                     %% need to ack last chunk back to leader so that it can
                     %% re-discover the committed offset
-                    osiris_writer:ack(LeaderPid, {LastChId, LastTs})
+                    osiris_writer:ack(LeaderPid, ack_msg(Config, TailInfo))
             end,
             ?INFO_(Name, "osiris replica starting in epoch ~b, next offset ~b, tail info ~w",
                    [Epoch, NextOffset, TailInfo]),
@@ -236,6 +240,10 @@ handle_continue(#{name := Name0,
             Acceptor = spawn_link(fun() -> accept(Name, Transport, LSock, Self) end),
             ?DEBUG_(Name, "starting replica reader on node '~w'", [Node]),
 
+            CmttedOfstCalculate = committed_offset_calculate(Config),
+            Features0 = maps:get(features, Config, #{}),
+            Features1 = Features0#{committed_offset_calculate =>
+                                   committed_offset_calculate(Config)},
             ReplicaReaderConf = #{hosts => IpsHosts,
                                   port => Port,
                                   transport => Transport,
@@ -244,7 +252,8 @@ handle_continue(#{name := Name0,
                                   leader_pid => LeaderPid,
                                   start_offset => TailInfo,
                                   reference => ExtRef,
-                                  connection_token => Token},
+                                  connection_token => Token,
+                                  features => Features1},
             case osiris_replica_reader:start(Node, ReplicaReaderConf) of
                 {ok, RRPid} ->
                     true = link(RRPid),
@@ -260,6 +269,7 @@ handle_continue(#{name := Name0,
                                       false ->
                                           infinity
                                   end,
+                    counters:put(CntRef, ?C_COMMITTED_CHUNK_ID, -1),
                     counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
                     counters:put(CntRef, ?C_EPOCH, Epoch),
                     Shared = osiris_log:get_shared(Log),
@@ -281,7 +291,8 @@ handle_continue(#{name := Name0,
                                        event_formatter = EvtFmt,
                                        counter = CntRef,
                                        token = Token,
-                                       transport = Transport},
+                                       transport = Transport,
+                                       committed_offset_calculate = CmttedOfstCalculate},
                               log = Log,
                               parse_state = undefined}};
                 {error, {connection_refused = R, _}} ->
@@ -424,7 +435,7 @@ handle_call(Unknown, _From,
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast({committed_offset, CommittedChId},
+handle_cast({committed_offset, {CommittedChId, LastOffset}},
             #?MODULE{cfg = #cfg{counter = Cnt},
                      log = Log,
                      committed_chunk_id = LastCommittedChId} =
@@ -432,14 +443,18 @@ handle_cast({committed_offset, CommittedChId},
     case CommittedChId > LastCommittedChId of
         true ->
             %% notify offset listeners
-            counters:put(Cnt, ?C_COMMITTED_OFFSET, CommittedChId),
+            counters:put(Cnt, ?C_COMMITTED_CHUNK_ID, CommittedChId),
+            counters:put(Cnt, ?C_COMMITTED_OFFSET, LastOffset),
             ok = osiris_log:set_committed_chunk_id(Log, CommittedChId),
+            ok = osiris_log:set_committed_offset(Log, LastOffset),
             {noreply,
              notify_offset_listeners(
                State#?MODULE{committed_chunk_id = CommittedChId})};
         false ->
             State
     end;
+handle_cast({committed_offset, CommittedChId}, State) ->
+    handle_cast({committed_offset, {CommittedChId, -1}}, State);
 handle_cast({register_offset_listener, Pid, EvtFormatter, Offset},
             #?MODULE{cfg = #cfg{reference = Ref,
                                 event_formatter = DefaultFmt},
@@ -572,7 +587,7 @@ handle_incoming_data(Socket, Bin,
                               #cfg{socket = Socket,
                                    leader_pid = LeaderPid,
                                    transport = Transport,
-                                   counter = Cnt},
+                                   counter = Cnt} = Cfg,
                               parse_state = ParseState0,
                               log = Log0} =
                      State0) ->
@@ -594,7 +609,8 @@ handle_incoming_data(Socket, Bin,
         undefined ->
             {noreply, State1};
         _ ->
-            ok = osiris_writer:ack(LeaderPid, OffsetTimestamp),
+            TailInfo = osiris_log:tail_info(Log),
+            ok = osiris_writer:ack(LeaderPid, ack_msg(Cfg, TailInfo)),
             State = notify_offset_listeners(State1),
             {noreply, State}
     end.
@@ -738,7 +754,7 @@ notify_offset_listeners(#?MODULE{cfg = #cfg{reference = Ref,
     State#?MODULE{offset_listeners = L}.
 
 max_readable_chunk_id(Log) ->
-    min(osiris_log:committed_offset(Log), osiris_log:last_chunk_id(Log)).
+    min(osiris_log:committed_chunk_id(Log), osiris_log:last_chunk_id(Log)).
 
 %% INTERNAL
 
@@ -796,3 +812,20 @@ listen(ssl, Port, Options) ->
 init_fields_spec() ->
     persistent_term:put(?FIELDSPEC_KEY,
                         ?ADD_COUNTER_FIELDS ++ osiris_log:counter_fields()).
+
+ack_msg(Cfg, TailInfo) ->
+    case committed_offset_calculate(Cfg) of
+        true ->
+            TailInfo;
+        false ->
+            ?TAIL_INFO(TailChkId, TailTs) = TailInfo,
+            {TailChkId, TailTs}
+    end.
+
+committed_offset_calculate(#cfg{committed_offset_calculate = On}) ->
+    On;
+committed_offset_calculate(#{features := #{committed_offset_calculate := On}})
+  when is_boolean(On) ->
+    On;
+committed_offset_calculate(_) ->
+    false.
