@@ -12,6 +12,7 @@
          fetch/1,
          overview/0,
          overview/1,
+         counters/2,
          delete/1
         ]).
 
@@ -45,3 +46,7 @@ overview() ->
 -spec overview(name()) -> #{atom() => non_neg_integer()} | undefined.
 overview(Name) ->
     seshat:counters(osiris, Name).
+
+-spec counters(name(), [atom()]) -> #{atom() => non_neg_integer()} | undefined.
+counters(Name, Fields) ->
+    seshat:counters(osiris, Name, Fields).

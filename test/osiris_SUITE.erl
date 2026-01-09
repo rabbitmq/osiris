@@ -86,7 +86,10 @@ all_tests() ->
      cluster_reader_counters,
      combine_ips_hosts_test,
      empty_last_segment,
-     replica_reader_nodedown_noproc].
+     replica_reader_nodedown_noproc,
+     committed_offset_on_with_single_node,
+     committed_offset_on_with_cluster,
+     cluster_should_work_with_committed_offset_on_off].
 
 %% Isolated to avoid test interference
 ipv6_tests() ->
@@ -840,9 +843,9 @@ cluster_restart_large(Config) ->
 
     %% wait for replica key counters to match writer
     await_condition(fun () ->
-                            RC = erpc:call(hd(Replicas), osiris_counters, overview,
-                                           [{osiris_replica, Name}]),
-                            maps:with(Keys, CountersPre) == maps:with(Keys, RC)
+                            RC = erpc:call(hd(Replicas), osiris_counters, counters,
+                                           [{osiris_replica, Name}, Keys]),
+                            maps:with(Keys, CountersPre) == RC
                     end, 1000, 20),
     Replica1CountersPre = erpc:call(hd(Replicas), osiris_counters, overview,
                                     [{osiris_replica, Name}]),
@@ -1906,6 +1909,150 @@ replica_reader_nodedown_noproc(_Config) ->
         osiris_replica_reader:start(node(), #{}),
     ok.
 
+committed_offset_on_with_single_node(Config) ->
+    Name = ?config(cluster_name, Config),
+    WriterConf = #{name => Name,
+                   reference => Name,
+                   epoch => 1,
+                   leader_node => node(),
+                   replica_nodes => []},
+
+    {ok, Pid} = osiris:start_writer(WriterConf),
+
+    ?assertEqual(-1, committed_offset(Pid)),
+
+    Num = 100,
+    write_n(Pid, Num, #{}),
+
+    await_condition(fun() ->
+                            committed_offset(Pid) =:= Num - 1
+                    end, 100, 20),
+
+    write_n(Pid, Num, #{}),
+
+    await_condition(fun() ->
+                            committed_offset(Pid) =:= 2 * Num - 1
+                    end, 100, 20),
+
+    ok = osiris:stop_cluster(WriterConf),
+
+    {ok, Pid2} = osiris:start_writer(WriterConf),
+    ?assertEqual(2 * Num - 1, committed_offset(Pid2)),
+
+    ok = osiris:stop_cluster(WriterConf),
+
+    ok.
+
+committed_offset_on_with_cluster(Config) ->
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    PeerStates = [start_child_node(N, PrivDir, application:get_all_env(osiris))
+                  || N <- [s1, s2, s3]],
+    [LeaderNode, Replica1Node, Replica2Node] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    Epoch = 1,
+    ReplicaNodes = [Replica1Node, Replica2Node],
+
+    WriterConf = #{name => Name,
+                   reference => Name,
+                   epoch => Epoch,
+                   leader_node => LeaderNode,
+                   replica_nodes => ReplicaNodes},
+
+    {ok, LeaderPid} = osiris:start_writer(WriterConf),
+
+    ReplicaConf = WriterConf#{leader_pid => LeaderPid,
+                              committed_offset_on => true},
+    {ok, Replica1Pid} = osiris_replica:start(Replica1Node, ReplicaConf),
+    {ok, Replica2Pid} = osiris_replica:start(Replica2Node, ReplicaConf),
+    Pids = [LeaderPid, Replica1Pid, Replica2Pid],
+
+    [?assertEqual(-1, committed_offset(Pid)) || Pid <- Pids],
+
+    Num = 100,
+    write_n(LeaderPid, Num, #{}),
+
+    [await_condition(fun() ->
+                             committed_offset(Pid) =:= Num - 1
+                     end, 100, 20) || Pid <- Pids],
+
+    write_n(LeaderPid, Num, #{}),
+
+    [await_condition(fun() ->
+                             committed_offset(Pid) =:= 2 * Num - 1
+                     end, 100, 20) || Pid <- Pids],
+
+    ok = osiris:stop_cluster(WriterConf),
+
+    {ok, LeaderPid2} = osiris:start_writer(WriterConf),
+    ReplicaConf2 = ReplicaConf#{leader_pid => LeaderPid2},
+    {ok, Replica1Pid2} = osiris_replica:start(Replica1Node, ReplicaConf2),
+    {ok, Replica2Pid2} = osiris_replica:start(Replica2Node, ReplicaConf2),
+    Pids2 = [LeaderPid2, Replica1Pid2, Replica2Pid2],
+
+    [?assertEqual(2 * Num - 1, committed_offset(Pid)) || Pid <- Pids2],
+
+    ok = osiris:stop_cluster(WriterConf),
+
+    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    ok.
+
+cluster_should_work_with_committed_offset_on_off(Config) ->
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    PeerStates = [start_child_node(N, PrivDir, application:get_all_env(osiris))
+                  || N <- [s1, s2, s3]],
+    [LeaderNode, Replica1Node, Replica2Node] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    Epoch = 1,
+    ReplicaNodes = [Replica1Node, Replica2Node],
+
+    WriterConf = #{name => Name,
+                   reference => Name,
+                   epoch => Epoch,
+                   leader_node => LeaderNode,
+                   replica_nodes => ReplicaNodes},
+
+    {ok, LeaderPid} = osiris:start_writer(WriterConf),
+
+    ReplicaConf = WriterConf#{leader_pid => LeaderPid},
+    {ok, Replica1Pid} = osiris_replica:start(Replica1Node,
+                                             ReplicaConf#{committed_offset_on => true}),
+    {ok, Replica2Pid} = osiris_replica:start(Replica2Node, ReplicaConf),
+    Pids = [LeaderPid, Replica1Pid, Replica2Pid],
+
+    [?assertEqual(-1, committed_offset(Pid)) || Pid <- Pids],
+
+    Num = 100,
+    write_n(LeaderPid, Num, #{}),
+
+    %% there is no guarantee the last committed offset is up-to-date
+    %% when not all the members are configured to support it,
+    %% so we check the committed chunk ID to make sure the cluster works properly
+
+    [await_condition(fun() ->
+                             committed_chunk_id(Pid) > 0
+                     end, 100, 20) || Pid <- Pids],
+
+    write_n(LeaderPid, Num, #{}),
+
+    [await_condition(fun() ->
+                             committed_chunk_id(Pid) > Num
+                     end, 100, 20) || Pid <- Pids],
+
+    ok = osiris:stop_cluster(WriterConf),
+
+    {ok, LeaderPid2} = osiris:start_writer(WriterConf),
+    ReplicaConf2 = ReplicaConf#{leader_pid => LeaderPid2},
+    {ok, Replica1Pid2} = osiris_replica:start(Replica1Node, ReplicaConf2),
+    {ok, Replica2Pid2} = osiris_replica:start(Replica2Node, ReplicaConf2),
+    Pids2 = [LeaderPid2, Replica1Pid2, Replica2Pid2],
+
+    [?assert(committed_chunk_id(Pid) > Num) || Pid <- Pids2],
+
+    ok = osiris:stop_cluster(WriterConf),
+
+    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    ok.
+
 %% Utility
 
 write_n(Pid, N, Written) ->
@@ -2225,3 +2372,9 @@ truncate(File, Sz) ->
     ok = file:truncate(Fd),
     ok = file:close(Fd),
     ok.
+
+committed_offset(Pid) ->
+    maps:get(committed_offset, osiris:get_stats(Pid)).
+
+committed_chunk_id(Pid) ->
+    maps:get(committed_chunk_id, osiris:get_stats(Pid)).

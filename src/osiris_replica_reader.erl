@@ -41,7 +41,8 @@
          counter :: counters:counters_ref(),
          counter_id :: term(),
          committed_offset = -1 :: -1 | osiris:offset(),
-         offset_listener :: undefined | osiris:offset()}).
+         offset_listener :: undefined | osiris:offset(),
+         committed_offset_on :: boolean()}).
 
 -define(C_OFFSET_LISTENERS, ?C_NUM_LOG_FIELDS + 1).
 -define(COUNTER_FIELDS,
@@ -114,7 +115,7 @@ init(#{hosts := Hosts,
        leader_pid := LeaderPid,
        start_offset := {StartOffset, _} = TailInfo,
        reference := ExtRef,
-       connection_token := Token}) ->
+       connection_token := Token} = Config) ->
     process_flag(trap_exit, true),
 
     ?DEBUG("~ts: trying to connect to replica at ~0p", [Name, Hosts]),
@@ -125,30 +126,32 @@ init(#{hosts := Hosts,
                    [Host, Port]),
             CntId = {?MODULE, ExtRef, Host, Port},
             CntSpec = {CntId, {persistent_term, ?FIELDSPEC_KEY}},
-            Config = #{counter_spec => CntSpec, transport => Transport},
+            ReadCfg = #{counter_spec => CntSpec, transport => Transport},
             %% send token to replica to complete connection setup
             ok = send(Transport, Sock, Token),
-            Ret = osiris_writer:init_data_reader(LeaderPid, TailInfo, Config),
+            Ret = osiris_writer:init_data_reader(LeaderPid, TailInfo, ReadCfg),
             case Ret of
                 {ok, Log} ->
                     CntRef = osiris_log:counters_ref(Log),
                     ?INFO_(Name, "starting osiris replica reader at offset ~b",
                           [osiris_log:next_offset(Log)]),
 
+                    CommittedOffsetOn = committed_offset_on(Config),
                     %% register data listener with osiris_proc
                     ok = osiris_writer:register_data_listener(LeaderPid, StartOffset),
                     MRef = monitor(process, LeaderPid),
                     State =
                         maybe_register_offset_listener(
-                          maybe_send_committed_offset(#state{log = Log,
-                                                             name = Name,
-                                                             transport = Transport,
-                                                             socket = Sock,
-                                                             replica_pid = ReplicaPid,
-                                                             leader_pid = LeaderPid,
-                                                             leader_monitor_ref = MRef,
-                                                             counter = CntRef,
-                                                             counter_id = CntId})),
+                          maybe_send_committed_chunk_id(#state{log = Log,
+                                                               name = Name,
+                                                               transport = Transport,
+                                                               socket = Sock,
+                                                               replica_pid = ReplicaPid,
+                                                               leader_pid = LeaderPid,
+                                                               leader_monitor_ref = MRef,
+                                                               counter = CntRef,
+                                                               counter_id = CntId,
+                                                               committed_offset_on = CommittedOffsetOn})),
                     {ok, State};
                 {error, no_process} ->
                     ?WARN_(Name,
@@ -242,7 +245,7 @@ maybe_register_offset_listener(State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info({osiris_offset, _, _Offs}, State0) ->
-    State1 = maybe_send_committed_offset(State0),
+    State1 = maybe_send_committed_chunk_id(State0),
     State =
         maybe_register_offset_listener(State1#state{offset_listener =
                                                         undefined}),
@@ -333,7 +336,7 @@ do_sendfile0(#state{name = Name,
                     socket = Sock,
                     transport = Transport,
                     log = Log0} = State0) ->
-    State = maybe_send_committed_offset(State0),
+    State = maybe_send_committed_chunk_id(State0),
     case osiris_log:send_file(Sock, Log0) of
         {ok, Log} ->
             do_sendfile0(State#state{log = Log});
@@ -348,16 +351,23 @@ do_sendfile0(#state{name = Name,
             State#state{log = Log}
     end.
 
-maybe_send_committed_offset(#state{log = Log,
-                                   committed_offset = Last,
-                                   replica_pid = RPid} =
-                                State) ->
-    COffs = osiris_log:committed_offset(Log),
+maybe_send_committed_chunk_id(#state{log = Log,
+                                     committed_offset = Last,
+                                     replica_pid = RPid} =
+                              State) ->
+    COffs = osiris_log:committed_chunk_id(Log),
     case COffs of
         COffs when COffs > Last ->
-            ok =
-                erlang:send(RPid, {'$gen_cast', {committed_offset, COffs}},
-                            [noconnect, nosuspend]),
+            LastOffset = osiris_log:committed_offset(Log),
+            Msg = case committed_offset_on(State) of
+                      true ->
+                          {COffs, LastOffset};
+                      false ->
+                          COffs
+                  end,
+
+            ok = erlang:send(RPid, {'$gen_cast', {committed_offset, Msg}},
+                             [noconnect, nosuspend]),
             State#state{committed_offset = COffs};
         _ ->
             State
@@ -438,3 +448,10 @@ maybe_add_sni_option(_) ->
 init_fields_spec() ->
     persistent_term:put(?FIELDSPEC_KEY,
                         ?COUNTER_FIELDS ++ osiris_log:counter_fields()).
+
+committed_offset_on(#{committed_offset_on := On}) when is_boolean(On) ->
+    On;
+committed_offset_on(#state{committed_offset_on = On}) ->
+    On;
+committed_offset_on(_) ->
+    false.
