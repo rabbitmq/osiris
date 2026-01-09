@@ -1,6 +1,6 @@
 PROJECT = osiris
 # PROJECT_DESCRIPTION = Foundation of the log-based streaming subsystem for RabbitMQ
-# PROJECT_VERSION = v1.10.2
+# PROJECT_VERSION = v1.10.3
 
 # define PROJECT_ENV
 # [
