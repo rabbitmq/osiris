@@ -1363,7 +1363,7 @@ set_committed_chunk_id(#?MODULE{mode = #write{},
 
 -spec set_committed_offset(state(), offset()) -> ok.
 set_committed_offset(#?MODULE{mode = #write{},
-                                  cfg = #cfg{shared = Ref}}, Offset)
+                              cfg = #cfg{shared = Ref}}, Offset)
   when is_integer(Offset) ->
     osiris_log_shared:set_committed_offset(Ref, Offset).
 

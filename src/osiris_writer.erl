@@ -77,7 +77,7 @@
          data_listeners = [] :: [{pid(), osiris:offset()}],
          offset_listeners = [] ::
              [{pid(), osiris:offset(), mfa() | undefined}],
-         committed_chk_id = -1 :: osiris:offset()}). %% committed chunk ID
+         committed_chk_id = -1 :: osiris:offset()}).
 
 -opaque state() :: #?MODULE{}.
 

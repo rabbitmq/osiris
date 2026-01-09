@@ -843,9 +843,9 @@ cluster_restart_large(Config) ->
 
     %% wait for replica key counters to match writer
     await_condition(fun () ->
-                            RC = erpc:call(hd(Replicas), osiris_counters, overview,
-                                           [{osiris_replica, Name}]),
-                            maps:with(Keys, CountersPre) == maps:with(Keys, RC)
+                            RC = erpc:call(hd(Replicas), osiris_counters, counters,
+                                           [{osiris_replica, Name}, Keys]),
+                            maps:with(Keys, CountersPre) == RC
                     end, 1000, 20),
     Replica1CountersPre = erpc:call(hd(Replicas), osiris_counters, overview,
                                     [{osiris_replica, Name}]),
