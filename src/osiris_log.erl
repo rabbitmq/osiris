@@ -44,6 +44,7 @@
          get_directory/1,
          get_name/1,
          get_shared/1,
+         get_current_file/1,
          get_default_max_segment_size_bytes/0,
          counters_ref/1,
          close/1,
@@ -1074,6 +1075,7 @@ init_data_reader_at(ChunkId, FilePos, File,
                            readers_counter_fun = CountersFun,
                            shared = Shared
                           },
+                      current_file = filename:basename(File),
                       mode =
                       #read{type = data,
                             next_offset = ChunkId,
@@ -1297,6 +1299,7 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                              readers_counter_fun = ReaderCounterFun,
                              shared = Shared
                             },
+                  current_file = filename:basename(SegmentFile),
                   mode = #read{type = offset,
                                position = FilePos,
                                chunk_selector = maps:get(chunk_selector, Options,
@@ -1371,6 +1374,9 @@ last_chunk_id(#?MODULE{cfg = #cfg{shared = Ref}}) ->
 -spec get_current_epoch(state()) -> non_neg_integer().
 get_current_epoch(#?MODULE{mode = #write{current_epoch = Epoch}}) ->
     Epoch.
+
+-spec get_current_file(state()) -> file:filename_all().
+get_current_file(#?MODULE{current_file = File}) -> File.
 
 -spec get_directory(state()) -> file:filename_all().
 get_directory(#?MODULE{cfg = #cfg{directory = Dir}}) ->
