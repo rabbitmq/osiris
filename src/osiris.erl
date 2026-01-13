@@ -66,8 +66,12 @@
     {abs, offset()} |
     offset() |
     {timestamp, timestamp()}.
+-type retention_fun() :: fun((IdxFiles :: [file:filename_all()]) ->
+    {ToDelete :: [file:filename_all()], ToKeep :: [file:filename_all()]}).
 -type retention_spec() ::
-    {max_bytes, non_neg_integer()} | {max_age, milliseconds()}.
+    {max_bytes, non_neg_integer()} |
+    {max_age, milliseconds()} |
+    {'fun', retention_fun()}.
 -type writer_id() :: binary().
 -type batch() :: {batch, NumRecords :: non_neg_integer(),
                   compression_type(),
@@ -80,11 +84,6 @@
 
 %% returned when reading
 -type entry() :: binary() | batch().
--type reader_options() :: #{transport => tcp | ssl,
-                            chunk_selector => all | user_data,
-                            filter_spec => osiris_bloom:filter_spec(),
-                            read_ahead => boolean() | non_neg_integer()
-                           }.
 
 -export_type([name/0,
               config/0,
@@ -94,6 +93,7 @@
               tracking_id/0,
               offset_spec/0,
               retention_spec/0,
+              retention_fun/0,
               timestamp/0,
               writer_id/0,
               data/0,
@@ -225,8 +225,8 @@ init_reader(Pid, OffsetSpec, CounterSpec) ->
                                                 chunk_selector => user_data}).
 
 -spec init_reader(pid(), offset_spec(), osiris_log:counter_spec(),
-                  reader_options()) ->
-    {ok, osiris_log:state()} |
+                  osiris_log_reader:options()) ->
+    {ok, osiris_log_reader:state()} |
     {error, {offset_out_of_range, empty | {offset(), offset()}}} |
     {error, {invalid_last_offset_epoch, offset(), offset()}}.
 init_reader(Pid, OffsetSpec, {_, _} = CounterSpec, Options)
@@ -235,7 +235,7 @@ init_reader(Pid, OffsetSpec, {_, _} = CounterSpec, Options)
     Ctx0 = osiris_util:get_reader_context(Pid),
     Ctx = Ctx0#{counter_spec => CounterSpec,
                 options => Options},
-    osiris_log:init_offset_reader(OffsetSpec, Ctx).
+    (osiris_log_reader:module()):init_offset_reader(OffsetSpec, Ctx).
 
 -spec register_offset_listener(pid(), offset()) -> ok.
 register_offset_listener(Pid, Offset) ->
