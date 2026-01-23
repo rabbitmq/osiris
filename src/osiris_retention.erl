@@ -28,7 +28,7 @@
 
 -spec start_link() -> {ok, pid()} | ignore | {error, term()}.
 start_link() ->
-    gen_batch_server:start_link({local, ?MODULE}, ?MODULE, [], []).
+    gen_batch_server:start_link({local, ?MODULE}, ?MODULE, [], [{reversed_batch, true}]).
 
 -spec eval(osiris:name(), file:name_all(), [osiris:retention_spec()],
            fun((osiris_log:range()) -> ok)) ->
@@ -48,8 +48,8 @@ init([]) ->
 
 -spec handle_batch([gen_batch_server:op()], #state{}) -> {ok, #state{}}.
 handle_batch(Ops, State0) ->
-    Evals = deduplicate_evals(Ops),
-    State1 = lists:foldl(fun evaluate_retention/2, State0, Evals),
+    %% Ops are in reverse order of arrival. Process newest first.
+    {State1, _Seen} = lists:foldl(fun process_op/2, {State0, sets:new()}, Ops),
     {ok, State1}.
 
 -spec terminate(term(), #state{}) -> ok.
@@ -60,21 +60,23 @@ terminate(_Reason, _State) ->
 %%% Internal functions
 %%%===================================================================
 
-%% Deduplicate by Name as multiple requests from the same stream might
-%% have arrived while processing the previous batch.
-%% Keeping last occurrence for each Name, as retention config could
-%% have changed.
-deduplicate_evals(Ops) ->
-    Map = lists:foldl(
-            fun({cast, {eval, _Pid, Name, _Dir, _Specs, _Fun} = Eval}, Acc) ->
-                    maps:put(Name, Eval, Acc);
-               ({call, From, _}, Acc) ->
-                    gen:reply(From, ok),
-                    Acc;
-               (_, Acc) ->
-                    Acc
-            end, #{}, Ops),
-    maps:values(Map).
+%% Multiple requests from the same stream might have arrived while
+%% processing the previous batch.
+%% Only process newest request for each stream (with the newest
+%% retention config), as the config could have changed.
+process_op({cast, {eval, _Pid, Name, _Dir, _Specs, _Fun} = Eval}, {StateAcc, Seen}) ->
+    case sets:is_element(Name, Seen) of
+        true ->
+            %% Retention for this stream already evaluated
+            {StateAcc, Seen};
+        false ->
+            {evaluate_retention(Eval, StateAcc), sets:add_element(Name, Seen)}
+    end;
+process_op({call, From, _}, {StateAcc, Seen}) ->
+    gen:reply(From, ok),
+    {StateAcc, Seen};
+process_op(_, {StateAcc, Seen}) ->
+    {StateAcc, Seen}.
 
 evaluate_retention({eval, Pid, Name, Dir, Specs, Fun} = Eval, State) ->
     %% only do retention evaluation for stream processes that are
