@@ -97,7 +97,10 @@ all_tests() ->
      overview_with_missing_index_at_start,
      read_ahead_send_file,
      read_ahead_send_file_filter,
-     read_ahead_send_file_on_off
+     read_ahead_send_file_on_off,
+     resolve_offset_spec_empty,
+     resolve_offset_spec_empty_directory,
+     resolve_offset_spec
     ].
 
 groups() ->
@@ -2432,6 +2435,59 @@ read_ahead_send_file_on_off(Config) ->
          osiris_log:close(Rd1),
          osiris_log:close(Wr1)
      end || RaOn <- RaOnOff, RType <- RTypes],
+    ok.
+
+resolve_offset_spec_empty(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    LDir = ?config(leader_dir, Config),
+    LLog0 = seed_log(LDir, [], Config),
+    osiris_log:close(LLog0),
+    RConf = Conf#{dir => LDir},
+    ?assertEqual({ok, 0}, osiris_log:resolve_offset_spec(first, RConf)),
+    ?assertEqual({ok, 0}, osiris_log:resolve_offset_spec(last, RConf)),
+    ?assertEqual({ok, 0}, osiris_log:resolve_offset_spec(next, RConf)),
+    ?assertEqual({ok, 0}, osiris_log:resolve_offset_spec(0, RConf)),
+    ?assertEqual({error, {offset_out_of_range, empty}},
+                 osiris_log:resolve_offset_spec({abs, 1}, RConf)),
+    ok.
+
+resolve_offset_spec_empty_directory(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    LDir = ?config(leader_dir, Config),
+    RConf = Conf#{dir => LDir},
+    ?assertEqual({error, no_index_file}, osiris_log:resolve_offset_spec(first, RConf)),
+    ?assertEqual({error, no_index_file}, osiris_log:resolve_offset_spec(last, RConf)),
+    ?assertEqual({error, no_index_file}, osiris_log:resolve_offset_spec(next, RConf)),
+    ?assertEqual({error, no_index_file}, osiris_log:resolve_offset_spec(0, RConf)),
+    ?assertEqual({error, no_index_file}, osiris_log:resolve_offset_spec({abs, 1}, RConf)),
+    ok.
+
+resolve_offset_spec(Config) ->
+    EpochChunks =
+        [{1, [<<"one">>]}, {2, [<<"two">>]}, {3, [<<"three">>, <<"four">>]}],
+    LDir = ?config(leader_dir, Config),
+    Conf = ?config(osiris_conf, Config),
+    set_shared(Conf, 3),
+    LLog0 = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(LLog0),
+    RConf = Conf#{dir => LDir},
+
+    ?assertEqual({ok, 0}, osiris_log:resolve_offset_spec(first, RConf)),
+    ?assertEqual({ok, 2}, osiris_log:resolve_offset_spec(last, RConf)),
+    ?assertEqual({ok, 4}, osiris_log:resolve_offset_spec(next, RConf)),
+    ?assertEqual({ok, 0}, osiris_log:resolve_offset_spec(0, RConf)),
+    ?assertEqual({ok, 1}, osiris_log:resolve_offset_spec(1, RConf)),
+    ?assertEqual({ok, 2}, osiris_log:resolve_offset_spec(2, RConf)),
+    ?assertEqual({ok, 2}, osiris_log:resolve_offset_spec(3, RConf)),
+    ?assertEqual({ok, 2}, osiris_log:resolve_offset_spec({abs, 2}, RConf)),
+    ?assertEqual({ok, 2}, osiris_log:resolve_offset_spec({abs, 3}, RConf)),
+    %% integer offset too high falls back to next
+    ?assertEqual({ok, 4}, osiris_log:resolve_offset_spec(100, RConf)),
+    %% {abs, _} out of range returns error
+    ?assertEqual({error, {offset_out_of_range, {0, 3}}},
+                 osiris_log:resolve_offset_spec({abs, 4}, RConf)),
+    ?assertEqual({error, {offset_out_of_range, {0, 3}}},
+                 osiris_log:resolve_offset_spec({abs, 100}, RConf)),
     ok.
 
 %% Utility
