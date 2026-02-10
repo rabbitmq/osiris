@@ -18,6 +18,7 @@
          fetch_writer_seq/2,
          init_reader/3,
          init_reader/4,
+         resolve_offset_spec/3,
          register_offset_listener/2,
          register_offset_listener/3,
          update_retention/2,
@@ -238,6 +239,17 @@ init_reader(Pid, OffsetSpec, {_, _} = CounterSpec, Options)
     Ctx = Ctx0#{counter_spec => CounterSpec,
                 options => Options},
     osiris_log:init_offset_reader(OffsetSpec, Ctx).
+
+-spec resolve_offset_spec(pid(), offset_spec(), reader_options()) ->
+    {ok, offset()} |
+    {error, no_index_file} |
+    {error, {offset_out_of_range, osiris_log:range()}} |
+    {error, retries_exhausted}.
+resolve_offset_spec(Pid, OffsetSpec, Options)
+    when is_pid(Pid) andalso node(Pid) =:= node() ->
+    Ctx0 = osiris_util:get_reader_context(Pid),
+    Ctx = Ctx0#{options => Options},
+    osiris_log:resolve_offset_spec(OffsetSpec, Ctx).
 
 -spec register_offset_listener(pid(), offset()) -> ok.
 register_offset_listener(Pid, Offset) ->
