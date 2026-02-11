@@ -3524,13 +3524,12 @@ stream_offset_landmarks(Dir) when ?IS_STRING(Dir) ->
         {ok, []} ->
             {error, empty};
         {ok, [One]} ->
-            {FirstOff, FirstTs} = One,
-            LastLandmark = last_offset_and_timestamp(Dir),
-            {LastOff, LastTs} = case LastLandmark of
-                                   {ok, L} -> L;
-                                   _ -> {FirstOff, FirstTs}
-                               end,
-            {ok, #{first => {FirstOff, FirstTs},
+            {LastOff, LastTs} = 
+                case last_offset_and_timestamp(Dir) of
+                    {ok, L} -> L;
+                    _ -> One
+                end,
+            {ok, #{first => One,
                    last => {LastOff, LastTs},
                    p25 => One,
                    p50 => One,
@@ -3540,8 +3539,7 @@ stream_offset_landmarks(Dir) when ?IS_STRING(Dir) ->
             LastChunk = lists:last(Chunks),
             {FirstOffset, _FirstTs} = First,
             {LastChunkId, _LastChunkTs} = LastChunk,
-            LastLandmark = last_offset_and_timestamp(Dir),
-            Last = case LastLandmark of
+            Last = case last_offset_and_timestamp(Dir) of
                       {ok, L} -> L;
                       _ -> LastChunk
                   end,
@@ -3648,7 +3646,7 @@ scan_one_index_file(IdxFile) ->
                 {ok, _} = file:position(Fd, ?IDX_HEADER_SIZE),
                 {ok, ChunksWithPos} = scan_index_records(Fd, []),
                 SegFile = segment_from_index_file(IdxFile),
-                Fixed = fix_timestamps_from_segment(SegFile, ChunksWithPos),
+                Fixed = resolve_timestamps_from_segment(SegFile, ChunksWithPos),
                 {ok, Fixed}
             after
                 _ = file:close(Fd)
@@ -3675,11 +3673,11 @@ scan_index_records(Fd, Acc) ->
 
 %% Timestamp below 1e12 ms (Sept 2001) is suspicious; may be Epoch or test data.
 %% When so, read the chunk header from the segment and use its timestamp.
-fix_timestamps_from_segment(SegFile, ChunksWithPos) ->
+resolve_timestamps_from_segment(SegFile, ChunksWithPos) ->
     case file:open(SegFile, [read, raw, binary]) of
         {ok, Fd} ->
             try
-                [fix_chunk_timestamp(Fd, E) || E <- ChunksWithPos]
+                [resolve_chunk_timestamp(Fd, E) || E <- ChunksWithPos]
             after
                 _ = file:close(Fd)
             end;
@@ -3687,14 +3685,14 @@ fix_timestamps_from_segment(SegFile, ChunksWithPos) ->
             [{ChunkId, Ts} || {ChunkId, Ts, _} <- ChunksWithPos]
     end.
 
-fix_chunk_timestamp(Fd, {ChunkId, Ts, FilePos}) when Ts < 1000000000000 ->
+resolve_chunk_timestamp(Fd, {ChunkId, Ts, FilePos}) when Ts < 1000000000000 ->
     case file:pread(Fd, FilePos, ?HEADER_SIZE_B) of
         {ok, <<_:64, SegTs:64/signed, _/binary>>} ->
             {ChunkId, SegTs};
         _ ->
             {ChunkId, Ts}
     end;
-fix_chunk_timestamp(_Fd, {ChunkId, Ts, _}) ->
+resolve_chunk_timestamp(_Fd, {ChunkId, Ts, _}) ->
     {ChunkId, Ts}.
 
 %% Returns the {Offset, Timestamp} in the sorted Chunks list whose offset
