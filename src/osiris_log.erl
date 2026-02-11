@@ -57,6 +57,7 @@
          directory/1,
          delete_directory/1,
          counter_fields/0,
+         stream_offset_landmarks/1,
          make_counter/1,
          generate_log/4]).
 
@@ -3503,6 +3504,214 @@ write_in_chunks(ToWrite, MsgsPerChunk, Msg, W0) when ToWrite > 0 ->
     write_in_chunks(ToWrite - MsgsPerChunk, MsgsPerChunk, Msg, W1);
 write_in_chunks(_, _, _, W) ->
     W.
+
+%% Scans all index files for the log at Dir and returns the first chunk
+%% (offset + timestamp), last chunk (offset + timestamp), and the chunk
+%% closest to 25%, 50% and 75% of the offset range (with offset and
+%% timestamp). Percent positions may not fall on a chunk boundary, so
+%% the chunk with the closest offset is chosen.
+-spec stream_offset_landmarks(file:filename_all() | config()) ->
+    {ok, #{first => {offset(), osiris:timestamp()},
+           last => {offset(), osiris:timestamp()},
+           p25 => {offset(), osiris:timestamp()},
+           p50 => {offset(), osiris:timestamp()},
+           p75 => {offset(), osiris:timestamp()}}} |
+    {error, empty}.
+stream_offset_landmarks(#{dir := Dir}) ->
+    stream_offset_landmarks(Dir);
+stream_offset_landmarks(Dir) when ?IS_STRING(Dir) ->
+    case scan_index_chunks(Dir) of
+        {ok, []} ->
+            {error, empty};
+        {ok, [One]} ->
+            {FirstOff, FirstTs} = One,
+            LastLandmark = last_offset_and_timestamp(Dir),
+            {LastOff, LastTs} = case LastLandmark of
+                                   {ok, L} -> L;
+                                   _ -> {FirstOff, FirstTs}
+                               end,
+            {ok, #{first => {FirstOff, FirstTs},
+                   last => {LastOff, LastTs},
+                   p25 => One,
+                   p50 => One,
+                   p75 => One}};
+        {ok, Chunks} ->
+            First = hd(Chunks),
+            LastChunk = lists:last(Chunks),
+            {FirstOffset, _FirstTs} = First,
+            {LastChunkId, _LastChunkTs} = LastChunk,
+            LastLandmark = last_offset_and_timestamp(Dir),
+            Last = case LastLandmark of
+                      {ok, L} -> L;
+                      _ -> LastChunk
+                  end,
+            Range = LastChunkId - FirstOffset,
+            Targets = case Range of
+                          0 ->
+                              [FirstOffset, FirstOffset, FirstOffset];
+                          _ ->
+                              [FirstOffset + (Range * 25) div 100,
+                               FirstOffset + (Range * 50) div 100,
+                               FirstOffset + (Range * 75) div 100]
+                      end,
+            [P25, P50, P75] = [closest_chunk_to_target(Chunks, T) || T <- Targets],
+            {ok, #{first => First,
+                   last => Last,
+                   p25 => P25,
+                   p50 => P50,
+                   p75 => P75}}
+    end.
+
+%% Returns {ok, {LastOffset, Timestamp}} where LastOffset is the very last
+%% offset in the log (last offset in the last chunk), not the last chunk's
+%% first offset. Timestamp is the last chunk's timestamp.
+-spec last_offset_and_timestamp(file:filename_all()) ->
+    {ok, {offset(), osiris:timestamp()}} | {error, empty}.
+last_offset_and_timestamp(Dir) ->
+    IdxFiles = sorted_index_files(Dir),
+    case non_empty_index_files(IdxFiles) of
+        [] ->
+            {error, empty};
+        NonEmpty ->
+            LastIdxFile = lists:last(NonEmpty),
+            last_offset_and_timestamp_from_file(LastIdxFile)
+    end.
+
+last_offset_and_timestamp_from_file(LastIdxFile) ->
+    case file:open(LastIdxFile, [read, raw, binary]) of
+        {ok, IdxFd} ->
+            try
+                case position_at_idx_record_boundary(IdxFd, eof) of
+                    {ok, Pos} when Pos >= ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B ->
+                        ReadPos = Pos - ?INDEX_RECORD_SIZE_B,
+                        case file:pread(IdxFd, ReadPos, ?INDEX_RECORD_SIZE_B) of
+                            {ok, <<ChunkId:64/unsigned,
+                                   IdxTs:64/signed,
+                                   _Epoch:64/unsigned,
+                                   FilePos:32/unsigned,
+                                   _ChType:8/unsigned>>}
+                              when ChunkId =/= 0 orelse IdxTs =/= 0 ->
+                                SegFile = segment_from_index_file(LastIdxFile),
+                                case file:open(SegFile, [read, raw, binary]) of
+                                    {ok, SegFd} ->
+                                        try
+                                            case file:pread(SegFd, FilePos, ?HEADER_SIZE_B) of
+                                                {ok, <<_:32,
+                                                       NumRecords:32/unsigned,
+                                                       SegTs:64/signed,
+                                                       _/binary>>} ->
+                                                    LastOffset = ChunkId + NumRecords - 1,
+                                                    Ts = if IdxTs < 1000000000000 -> SegTs;
+                                                            true -> IdxTs
+                                                         end,
+                                                    {ok, {LastOffset, Ts}};
+                                                _ ->
+                                                    {ok, {ChunkId, IdxTs}}
+                                            end
+                                        after
+                                            file:close(SegFd)
+                                        end;
+                                    _ ->
+                                        {ok, {ChunkId, IdxTs}}
+                                end;
+                            _ ->
+                                {error, empty}
+                        end;
+                    _ ->
+                        {error, empty}
+                end
+            after
+                file:close(IdxFd)
+            end;
+        _ ->
+            {error, empty}
+    end.
+
+scan_index_chunks(Dir) ->
+    IdxFiles = sorted_index_files(Dir),
+    scan_index_chunks_files(IdxFiles, []).
+
+scan_index_chunks_files([], Acc) ->
+    {ok, lists:reverse(Acc)};
+scan_index_chunks_files([IdxFile | Rest], Acc) ->
+    case scan_one_index_file(IdxFile) of
+        {ok, Chunks} ->
+            scan_index_chunks_files(Rest, lists:reverse(Chunks) ++ Acc);
+        {error, _} = Err ->
+            Err
+    end.
+
+scan_one_index_file(IdxFile) ->
+    case file:open(IdxFile, [read, raw, binary]) of
+        {ok, Fd} ->
+            try
+                {ok, _} = file:position(Fd, ?IDX_HEADER_SIZE),
+                {ok, ChunksWithPos} = scan_index_records(Fd, []),
+                SegFile = segment_from_index_file(IdxFile),
+                Fixed = fix_timestamps_from_segment(SegFile, ChunksWithPos),
+                {ok, Fixed}
+            after
+                _ = file:close(Fd)
+            end;
+        Err ->
+            Err
+    end.
+
+scan_index_records(Fd, Acc) ->
+    case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
+        {ok, <<ChunkId:64/unsigned,
+               Timestamp:64/signed,
+               _Epoch:64/unsigned,
+               FilePos:32/unsigned,
+               _ChType:8/unsigned>>} when ChunkId =/= 0 orelse Timestamp =/= 0 ->
+            scan_index_records(Fd, [{ChunkId, Timestamp, FilePos} | Acc]);
+        {ok, ?ZERO_IDX_MATCH(_)} ->
+            scan_index_records(Fd, Acc);
+        {ok, _} ->
+            scan_index_records(Fd, Acc);
+        eof ->
+            {ok, lists:reverse(Acc)}
+    end.
+
+%% Timestamp below 1e12 ms (Sept 2001) is suspicious; may be Epoch or test data.
+%% When so, read the chunk header from the segment and use its timestamp.
+fix_timestamps_from_segment(SegFile, ChunksWithPos) ->
+    case file:open(SegFile, [read, raw, binary]) of
+        {ok, Fd} ->
+            try
+                [fix_chunk_timestamp(Fd, E) || E <- ChunksWithPos]
+            after
+                _ = file:close(Fd)
+            end;
+        _ ->
+            [{ChunkId, Ts} || {ChunkId, Ts, _} <- ChunksWithPos]
+    end.
+
+fix_chunk_timestamp(Fd, {ChunkId, Ts, FilePos}) when Ts < 1000000000000 ->
+    case file:pread(Fd, FilePos, ?HEADER_SIZE_B) of
+        {ok, <<_:64, SegTs:64/signed, _/binary>>} ->
+            {ChunkId, SegTs};
+        _ ->
+            {ChunkId, Ts}
+    end;
+fix_chunk_timestamp(_Fd, {ChunkId, Ts, _}) ->
+    {ChunkId, Ts}.
+
+%% Returns the {Offset, Timestamp} in the sorted Chunks list whose offset
+%% is closest to Target (by minimum |Offset - Target|).
+closest_chunk_to_target(Chunks, Target) ->
+    [{O, Ts} | _] = Chunks,
+    closest_chunk_to_target(Chunks, Target, {O, Ts}, abs(O - Target)).
+
+closest_chunk_to_target([], _Target, Best, _BestDist) ->
+    Best;
+closest_chunk_to_target([{O, Ts} | Rest], Target, Best, BestDist) ->
+    Dist = abs(O - Target),
+    if Dist < BestDist ->
+           closest_chunk_to_target(Rest, Target, {O, Ts}, Dist);
+       true ->
+           closest_chunk_to_target(Rest, Target, Best, BestDist)
+    end.
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
