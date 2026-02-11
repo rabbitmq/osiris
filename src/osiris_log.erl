@@ -3644,10 +3644,10 @@ scan_one_index_file(IdxFile) ->
         {ok, Fd} ->
             try
                 {ok, _} = file:position(Fd, ?IDX_HEADER_SIZE),
-                {ok, ChunksWithPos} = scan_index_records(Fd, []),
-                SegFile = segment_from_index_file(IdxFile),
-                Fixed = resolve_timestamps_from_segment(SegFile, ChunksWithPos),
-                {ok, Fixed}
+                scan_index_records(Fd, [])
+                %SegFile = segment_from_index_file(IdxFile),
+                %Resolved = resolve_timestamps_from_segment(SegFile, ChunksWithPos),
+                %{ok, Resolved}
             after
                 _ = file:close(Fd)
             end;
@@ -3660,9 +3660,9 @@ scan_index_records(Fd, Acc) ->
         {ok, <<ChunkId:64/unsigned,
                Timestamp:64/signed,
                _Epoch:64/unsigned,
-               FilePos:32/unsigned,
+               _FilePos:32/unsigned,
                _ChType:8/unsigned>>} when ChunkId =/= 0 orelse Timestamp =/= 0 ->
-            scan_index_records(Fd, [{ChunkId, Timestamp, FilePos} | Acc]);
+            scan_index_records(Fd, [{ChunkId, Timestamp} | Acc]);
         {ok, ?ZERO_IDX_MATCH(_)} ->
             scan_index_records(Fd, Acc);
         {ok, _} ->
@@ -3670,30 +3670,6 @@ scan_index_records(Fd, Acc) ->
         eof ->
             {ok, lists:reverse(Acc)}
     end.
-
-%% Timestamp below 1e12 ms (Sept 2001) is suspicious; may be Epoch or test data.
-%% When so, read the chunk header from the segment and use its timestamp.
-resolve_timestamps_from_segment(SegFile, ChunksWithPos) ->
-    case file:open(SegFile, [read, raw, binary]) of
-        {ok, Fd} ->
-            try
-                [resolve_chunk_timestamp(Fd, E) || E <- ChunksWithPos]
-            after
-                _ = file:close(Fd)
-            end;
-        _ ->
-            [{ChunkId, Ts} || {ChunkId, Ts, _} <- ChunksWithPos]
-    end.
-
-resolve_chunk_timestamp(Fd, {ChunkId, Ts, FilePos}) when Ts < 1000000000000 ->
-    case file:pread(Fd, FilePos, ?HEADER_SIZE_B) of
-        {ok, <<_:64, SegTs:64/signed, _/binary>>} ->
-            {ChunkId, SegTs};
-        _ ->
-            {ChunkId, Ts}
-    end;
-resolve_chunk_timestamp(_Fd, {ChunkId, Ts, _}) ->
-    {ChunkId, Ts}.
 
 %% Returns the {Offset, Timestamp} in the sorted Chunks list whose offset
 %% is closest to Target (by minimum |Offset - Target|).
