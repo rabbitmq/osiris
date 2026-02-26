@@ -1692,6 +1692,18 @@ iterator_next(#iterator{fd = Fd,
 credit_hint_for_read_ahead(entry_iterator) -> 1;
 credit_hint_for_read_ahead(N) when is_integer(N), N >= 0 -> N.
 
+%% Reads up to Max bytes from the current position of the entry iterator.
+%% Returns the data (or fewer bytes if the remaining stream is shorter) and an
+%% updated iterator, or {eof, It} when no data remains. The caller must use the
+%% returned iterator for subsequent reads or skip. File read failures raise;
+%% they are not returned as {error, _}.
+%%
+%% Entry iterators exist because chunks can be returned in entry_iterator mode
+%% instead of as a full Entry: the stream protocol limits a single message to the
+%% frame size (typically 1 MiB), but other protocols (e.g. AMQP 0-9-1) can
+%% publish much larger messages to a stream. An entry iterator lets callers read
+%% a bounded number of bytes at a time (e.g. the AMQP 1.0 section descriptor and
+%% size) and then decide whether to read or skip the section content.
 -spec entry_iterator_read(entry_iterator(), non_neg_integer()) ->
     {ok, binary(), entry_iterator()} | {eof, entry_iterator()}.
 entry_iterator_read(#entry_iterator{buffer = Buffer, file_len = FileLen} = It, _Max)
