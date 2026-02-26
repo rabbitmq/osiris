@@ -34,6 +34,9 @@
          chunk_iterator/2,
          chunk_iterator/3,
          iterator_next/1,
+         iterator_next/2,
+         entry_iterator_read/2,
+         entry_iterator_skip/2,
          read_chunk/1,
          read_chunk_parsed/1,
          read_chunk_parsed/2,
@@ -479,6 +482,7 @@
 
 -export_type([state/0,
               chunk_iterator/0,
+              entry_iterator/0,
               range/0,
               config/0,
               counter_spec/0,
@@ -1479,6 +1483,25 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
                    next_record_pos :: non_neg_integer(),
                    ra :: #ra{}}).
 -opaque chunk_iterator() :: #iterator{}.
+
+%% Entry iterator: streams a simple entry from file without loading it all.
+%% Used when iterator_next/2 is called with entry_iterator.
+%%
+%% Fields:
+%%   fd       - Open file descriptor of the segment file being read
+%%   buffer   - Bytes already read from the entry and buffered for the next
+%%              entry_iterator_read; avoids re-reading from file
+%%   file_pos - Byte offset in the file where the next unread byte of the
+%%              entry lives (buffer length is not included in file_len)
+%%   file_len - Number of bytes of the entry still in the file (from file_pos
+%%              to end of entry); 0 when the whole entry is in buffer
+-record(entry_iterator,
+        {fd :: file:fd(),
+         buffer = <<>> :: binary(),
+         file_pos :: non_neg_integer(),
+         file_len :: non_neg_integer()}).
+-opaque entry_iterator() :: #entry_iterator{}.
+
 -define(REC_MATCH_SIMPLE(Len, Rem),
         <<0:1, Len:31/unsigned, Rem/binary>>).
 -define(REC_MATCH_SUBBATCH(CompType, NumRec, UncompLen, Len, Rem),
@@ -1575,7 +1598,7 @@ chunk_iterator(#?MODULE{cfg = #cfg{},
 iterator_next(#iterator{} = I) ->
     iterator_next(I, 1).
 
--spec iterator_next(chunk_iterator(), CreditHint :: non_neg_integer()) ->
+-spec iterator_next(chunk_iterator(), CreditHint :: non_neg_integer() | 'entry_iterator') ->
     end_of_chunk | {offset_entry(), chunk_iterator()}.
 iterator_next(#iterator{num_left = 0}, _CreditHint) ->
     end_of_chunk;
@@ -1587,15 +1610,36 @@ iterator_next(#iterator{fd = Fd,
                         next_record_pos = Pos0,
                         ra = Ra} = I0, CreditHint) ->
     Pos = Pos0 + ?REC_HDR_SZ_SIMPLE_B,
-    case Rem0 of
-        <<Record:Len/binary, Rem/binary>> ->
+    case {Rem0, CreditHint} of
+        {<<Record:Len/binary, Rem/binary>>, entry_iterator} ->
+            EntryIt = #entry_iterator{fd = Fd, buffer = Record,
+                                      file_pos = Pos + Len, file_len = 0},
+            I = I0#iterator{next_offset = NextOffs + 1,
+                            num_left = Num - 1,
+                            data_left = DataLeft - (Len + ?REC_HDR_SZ_SIMPLE_B),
+                            data_cache = Rem,
+                            next_record_pos = Pos + Len},
+            {{NextOffs, EntryIt}, I};
+        {<<Record:Len/binary, Rem/binary>>, _} ->
             I = I0#iterator{next_offset = NextOffs + 1,
                             num_left = Num - 1,
                             data_left = DataLeft - (Len + ?REC_HDR_SZ_SIMPLE_B),
                             data_cache = Rem,
                             next_record_pos = Pos + Len},
             {{NextOffs, Record}, I};
-        _ ->
+        {_, entry_iterator} ->
+            PrefixLen = byte_size(Rem0),
+            EntryIt = #entry_iterator{fd = Fd, buffer = Rem0,
+                                      file_pos = Pos + PrefixLen,
+                                      file_len = Len - PrefixLen},
+            I = I0#iterator{next_offset = NextOffs + 1,
+                            num_left = Num - 1,
+                            data_left = DataLeft - (Len + ?REC_HDR_SZ_SIMPLE_B),
+                            data_cache = <<>>,
+                            next_record_pos = Pos + Len,
+                            ra = ra_clear(Ra)},
+            {{NextOffs, EntryIt}, I};
+        {_, _} ->
             MinReqSize = Len + ?REC_HDR_SZ_SIMPLE_B,
             {Data, Ra1} = iter_read_ahead(Fd, Pos0, MinReqSize, CreditHint,
                                           DataLeft, Num, Ra),
@@ -1625,7 +1669,8 @@ iterator_next(#iterator{fd = Fd,
                 %% not enough in Rem0 to read the entire record
                 %% so we need to read it from disk
                 MinReqSize = Len + ?REC_HDR_SZ_SUBBATCH_B,
-                {Data, Ra1} = iter_read_ahead(Fd, Pos, MinReqSize, CreditHint,
+                Credit = credit_hint_for_read_ahead(CreditHint),
+                {Data, Ra1} = iter_read_ahead(Fd, Pos, MinReqSize, Credit,
                                               DataLeft, Num, Ra),
                 iterator_next(I0#iterator{ra = Ra1,
                                           data_cache = Data},
@@ -1637,11 +1682,60 @@ iterator_next(#iterator{fd = Fd,
                         ra = Ra,
                         next_record_pos = Pos} = I0, CreditHint) ->
     MinReq = min(?REC_HDR_SZ_SUBBATCH_B, DataLeft),
-    {Data, Ra1} = iter_read_ahead(Fd, Pos, MinReq, CreditHint,
+    Credit = credit_hint_for_read_ahead(CreditHint),
+    {Data, Ra1} = iter_read_ahead(Fd, Pos, MinReq, Credit,
                                   DataLeft, Num, Ra),
     iterator_next(I0#iterator{ra = Ra1,
                               data_cache = Data},
                   CreditHint).
+
+credit_hint_for_read_ahead(entry_iterator) -> 1;
+credit_hint_for_read_ahead(N) when is_integer(N), N >= 0 -> N.
+
+-spec entry_iterator_read(entry_iterator(), non_neg_integer()) ->
+    {ok, binary(), entry_iterator()} | {eof, entry_iterator()}.
+entry_iterator_read(#entry_iterator{buffer = Buffer, file_len = FileLen} = It, _Max)
+  when Buffer =:= <<>>, FileLen =:= 0 ->
+    {eof, It};
+entry_iterator_read(#entry_iterator{fd = Fd, buffer = Buffer,
+                                    file_pos = FilePos, file_len = FileLen} = It,
+                    Max) ->
+    case Buffer of
+        <<Chunk:Max/binary, Rest/binary>> ->
+            {ok, Chunk, It#entry_iterator{buffer = Rest}};
+        <<>> when FileLen > 0 ->
+            ReadLen = min(Max, FileLen),
+            case file:pread(Fd, FilePos, ReadLen) of
+                {ok, Data} ->
+                    {ok, Data,
+                     It#entry_iterator{file_pos = FilePos + ReadLen,
+                                       file_len = FileLen - ReadLen}};
+                {error, _} = Err ->
+                    error(Err)
+            end;
+        <<>> ->
+            {eof, It};
+        Rest when byte_size(Rest) =< Max ->
+            {ok, Rest, It#entry_iterator{buffer = <<>>}};
+        Rest ->
+            Take = min(Max, byte_size(Rest)),
+            <<Chunk:Take/binary, Rest1/binary>> = Rest,
+            {ok, Chunk, It#entry_iterator{buffer = Rest1}}
+    end.
+
+-spec entry_iterator_skip(entry_iterator(), non_neg_integer()) -> entry_iterator().
+entry_iterator_skip(#entry_iterator{buffer = Buffer, file_pos = FilePos,
+                                    file_len = FileLen} = It, N) ->
+    BufLen = byte_size(Buffer),
+    if
+        N =< BufLen ->
+            It#entry_iterator{buffer = binary:part(Buffer, N, BufLen - N)};
+        true ->
+            SkipFile = N - BufLen,
+            It#entry_iterator{buffer = <<>>,
+                              file_pos = FilePos + SkipFile,
+                              file_len = FileLen - SkipFile}
+    end.
 
 -spec read_chunk(state()) ->
     {ok, binary(), state()} |

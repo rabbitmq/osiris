@@ -41,6 +41,8 @@ all_tests() ->
      iterator_read_chunk_with_read_ahead,
      iterator_read_chunk_with_read_ahead_2,
      iterator_read_chunk_mixed_sizes_with_credit,
+     iterator_stream_entry,
+     iterator_stream_entry_sections,
      read_chunk_parsed,
      read_chunk_parsed_2,
      read_chunk_parsed_multiple_chunks,
@@ -392,6 +394,137 @@ iterator_read_chunk_mixed_sizes_with_credit(Config) ->
     osiris_log:close(R2),
     osiris_log:close(S1),
     ok.
+
+iterator_stream_entry(Config) ->
+    %% With entry_iterator, simple entries are returned as entry_iterator instead of binary.
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf),
+    Shared = osiris_log:get_shared(S0),
+    RConf = Conf#{shared => Shared},
+    {ok, R0} = osiris_log:init_offset_reader(0, RConf),
+    {end_of_stream, R1} = osiris_log:chunk_iterator(R0),
+    EntriesRev = [<<"hi">>, <<"ho">>],
+    {ChId, S1} = write_committed(EntriesRev, S0),
+    {ok, _H, I0, R2} = osiris_log:chunk_iterator(R1),
+    %% First simple entry as entry_iterator (write order: first offset = last in list).
+    {{ChId, EntryIt0}, I1} = osiris_log:iterator_next(I0, entry_iterator),
+    <<"ho">> = drain_entry_iterator(EntryIt0),
+    %% Second simple entry as entry_iterator.
+    HiOffs = ChId + 1,
+    {{HiOffs, EntryIt1}, I2} = osiris_log:iterator_next(I1, entry_iterator),
+    <<"hi">> = drain_entry_iterator(EntryIt1),
+    ?assertMatch(end_of_chunk, osiris_log:iterator_next(I2, entry_iterator)),
+    %% entry_iterator_skip: re-read same chunk and skip first byte of first entry ("ho").
+    {ok, _, I3, _} = osiris_log:chunk_iterator(R1),
+    {{ChId, EntryIt2}, _} = osiris_log:iterator_next(I3, entry_iterator),
+    EntryIt2Skipped = osiris_log:entry_iterator_skip(EntryIt2, 1),
+    <<"o">> = drain_entry_iterator(EntryIt2Skipped),
+    %% Read in small chunks.
+    {ok, _, I4, _} = osiris_log:chunk_iterator(R1),
+    {{ChId, EntryIt3}, _} = osiris_log:iterator_next(I4, entry_iterator),
+    {ok, <<"h">>, EntryIt3a} = osiris_log:entry_iterator_read(EntryIt3, 1),
+    {ok, <<"o">>, _} = osiris_log:entry_iterator_read(EntryIt3a, 1),
+    osiris_log:close(R2),
+    osiris_log:close(S1),
+    ok.
+
+%% Covers iterating over non-data sections, data section, attributes, and skipping
+%% sections/attributes. Uses a single entry with a length-prefixed layout:
+%%   [AttrLen:16, Attrs, NonDataLen:16, NonDataSection, DataLen:16, DataSection]
+iterator_stream_entry_sections(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf),
+    Shared = osiris_log:get_shared(S0),
+    RConf = Conf#{shared => Shared},
+    {ok, R0} = osiris_log:init_offset_reader(0, RConf),
+    {end_of_stream, R1} = osiris_log:chunk_iterator(R0),
+    %% Build entry: attributes (7 bytes), non-data section "header" (6), data "body" (4).
+    Attrs = <<"k:v;a:1">>,
+    NonDataSection = <<"header">>,
+    DataSection = <<"body">>,
+    Entry = <<(byte_size(Attrs)):16/big, Attrs/binary,
+              (byte_size(NonDataSection)):16/big, NonDataSection/binary,
+              (byte_size(DataSection)):16/big, DataSection/binary>>,
+    {ChId, S1} = write_committed([Entry], S0),
+    {ok, _H, I0, R2} = osiris_log:chunk_iterator(R1),
+    {{ChId, EntryIt}, I0_done} = osiris_log:iterator_next(I0, entry_iterator),
+
+    %% Read attributes (non-data): length then payload.
+    {ok, <<7:16/big>>, EntryIt1} = osiris_log:entry_iterator_read(EntryIt, 2),
+    {ok, Attrs, EntryIt2} = osiris_log:entry_iterator_read(EntryIt1, byte_size(Attrs)),
+    %% Read non-data section (header): length then payload.
+    {ok, <<6:16/big>>, EntryIt3} = osiris_log:entry_iterator_read(EntryIt2, 2),
+    {ok, NonDataSection, EntryIt4} = osiris_log:entry_iterator_read(EntryIt3, byte_size(NonDataSection)),
+    %% Read data section (body).
+    {ok, <<4:16/big>>, EntryIt5} = osiris_log:entry_iterator_read(EntryIt4, 2),
+    {ok, DataSection, EntryIt6} = osiris_log:entry_iterator_read(EntryIt5, byte_size(DataSection)),
+    %% Drain should be empty.
+    {eof, _} = osiris_log:entry_iterator_read(EntryIt6, 1),
+
+    %% Same chunk: skip attributes entirely, then read non-data section only.
+    {ok, _, I1, _} = osiris_log:chunk_iterator(R1),
+    {{ChId, EntryItA}, _} = osiris_log:iterator_next(I1, entry_iterator),
+    SkipAttrs = 2 + 7,
+    EntryItB = osiris_log:entry_iterator_skip(EntryItA, SkipAttrs),
+    %% After skipping attributes we have non-data section then data section.
+    {ok, <<6:16/big>>, EntryItC} = osiris_log:entry_iterator_read(EntryItB, 2),
+    {ok, NonDataSection, EntryItD} = osiris_log:entry_iterator_read(EntryItC, byte_size(NonDataSection)),
+    %% EntryItD is now at the data section (2-byte length + 4-byte body); read it.
+    {ok, <<4:16/big>>, EntryItF} = osiris_log:entry_iterator_read(EntryItD, 2),
+    {ok, DataSection, EntryItG} = osiris_log:entry_iterator_read(EntryItF, byte_size(DataSection)),
+    {eof, _} = osiris_log:entry_iterator_read(EntryItG, 1),
+
+    %% Same chunk: skip attributes and non-data section and data length prefix.
+    {ok, _, I2, _} = osiris_log:chunk_iterator(R1),
+    {{ChId, EntryItH}, _} = osiris_log:iterator_next(I2, entry_iterator),
+    SkipToData = 2 + 7 + 2 + 6 + 2,
+    EntryItI = osiris_log:entry_iterator_skip(EntryItH, SkipToData),
+    {ok, DataSection, _} = osiris_log:entry_iterator_read(EntryItI, byte_size(DataSection)),
+
+    %% Same chunk: read first attribute byte, skip rest of attributes, read non-data.
+    {ok, _, I3, _} = osiris_log:chunk_iterator(R1),
+    {{ChId, EntryItJ}, _} = osiris_log:iterator_next(I3, entry_iterator),
+    {ok, <<7:16/big>>, EntryItK} = osiris_log:entry_iterator_read(EntryItJ, 2),
+    {ok, <<"k">>, EntryItL} = osiris_log:entry_iterator_read(EntryItK, 1),
+    EntryItM = osiris_log:entry_iterator_skip(EntryItL, 6),
+    {ok, <<6:16/big>>, EntryItN} = osiris_log:entry_iterator_read(EntryItM, 2),
+    {ok, NonDataSection, _} = osiris_log:entry_iterator_read(EntryItN, byte_size(NonDataSection)),
+
+    %% Entry with multiple non-data sections: skip one section, read next, skip attr block.
+    Attrs2 = <<"x">>,
+    Section1 = <<"sec1">>,
+    Section2 = <<"section-two">>,
+    Data2 = <<"payload">>,
+    Entry2 = <<(byte_size(Attrs2)):16/big, Attrs2/binary,
+               (byte_size(Section1)):16/big, Section1/binary,
+               (byte_size(Section2)):16/big, Section2/binary,
+               (byte_size(Data2)):16/big, Data2/binary>>,
+    {ChId2, S2} = write_committed([Entry2], S1),
+    end_of_chunk = osiris_log:iterator_next(I0_done, entry_iterator),
+    {ok, _, I4, R3} = osiris_log:chunk_iterator(R2, 1, I0_done),
+    {{ChId2, EntryItP}, _} = osiris_log:iterator_next(I4, entry_iterator),
+    %% Skip attributes and first non-data section.
+    EntryItP1 = osiris_log:entry_iterator_skip(EntryItP, 2 + 1 + 2 + 4),
+    {ok, <<11:16/big>>, EntryItP2} = osiris_log:entry_iterator_read(EntryItP1, 2),
+    {ok, Section2, EntryItP3} = osiris_log:entry_iterator_read(EntryItP2, byte_size(Section2)),
+    %% EntryItP3 is now at the data section (2-byte length + 7-byte payload).
+    {ok, <<7:16/big>>, EntryItP5} = osiris_log:entry_iterator_read(EntryItP3, 2),
+    {ok, Data2, _} = osiris_log:entry_iterator_read(EntryItP5, byte_size(Data2)),
+
+    osiris_log:close(R3),
+    osiris_log:close(S2),
+    ok.
+
+drain_entry_iterator(EntryIt) ->
+    drain_entry_iterator(EntryIt, []).
+
+drain_entry_iterator(EntryIt, Acc) ->
+    case osiris_log:entry_iterator_read(EntryIt, 64) of
+        {ok, Data, NewIt} ->
+            drain_entry_iterator(NewIt, [Data | Acc]);
+        {eof, _} ->
+            iolist_to_binary(lists:reverse(Acc))
+    end.
 
 iterator_read_chunk_with_read_ahead(Config) ->
     RAL = 4096, %% read ahead limit

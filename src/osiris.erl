@@ -81,8 +81,8 @@
                 {filter_value(), iodata() | batch()}.
 -type features() :: #{committed_offset_calculate => boolean()}.
 
-%% returned when reading
--type entry() :: binary() | batch().
+%% returned when reading (entry_iterator when using entry_iterator in iterator_next/2)
+-type entry() :: binary() | batch() | osiris_log:entry_iterator().
 -type reader_options() :: #{transport => tcp | ssl,
                             chunk_selector => all | user_data,
                             filter_spec => osiris_bloom:filter_spec(),
