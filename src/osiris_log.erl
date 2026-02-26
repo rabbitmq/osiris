@@ -1497,11 +1497,13 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
 %%              entry lives (buffer length is not included in file_len)
 %%   file_len - Number of bytes of the entry still in the file (from file_pos
 %%              to end of entry); 0 when the whole entry is in buffer
+%%   size     - Total size in bytes of the entry (payload); immutable
 -record(entry_iterator,
         {fd :: file:fd(),
          buffer = <<>> :: binary(),
          file_pos :: non_neg_integer(),
-         file_len :: non_neg_integer()}).
+         file_len :: non_neg_integer(),
+         size :: non_neg_integer()}).
 -opaque entry_iterator() :: #entry_iterator{}.
 
 -define(REC_MATCH_SIMPLE(Len, Rem),
@@ -1621,8 +1623,11 @@ iterator_next(#iterator{fd = Fd,
     Pos = Pos0 + ?REC_HDR_SZ_SIMPLE_B,
     case {Rem0, Mode} of
         {<<Record:Len/binary, Rem/binary>>, entry_iterator} ->
-            EntryIt = #entry_iterator{fd = Fd, buffer = Record,
-                                      file_pos = Pos + Len, file_len = 0},
+            EntryIt = #entry_iterator{fd = Fd, 
+                                      buffer = Record,
+                                      file_pos = Pos + Len, 
+                                      file_len = 0,
+                                      size = Len},
             I = I0#iterator{next_offset = NextOffs + 1,
                             num_left = Num - 1,
                             data_left = DataLeft - (Len + ?REC_HDR_SZ_SIMPLE_B),
@@ -1637,10 +1642,11 @@ iterator_next(#iterator{fd = Fd,
                             next_record_pos = Pos + Len},
             {{NextOffs, Record}, I};
         {_, entry_iterator} ->
-            PrefixLen = byte_size(Rem0),
+            Rem0Len = byte_size(Rem0),
             EntryIt = #entry_iterator{fd = Fd, buffer = Rem0,
-                                      file_pos = Pos + PrefixLen,
-                                      file_len = Len - PrefixLen},
+                                      file_pos = Pos + Rem0Len,
+                                      file_len = Len - Rem0Len,
+                                      size = Len},
             I = I0#iterator{next_offset = NextOffs + 1,
                             num_left = Num - 1,
                             data_left = DataLeft - (Len + ?REC_HDR_SZ_SIMPLE_B),
@@ -1703,12 +1709,14 @@ iterator_next(#iterator{fd = Fd,
 %% they are not returned as {error, _}.
 -spec entry_iterator_read(entry_iterator(), non_neg_integer()) ->
     {ok, binary(), entry_iterator()} | {eof, entry_iterator()}.
-entry_iterator_read(#entry_iterator{buffer = Buffer, file_len = FileLen} = It, _Max)
+entry_iterator_read(#entry_iterator{buffer = Buffer, 
+                                    file_len = FileLen} = It, _Max)
   when Buffer =:= <<>>, FileLen =:= 0 ->
     {eof, It};
-entry_iterator_read(#entry_iterator{fd = Fd, buffer = Buffer,
-                                    file_pos = FilePos, file_len = FileLen} = It,
-                    Max) ->
+entry_iterator_read(#entry_iterator{fd = Fd, 
+                                    buffer = Buffer,
+                                    file_pos = FilePos, 
+                                    file_len = FileLen} = It, Max) ->
     case Buffer of
         <<Chunk:Max/binary, Rest/binary>> ->
             {ok, Chunk, It#entry_iterator{buffer = Rest}};
@@ -1716,9 +1724,11 @@ entry_iterator_read(#entry_iterator{fd = Fd, buffer = Buffer,
             ReadLen = min(Max, FileLen),
             case file:pread(Fd, FilePos, ReadLen) of
                 {ok, Data} ->
+                    %% file:pread may return fewer bytes than requested (e.g. near EOF)
+                    DataLen = byte_size(Data),
                     {ok, Data,
-                     It#entry_iterator{file_pos = FilePos + ReadLen,
-                                       file_len = FileLen - ReadLen}};
+                     It#entry_iterator{file_pos = FilePos + DataLen,
+                                       file_len = FileLen - DataLen}};
                 {error, _} = Err ->
                     error(Err)
             end;
@@ -1733,7 +1743,8 @@ entry_iterator_read(#entry_iterator{fd = Fd, buffer = Buffer,
     end.
 
 -spec entry_iterator_skip(entry_iterator(), non_neg_integer()) -> entry_iterator().
-entry_iterator_skip(#entry_iterator{buffer = Buffer, file_pos = FilePos,
+entry_iterator_skip(#entry_iterator{buffer = Buffer, 
+                                    file_pos = FilePos,
                                     file_len = FileLen} = It, N) ->
     BufLen = byte_size(Buffer),
     if
