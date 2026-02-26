@@ -35,6 +35,7 @@
          chunk_iterator/3,
          iterator_next/1,
          iterator_next/2,
+         iterator_next/3,
          entry_iterator_read/2,
          entry_iterator_skip/2,
          read_chunk/1,
@@ -483,6 +484,7 @@
 -export_type([state/0,
               chunk_iterator/0,
               entry_iterator/0,
+              iterator_mode/0,
               range/0,
               config/0,
               counter_spec/0,
@@ -1485,7 +1487,7 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
 -opaque chunk_iterator() :: #iterator{}.
 
 %% Entry iterator: streams a simple entry from file without loading it all.
-%% Used when iterator_next/2 is called with entry_iterator.
+%% Used when iterator_next/3 is called with mode entry_iterator.
 %%
 %% Fields:
 %%   fd       - Open file descriptor of the segment file being read
@@ -1596,11 +1598,18 @@ chunk_iterator(#?MODULE{cfg = #cfg{},
 -spec iterator_next(chunk_iterator()) ->
     end_of_chunk | {offset_entry(), chunk_iterator()}.
 iterator_next(#iterator{} = I) ->
-    iterator_next(I, 1).
+    iterator_next(I, 1, full_entry).
 
--spec iterator_next(chunk_iterator(), CreditHint :: non_neg_integer() | 'entry_iterator') ->
+-spec iterator_next(chunk_iterator(), CreditHint :: non_neg_integer()) ->
     end_of_chunk | {offset_entry(), chunk_iterator()}.
-iterator_next(#iterator{num_left = 0}, _CreditHint) ->
+iterator_next(#iterator{} = I, CreditHint) ->
+    iterator_next(I, CreditHint, full_entry).
+
+-type iterator_mode() :: full_entry | entry_iterator.
+
+-spec iterator_next(chunk_iterator(), CreditHint :: non_neg_integer(), Mode :: iterator_mode()) ->
+    end_of_chunk | {offset_entry(), chunk_iterator()}.
+iterator_next(#iterator{num_left = 0}, _CreditHint, _Mode) ->
     end_of_chunk;
 iterator_next(#iterator{fd = Fd,
                         next_offset = NextOffs,
@@ -1608,9 +1617,9 @@ iterator_next(#iterator{fd = Fd,
                         data_left = DataLeft,
                         data_cache = ?REC_MATCH_SIMPLE(Len, Rem0),
                         next_record_pos = Pos0,
-                        ra = Ra} = I0, CreditHint) ->
+                        ra = Ra} = I0, CreditHint, Mode) ->
     Pos = Pos0 + ?REC_HDR_SZ_SIMPLE_B,
-    case {Rem0, CreditHint} of
+    case {Rem0, Mode} of
         {<<Record:Len/binary, Rem/binary>>, entry_iterator} ->
             EntryIt = #entry_iterator{fd = Fd, buffer = Record,
                                       file_pos = Pos + Len, file_len = 0},
@@ -1620,7 +1629,7 @@ iterator_next(#iterator{fd = Fd,
                             data_cache = Rem,
                             next_record_pos = Pos + Len},
             {{NextOffs, EntryIt}, I};
-        {<<Record:Len/binary, Rem/binary>>, _} ->
+        {<<Record:Len/binary, Rem/binary>>, full_entry} ->
             I = I0#iterator{next_offset = NextOffs + 1,
                             num_left = Num - 1,
                             data_left = DataLeft - (Len + ?REC_HDR_SZ_SIMPLE_B),
@@ -1639,13 +1648,13 @@ iterator_next(#iterator{fd = Fd,
                             next_record_pos = Pos + Len,
                             ra = ra_clear(Ra)},
             {{NextOffs, EntryIt}, I};
-        {_, _} ->
+        {_, full_entry} ->
             MinReqSize = Len + ?REC_HDR_SZ_SIMPLE_B,
             {Data, Ra1} = iter_read_ahead(Fd, Pos0, MinReqSize, CreditHint,
                                           DataLeft, Num, Ra),
             iterator_next(I0#iterator{ra = Ra1,
                                       data_cache = Data},
-                          CreditHint)
+                          CreditHint, full_entry)
     end;
 iterator_next(#iterator{fd = Fd,
                         next_offset = NextOffs,
@@ -1655,8 +1664,8 @@ iterator_next(#iterator{fd = Fd,
                                                          UncompressedLen,
                                                          Len, Rem0),
                         next_record_pos = Pos,
-                        ra = Ra} = I0, CreditHint) ->
-        case Rem0 of
+                        ra = Ra} = I0, CreditHint, Mode) ->
+    case Rem0 of
             <<Data:Len/binary, Rem/binary>> ->
                 Record = {batch, NumRecs, CompType, UncompressedLen, Data},
                 I = I0#iterator{next_offset = NextOffs + NumRecs,
@@ -1669,41 +1678,29 @@ iterator_next(#iterator{fd = Fd,
                 %% not enough in Rem0 to read the entire record
                 %% so we need to read it from disk
                 MinReqSize = Len + ?REC_HDR_SZ_SUBBATCH_B,
-                Credit = credit_hint_for_read_ahead(CreditHint),
-                {Data, Ra1} = iter_read_ahead(Fd, Pos, MinReqSize, Credit,
+                {Data, Ra1} = iter_read_ahead(Fd, Pos, MinReqSize, CreditHint,
                                               DataLeft, Num, Ra),
                 iterator_next(I0#iterator{ra = Ra1,
                                           data_cache = Data},
-                              CreditHint)
+                              CreditHint, Mode)
         end;
 iterator_next(#iterator{fd = Fd,
                         num_left = Num,
                         data_left = DataLeft,
                         ra = Ra,
-                        next_record_pos = Pos} = I0, CreditHint) ->
+                        next_record_pos = Pos} = I0, CreditHint, Mode) ->
     MinReq = min(?REC_HDR_SZ_SUBBATCH_B, DataLeft),
-    Credit = credit_hint_for_read_ahead(CreditHint),
-    {Data, Ra1} = iter_read_ahead(Fd, Pos, MinReq, Credit,
+    {Data, Ra1} = iter_read_ahead(Fd, Pos, MinReq, CreditHint,
                                   DataLeft, Num, Ra),
     iterator_next(I0#iterator{ra = Ra1,
                               data_cache = Data},
-                  CreditHint).
-
-credit_hint_for_read_ahead(entry_iterator) -> 1;
-credit_hint_for_read_ahead(N) when is_integer(N), N >= 0 -> N.
+                  CreditHint, Mode).
 
 %% Reads up to Max bytes from the current position of the entry iterator.
 %% Returns the data (or fewer bytes if the remaining stream is shorter) and an
 %% updated iterator, or {eof, It} when no data remains. The caller must use the
 %% returned iterator for subsequent reads or skip. File read failures raise;
 %% they are not returned as {error, _}.
-%%
-%% Entry iterators exist because chunks can be returned in entry_iterator mode
-%% instead of as a full Entry: the stream protocol limits a single message to the
-%% frame size (typically 1 MiB), but other protocols (e.g. AMQP 0-9-1) can
-%% publish much larger messages to a stream. An entry iterator lets callers read
-%% a bounded number of bytes at a time (e.g. the AMQP 1.0 section descriptor and
-%% size) and then decide whether to read or skip the section content.
 -spec entry_iterator_read(entry_iterator(), non_neg_integer()) ->
     {ok, binary(), entry_iterator()} | {eof, entry_iterator()}.
 entry_iterator_read(#entry_iterator{buffer = Buffer, file_len = FileLen} = It, _Max)
