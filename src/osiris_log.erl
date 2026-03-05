@@ -58,7 +58,6 @@
          delete_directory/1,
          counter_fields/0,
          stream_offset_samples/2,
-         last_offset_and_timestamp/1,
          make_counter/1,
          generate_log/4]).
 
@@ -3574,32 +3573,6 @@ seg_last_landmark(#seg_info{last = #chunk_info{id = Id, num = Num, timestamp = T
     {Id + Num - 1, Ts};
 seg_last_landmark(_) ->
     undefined.
-
-%% Returns {ok, {LastOffset, Timestamp}} where LastOffset is the very last
-%% offset in the log (last offset in the last chunk), not the last chunk's
-%% first offset. Timestamp is the last chunk's timestamp.
--spec last_offset_and_timestamp(file:filename_all()) ->
-    {ok, {offset(), osiris:timestamp()}} | {error, empty}.
-last_offset_and_timestamp(Dir) ->
-    last_offset_and_timestamp_from_files(sorted_index_files(Dir)).
-
-last_offset_and_timestamp_from_files(IdxFiles) ->
-    case non_empty_index_files(IdxFiles) of
-        [] ->
-            {error, empty};
-        NonEmpty ->
-            case first_and_last_seginfos0(NonEmpty) of
-                none ->
-                    {error, empty};
-                {_NumSegs, _Fst, LstSI} ->
-                    case seg_last_landmark(LstSI) of
-                        undefined ->
-                            {error, empty};
-                        L ->
-                            {ok, L}
-                    end
-            end
-    end.
 
 %% Single pass over index files: for each record, update the chunk closest to
 %% each target. Targets and Acc are lists of the same length. Returns [Sample].
