@@ -100,7 +100,12 @@ all_tests() ->
      read_ahead_send_file_on_off,
      resolve_offset_spec_empty,
      resolve_offset_spec_empty_directory,
-     resolve_offset_spec
+     resolve_offset_spec,
+     stream_offset_landmarks_empty,
+     stream_offset_landmarks_single_chunk,
+     stream_offset_landmarks_multiple_chunks,
+     stream_offset_landmarks_percentiles,
+     stream_offset_landmarks_config_map
     ].
 
 groups() ->
@@ -2049,6 +2054,104 @@ overview_with_missing_index_at_start(Config) ->
                         filename:join(?config(dir, Config), "*.index")))),
     ok.
 
+stream_offset_landmarks_empty(Config) ->
+    %% Empty log (init but no writes) and non-existent directory return {error, empty}.
+    LDir = ?config(leader_dir, Config),
+    Log0 = seed_log(LDir, [], Config),
+    osiris_log:close(Log0),
+    ?assertEqual({error, empty}, osiris_log:stream_offset_landmarks(LDir)),
+    NonExistent = filename:join(?config(priv_dir, Config), "stream_offset_landmarks_empty_nonexistent"),
+    ?assertEqual({error, empty}, osiris_log:stream_offset_landmarks(NonExistent)),
+    ok.
+
+stream_offset_landmarks_single_chunk(Config) ->
+    %% Single chunk: first, last, p25, p50, p75 all equal. last is the last
+    %% message offset (same as first when the only chunk has one record).
+    Now = now_ms(),
+    FirstTs = Now - 10000,
+    EpochChunks = [{2, FirstTs, [<<"one">>, <<"two">>]}],
+    LDir = ?config(leader_dir, Config),
+    Log0 = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(Log0),
+    {ok, Landmarks} = osiris_log:stream_offset_landmarks(LDir),
+    ?assertMatch(#{first := {0, FirstTs},
+                   last := {1, FirstTs},
+                   p25 := {0, FirstTs},
+                   p50 := {0, FirstTs},
+                   p75 := {0, FirstTs}}, Landmarks),
+    ok.
+
+stream_offset_landmarks_multiple_chunks(Config) ->
+    %% Multiple chunks: first < p25 <= p50 <= p75 < last (by offset). last is
+    %% the very last message offset in the log (last offset in the last chunk),
+    %% not the last chunk's first offset. Last chunk here has 2 records -> 5.
+    Now = now_ms(),
+    FirstTs = Now - 10000,
+    LastTs = Now - 3000,
+    EpochChunks =
+        [{1, FirstTs, [<<"one">>]},
+         {1, Now - 8000, [<<"two">>]},
+         {2, Now - 5000, [<<"three">>, <<"four">>]},
+         {2, LastTs, [<<"five">>, <<"six">>]}],
+
+    LDir = ?config(leader_dir, Config),
+    Log0 = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(Log0),
+    {ok, Landmarks} = osiris_log:stream_offset_landmarks(LDir),
+    #{first := First, last := Last, p25 := P25, p50 := P50, p75 := P75} = Landmarks,
+    {FirstOff, FirstTs} = First,
+    {LastOff, LastTs} = Last,
+    {P25Off, _} = P25,
+    {P50Off, _} = P50,
+    {P75Off, _} = P75,
+    ?assert(FirstOff =< P25Off),
+    ?assert(P25Off =< P50Off),
+    ?assert(P50Off =< P75Off),
+    ?assert(P75Off =< LastOff),
+    ?assertEqual(FirstOff, 0),
+    ?assertEqual(LastOff, 5),
+    ok.
+
+stream_offset_landmarks_percentiles(Config) ->
+    %% Minimum layout for non-overlapping percentiles: chunk starts at 0,1,2,3,4
+    %% so Range=4, T25=1, T50=2, T75=3 each land on a distinct chunk.
+    Now = now_ms(),
+    Ts0 = Now - 10000,
+    Ts1 = Now - 8000,
+    Ts2 = Now - 5000,
+    Ts3 = Now - 3000,
+    Ts4 = Now - 1000,
+    EpochChunks =
+        [{1, Ts0, [<<"a">>]},
+         {1, Ts1, [<<"b">>]},
+         {1, Ts2, [<<"c">>]},
+         {1, Ts3, [<<"d">>]},
+         {1, Ts4, [<<"e">>]}],
+
+    LDir = ?config(leader_dir, Config),
+    Log0 = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(Log0),
+    {ok, Landmarks} = osiris_log:stream_offset_landmarks(LDir),
+    #{first := First, last := Last, p25 := P25, p50 := P50, p75 := P75} = Landmarks,
+    {0, Ts0} = First,
+    {4, Ts4} = Last,
+    {1, Ts1} = P25,
+    {2, Ts2} = P50,
+    {3, Ts3} = P75.
+
+stream_offset_landmarks_config_map(Config) ->
+    %% Calling with config map #{dir => Dir} works like path.
+    EpochChunks = [{1, [<<"a">>]}, {1, [<<"b">>]}],
+    LDir = ?config(leader_dir, Config),
+    Log0 = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(Log0),
+    {ok, ByPath} = osiris_log:stream_offset_landmarks(LDir),
+    Conf = ?config(osiris_conf, Config),
+    RConf = Conf#{dir => LDir},
+    {ok, ByConf} = osiris_log:stream_offset_landmarks(RConf),
+    ?assertEqual(ByPath, ByConf),
+    ok.
+
 read_ahead_send_file(Config) ->
     RAL = 4096, %% read ahead limit
     HS = ?HEADER_SIZE_B,
@@ -2587,7 +2690,7 @@ write_chunk(Conf, Epoch, Now, Records, Trk0, Log0) ->
             %% need to re-init as new epoch
             osiris_log:close(Log1),
             Log = osiris_log:init(Conf#{epoch => Epoch}),
-            {Trk1, osiris_log:write(lists:reverse(Records), Log)}
+            {Trk1, osiris_log:write(lists:reverse(Records), Now, Log)}
     end.
 
 now_ms() ->
