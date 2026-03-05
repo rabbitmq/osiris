@@ -3546,7 +3546,7 @@ stream_offset_samples(DirOrConfig, Fractions0) when is_list(Fractions0) ->
                             %% Replace first (0.0) and last (1.0) with exact first/last
                             %% so 0.0 and 1.0 return true first/last offset and timestamp.
                             Samples2 = lists:zipwith(
-                                         fun (0.0, _) -> {FstChId, FstTs};
+                                         fun (+0.0, _) -> {FstChId, FstTs};
                                              (1.0, _) -> {LastOff, LastTs};
                                              (_, S) -> S
                                          end, Fractions, Samples),
@@ -3559,7 +3559,7 @@ normalize_fraction(F) when F =< 0.0 -> 0.0;
 normalize_fraction(F) when F >= 1.0 -> 1.0;
 normalize_fraction(F) -> F.
 
-target_chunk_id(FirstChId, Range, 0.0) -> FirstChId;
+target_chunk_id(FirstChId, _Range, +0.0) -> FirstChId;
 target_chunk_id(FirstChId, Range, 1.0) -> FirstChId + Range;
 target_chunk_id(FirstChId, Range, F) ->
     FirstChId + round((Range * F)).
