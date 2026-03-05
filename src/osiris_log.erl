@@ -57,7 +57,7 @@
          directory/1,
          delete_directory/1,
          counter_fields/0,
-         stream_offset_landmarks/1,
+         stream_offset_samples/2,
          last_offset_and_timestamp/1,
          make_counter/1,
          generate_log/4]).
@@ -3506,61 +3506,74 @@ write_in_chunks(ToWrite, MsgsPerChunk, Msg, W0) when ToWrite > 0 ->
 write_in_chunks(_, _, _, W) ->
     W.
 
-%% Scans all index files for the log at Dir and returns the first chunk
-%% (offset + timestamp), last chunk (offset + timestamp), and the chunk
-%% closest to 25%, 50% and 75% of the offset range (with offset and
-%% timestamp). Percent positions may not fall on a chunk boundary, so
-%% the chunk with the closest offset is chosen.
--spec stream_offset_landmarks(file:filename_all() | config()) ->
-    {ok, #{first => {offset(), osiris:timestamp()},
-           last => {offset(), osiris:timestamp()},
-           p25 => {offset(), osiris:timestamp()},
-           p50 => {offset(), osiris:timestamp()},
-           p75 => {offset(), osiris:timestamp()}}} |
-    {error, empty}.
-stream_offset_landmarks(#{dir := Dir}) ->
-    stream_offset_landmarks(Dir);
-stream_offset_landmarks(Dir) when ?IS_STRING(Dir) ->
-    IdxFiles = sorted_index_files(Dir),
-    case scan_index_chunks_files(IdxFiles, []) of
-        {ok, []} ->
+%% Returns offset samples at given fractions of the stream's offset range.
+%% Fractions is a list of floats in [0.0, 1.0]: 0.0 = first, 1.0 = last;
+%% values in between are linear (e.g. 0.5 = midpoint by chunk id).
+%% Returns {ok, [ {offset(), timestamp()} ]} in the same order as Fractions,
+%% or {error, empty}. Fractions are clamped to [0.0, 1.0].
+-spec stream_offset_samples(file:filename_all() | config(), [float()]) ->
+    {ok, [{offset(), osiris:timestamp()}]} | {error, empty}.
+stream_offset_samples(DirOrConfig, Fractions0) when is_list(Fractions0) ->
+    Fractions = [normalize_fraction(F) || F <- Fractions0],
+    IdxFiles = sorted_index_files(DirOrConfig),
+    NonEmpty = non_empty_index_files(IdxFiles),
+    case NonEmpty of
+        [] ->
             {error, empty};
-        {ok, [One]} ->
-            {LastOff, LastTs} =
-                case last_offset_and_timestamp_from_files(IdxFiles) of
-                    {ok, L} -> L;
-                    _ -> One
-                end,
-            {ok, #{first => One,
-                   last => {LastOff, LastTs},
-                   p25 => One,
-                   p50 => One,
-                   p75 => One}};
-        {ok, Chunks} ->
-            First = hd(Chunks),
-            LastChunk = lists:last(Chunks),
-            {FirstOffset, _FirstTs} = First,
-            {LastChunkId, _LastChunkTs} = LastChunk,
-            Last = case last_offset_and_timestamp_from_files(IdxFiles) of
-                       {ok, L} -> L;
-                       _ -> LastChunk
-                   end,
-            Range = LastChunkId - FirstOffset,
-            Targets = case Range of
-                          0 ->
-                              [FirstOffset, FirstOffset, FirstOffset];
-                          _ ->
-                              [FirstOffset + (Range * 25) div 100,
-                               FirstOffset + (Range * 50) div 100,
-                               FirstOffset + (Range * 75) div 100]
-                      end,
-            [P25, P50, P75] = closest_chunks_to_targets(Chunks, Targets),
-            {ok, #{first => First,
-                   last => Last,
-                   p25 => P25,
-                   p50 => P50,
-                   p75 => P75}}
+        _ ->
+            case first_and_last_seginfos0(NonEmpty) of
+                none ->
+                    {error, empty};
+                {_NumSegs, FstSI, LstSI} ->
+                    First = seg_first_landmark(FstSI),
+                    Last = seg_last_landmark(LstSI),
+                    case {First, Last} of
+                        {undefined, _} ->
+                            {error, empty};
+                        {_, undefined} ->
+                            {error, empty};
+                        {{FstChId, FstTs}, {LastOff, LastTs}} ->
+                            #seg_info{last = LastChunk} = LstSI,
+                            LastChunkId = LastChunk#chunk_info.id,
+                            Range = LastChunkId - FstChId,
+                            Targets = [target_chunk_id(FstChId, Range, F) || F <- Fractions],
+                            Samples = case Range of
+                                          0 ->
+                                              [ {FstChId, FstTs} || _ <- Fractions ];
+                                          _ ->
+                                              fold_index_files_closest(NonEmpty, Targets,
+                                                                      {FstChId, FstTs})
+                                      end,
+                            %% Replace first (0.0) and last (1.0) with exact first/last
+                            %% so 0.0 and 1.0 return true first/last offset and timestamp.
+                            Samples2 = lists:zipwith(
+                                         fun (0.0, _) -> {FstChId, FstTs};
+                                             (1.0, _) -> {LastOff, LastTs};
+                                             (_, S) -> S
+                                         end, Fractions, Samples),
+                            {ok, Samples2}
+                    end
+            end
     end.
+
+normalize_fraction(F) when F =< 0.0 -> 0.0;
+normalize_fraction(F) when F >= 1.0 -> 1.0;
+normalize_fraction(F) -> F.
+
+target_chunk_id(FirstChId, Range, 0.0) -> FirstChId;
+target_chunk_id(FirstChId, Range, 1.0) -> FirstChId + Range;
+target_chunk_id(FirstChId, Range, F) ->
+    FirstChId + round((Range * F)).
+
+seg_first_landmark(#seg_info{first = #chunk_info{id = Id, timestamp = Ts}}) ->
+    {Id, Ts};
+seg_first_landmark(_) ->
+    undefined.
+
+seg_last_landmark(#seg_info{last = #chunk_info{id = Id, num = Num, timestamp = Ts}}) ->
+    {Id + Num - 1, Ts};
+seg_last_landmark(_) ->
+    undefined.
 
 %% Returns {ok, {LastOffset, Timestamp}} where LastOffset is the very last
 %% offset in the log (last offset in the last chunk), not the last chunk's
@@ -3575,139 +3588,61 @@ last_offset_and_timestamp_from_files(IdxFiles) ->
         [] ->
             {error, empty};
         NonEmpty ->
-            LastIdxFile = lists:last(NonEmpty),
-            last_offset_and_timestamp_from_file(LastIdxFile)
+            case first_and_last_seginfos0(NonEmpty) of
+                none ->
+                    {error, empty};
+                {_NumSegs, _Fst, LstSI} ->
+                    case seg_last_landmark(LstSI) of
+                        undefined ->
+                            {error, empty};
+                        L ->
+                            {ok, L}
+                    end
+            end
     end.
 
-last_offset_and_timestamp_from_file(LastIdxFile) ->
-    case file:open(LastIdxFile, [read, raw, binary]) of
-        {ok, IdxFd} ->
-            try
-                case position_at_idx_record_boundary(IdxFd, eof) of
-                    {ok, Pos} when Pos >= ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B ->
-                        ReadPos = Pos - ?INDEX_RECORD_SIZE_B,
-                        case file:pread(IdxFd, ReadPos, ?INDEX_RECORD_SIZE_B) of
-                            {ok, <<ChunkId:64/unsigned,
-                                   IdxTs:64/signed,
-                                   _Epoch:64/unsigned,
-                                   FilePos:32/unsigned,
-                                   _ChType:8/unsigned>>}
-                              when ChunkId =/= 0 orelse IdxTs =/= 0 ->
-                                SegFile = segment_from_index_file(LastIdxFile),
-                                case file:open(SegFile, [read, raw, binary]) of
-                                    {ok, SegFd} ->
-                                        try
-                                            case file:pread(SegFd, FilePos, ?HEADER_SIZE_B) of
-                                                {ok, <<_:32,
-                                                       NumRecords:32/unsigned,
-                                                       SegTs:64/signed,
-                                                       _/binary>>} ->
-                                                    LastOffset = ChunkId + NumRecords - 1,
-                                                    Ts = if IdxTs < 1000000000000 -> SegTs;
-                                                            true -> IdxTs
-                                                         end,
-                                                    {ok, {LastOffset, Ts}};
-                                                _ ->
-                                                    {ok, {ChunkId, IdxTs}}
-                                            end
-                                        after
-                                            file:close(SegFd)
-                                        end;
-                                    _ ->
-                                        {ok, {ChunkId, IdxTs}}
-                                end;
-                            _ ->
-                                {error, empty}
-                        end;
-                    _ ->
-                        {error, empty}
-                end
-            after
-                file:close(IdxFd)
-            end;
-        _ ->
-            {error, empty}
-    end.
+%% Single pass over index files: for each record, update the chunk closest to
+%% each target. Targets and Acc are lists of the same length. Returns [Sample].
+fold_index_files_closest(IdxFiles, Targets, FirstChunk) when is_list(Targets) ->
+    {FstChId, _FstTs} = FirstChunk,
+    Acc0 = [ {FirstChunk, abs(FstChId - T)} || T <- Targets ],
+    Acc = lists:foldl(fun (IdxFile, A) ->
+                              fold_one_index_file(IdxFile, Targets, A)
+                      end,
+                      Acc0, IdxFiles),
+    [ B || {B, _D} <- Acc ].
 
-scan_index_chunks_files([], Acc) ->
-    {ok, lists:reverse(Acc)};
-scan_index_chunks_files([IdxFile | Rest], Acc) ->
-    case scan_one_index_file(IdxFile) of
-        {ok, Chunks} ->
-            scan_index_chunks_files(Rest, lists:reverse(Chunks) ++ Acc);
-        {error, _} = Err ->
-            Err
-    end.
-
-scan_one_index_file(IdxFile) ->
+fold_one_index_file(IdxFile, Targets, Acc) ->
     case file:open(IdxFile, [read, raw, binary]) of
         {ok, Fd} ->
             try
                 {ok, _} = file:position(Fd, ?IDX_HEADER_SIZE),
-                scan_index_records(Fd, [])
+                fold_index_records(Fd, Targets, Acc)
             after
                 _ = file:close(Fd)
             end;
-        Err ->
-            Err
+        _ ->
+            Acc
     end.
 
-scan_index_records(Fd, Acc) ->
+fold_index_records(Fd, Targets, Acc) ->
     case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
         {ok, <<ChunkId:64/unsigned,
                Timestamp:64/signed,
                _Epoch:64/unsigned,
                _FilePos:32/unsigned,
                _ChType:8/unsigned>>} when ChunkId =/= 0 orelse Timestamp =/= 0 ->
-            scan_index_records(Fd, [{ChunkId, Timestamp} | Acc]);
+            Chunk = {ChunkId, Timestamp},
+            NewAcc = [ if abs(ChunkId - T) < D -> {Chunk, abs(ChunkId - T)};
+                          true -> {B, D}
+                      end || {{B, D}, T} <- lists:zip(Acc, Targets) ],
+            fold_index_records(Fd, Targets, NewAcc);
         {ok, ?ZERO_IDX_MATCH(_)} ->
-            scan_index_records(Fd, Acc);
+            fold_index_records(Fd, Targets, Acc);
         {ok, _} ->
-            scan_index_records(Fd, Acc);
+            fold_index_records(Fd, Targets, Acc);
         eof ->
-            {ok, lists:reverse(Acc)}
-    end.
-
-%% Returns [chunk closest to T25, to T50, to T75]. Chunks are ordered by offset.
-%% Uses binary search per target for O(log n) lookups after O(n) list-to-tuple.
-closest_chunks_to_targets(Chunks, [T25, T50, T75]) ->
-    Tuple = list_to_tuple(Chunks),
-    [closest_to_target(Tuple, T25),
-     closest_to_target(Tuple, T50),
-     closest_to_target(Tuple, T75)].
-
-%% First 1-based index i such that element(i, Tuple) has offset >= Target,
-%% or tuple_size(Tuple) + 1 if all offsets are < Target.
-find_first_ge(Tuple, Target, Low, High) when Low < High ->
-    Mid = (Low + High) div 2,
-    {O, _} = element(Mid, Tuple),
-    if O >= Target -> find_first_ge(Tuple, Target, Low, Mid);
-       true -> find_first_ge(Tuple, Target, Mid + 1, High)
-    end;
-find_first_ge(Tuple, Target, Low, _High) ->
-    {O, _} = element(Low, Tuple),
-    if O >= Target -> Low; true -> Low + 1 end.
-
-find_first_ge(Tuple, Target) ->
-    Size = tuple_size(Tuple),
-    find_first_ge(Tuple, Target, 1, Size).
-
-%% Chunk in Tuple whose offset is closest to Target (Chunks ordered by offset).
-closest_to_target(Tuple, Target) ->
-    Size = tuple_size(Tuple),
-    Idx = find_first_ge(Tuple, Target),
-    if Idx =< 1 ->
-            element(1, Tuple);
-        Idx > Size ->
-            element(Size, Tuple);
-        true ->
-            C1 = element(Idx, Tuple),
-            C2 = element(Idx - 1, Tuple),
-            {O1, _} = C1,
-            {O2, _} = C2,
-            if abs(O1 - Target) =< abs(O2 - Target) -> C1;
-               true -> C2
-            end
+            Acc
     end.
 
 -ifdef(TEST).
