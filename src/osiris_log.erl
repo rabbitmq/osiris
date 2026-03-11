@@ -3624,12 +3624,21 @@ index_file_bounds_one(IdxFile) ->
 
 read_idx_chunk_at(IdxFile, RecordIndex) when RecordIndex >= 0 ->
     Pos = ?IDX_HEADER_SIZE + RecordIndex * ?INDEX_RECORD_SIZE_B,
-    case file:pread(IdxFile, Pos, ?INDEX_RECORD_SIZE_B) of
-        {ok, <<ChunkId:64/unsigned, Ts:64/signed, _/binary>>}
-          when ChunkId =/= 0 orelse Ts =/= 0 ->
-            {ok, {ChunkId, Ts}};
-        {ok, ?ZERO_IDX_MATCH(_)} ->
-            {ok, zero};
+    case file:open(IdxFile, [read, raw, binary]) of
+        {ok, Fd} ->
+            try
+                case file:pread(Fd, Pos, ?INDEX_RECORD_SIZE_B) of
+                    {ok, <<ChunkId:64/unsigned, Ts:64/signed, _/binary>>}
+                      when ChunkId =/= 0 orelse Ts =/= 0 ->
+                        {ok, {ChunkId, Ts}};
+                    {ok, ?ZERO_IDX_MATCH(_)} ->
+                        {ok, zero};
+                    X ->
+                        X
+                end
+            after
+                _ = file:close(Fd)
+            end;
         X ->
             X
     end.
