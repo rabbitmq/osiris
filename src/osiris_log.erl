@@ -113,6 +113,9 @@
 
 -define(SKIP_SEARCH_JUMP, 2048).
 -define(DEFAULT_READ_AHEAD_LIMIT, 4096).
+%% Block size for index scan in fold_index_files_closest (records per read)
+-define(INDEX_READ_BLOCK_RECORDS, 1024).
+-define(INDEX_READ_BLOCK_BYTES, (?INDEX_READ_BLOCK_RECORDS * ?INDEX_RECORD_SIZE_B)).
 
 %% Specification of the Log format.
 %%
@@ -3535,21 +3538,22 @@ stream_offset_samples(DirOrConfig, Fractions0) when is_list(Fractions0) ->
                             #seg_info{last = LastChunk} = LstSI,
                             LastChunkId = LastChunk#chunk_info.id,
                             Range = LastChunkId - FstChId,
-                            Targets = [target_chunk_id(FstChId, Range, F) || F <- Fractions],
-                            Samples = case Range of
-                                          0 ->
-                                              [ {FstChId, FstTs} || _ <- Fractions ];
-                                          _ ->
-                                              fold_index_files_closest(NonEmpty, Targets,
-                                                                      {FstChId, FstTs})
-                                      end,
-                            %% Replace first (0.0) and last (1.0) with exact first/last
-                            %% so 0.0 and 1.0 return true first/last offset and timestamp.
-                            Samples2 = lists:zipwith(
-                                         fun (+0.0, _) -> {FstChId, FstTs};
-                                             (1.0, _) -> {LastOff, LastTs};
-                                             (_, S) -> S
-                                         end, Fractions, Samples),
+                            %% First and last come from seg_info; only scan index for intermediate fractions.
+                            MiddleFractions = [F || F <- Fractions, F > 0.0, F < 1.0],
+                            MiddleSamples = case Range of
+                                                 0 ->
+                                                     [ {FstChId, FstTs} || _ <- MiddleFractions ];
+                                                 _ when MiddleFractions =:= [] ->
+                                                     [];
+                                                 _ ->
+                                                     MiddleTargets = [target_chunk_id(FstChId, Range, F)
+                                                                     || F <- MiddleFractions],
+                                                     fold_index_files_closest(NonEmpty, MiddleTargets,
+                                                                             {FstChId, FstTs})
+                                             end,
+                            %% Assemble result in same order as Fractions: first/last from seg_info, rest from fold.
+                            Samples2 = assemble_offset_samples(Fractions, {FstChId, FstTs},
+                                                                {LastOff, LastTs}, MiddleSamples),
                             {ok, Samples2}
                     end
             end
@@ -3558,6 +3562,14 @@ stream_offset_samples(DirOrConfig, Fractions0) when is_list(Fractions0) ->
 normalize_fraction(F) when F =< 0.0 -> 0.0;
 normalize_fraction(F) when F >= 1.0 -> 1.0;
 normalize_fraction(F) -> F.
+
+assemble_offset_samples(Fractions, First, Last, MiddleSamples) ->
+    {Samples, _} = lists:mapfoldl(
+                     fun (+0.0, MS) -> {First, MS};
+                         (1.0, MS) -> {Last, MS};
+                         (_, [S | MS]) -> {S, MS}
+                     end, MiddleSamples, Fractions),
+    Samples.
 
 target_chunk_id(FirstChId, _Range, +0.0) -> FirstChId;
 target_chunk_id(FirstChId, Range, 1.0) -> FirstChId + Range;
@@ -3574,49 +3586,111 @@ seg_last_landmark(#seg_info{last = #chunk_info{id = Id, num = Num, timestamp = T
 seg_last_landmark(_) ->
     undefined.
 
-%% Single pass over index files: for each record, update the chunk closest to
-%% each target. Targets and Acc are lists of the same length. Returns [Sample].
+%% Find chunk (offset, timestamp) closest to each target by binary search in index
+%% files (ordered by ChunkId). Reads O(num_targets * log(records)) instead of all records.
 fold_index_files_closest(IdxFiles, Targets, FirstChunk) when is_list(Targets) ->
-    {FstChId, _FstTs} = FirstChunk,
-    Acc0 = [ {FirstChunk, abs(FstChId - T)} || T <- Targets ],
-    Acc = lists:foldl(fun (IdxFile, A) ->
-                              fold_one_index_file(IdxFile, Targets, A)
-                      end,
-                      Acc0, IdxFiles),
-    [ B || {B, _D} <- Acc ].
+    case index_files_bounds(IdxFiles) of
+        {ok, Bounds} ->
+            [closest_chunk_for_target(Bounds, T, FirstChunk) || T <- Targets];
+        {error, _} ->
+            [FirstChunk || _ <- Targets]
+    end.
 
-fold_one_index_file(IdxFile, Targets, Acc) ->
-    case file:open(IdxFile, [read, raw, binary]) of
-        {ok, Fd} ->
-            try
-                {ok, _} = file:position(Fd, ?IDX_HEADER_SIZE),
-                fold_index_records(Fd, Targets, Acc)
-            after
-                _ = file:close(Fd)
+index_files_bounds(IdxFiles) ->
+    R = [index_file_bounds_one(F) || F <- IdxFiles],
+    case lists:keyfind(error, 1, R) of
+        false -> {ok, [B || {ok, B} <- R]};
+        _ -> {error, bounds}
+    end.
+
+index_file_bounds_one(IdxFile) ->
+    case file_size(IdxFile) of
+        Size when Size > ?IDX_HEADER_SIZE + ?INDEX_RECORD_SIZE_B - 1 ->
+            NumRecords = (Size - ?IDX_HEADER_SIZE) div ?INDEX_RECORD_SIZE_B,
+            case read_idx_chunk_at(IdxFile, 0) of
+                {ok, {FstChId, FstTs}} ->
+                    case read_idx_chunk_at(IdxFile, NumRecords - 1) of
+                        {ok, {LstChId, LstTs}} ->
+                            {ok, {IdxFile, FstChId, FstTs, LstChId, LstTs, NumRecords}};
+                        _ ->
+                            {error, IdxFile}
+                    end;
+                _ ->
+                    {error, IdxFile}
             end;
         _ ->
-            Acc
+            {error, IdxFile}
     end.
 
-fold_index_records(Fd, Targets, Acc) ->
-    case file:read(Fd, ?INDEX_RECORD_SIZE_B) of
-        {ok, <<ChunkId:64/unsigned,
-               Timestamp:64/signed,
-               _Epoch:64/unsigned,
-               _FilePos:32/unsigned,
-               _ChType:8/unsigned>>} when ChunkId =/= 0 orelse Timestamp =/= 0 ->
-            Chunk = {ChunkId, Timestamp},
-            NewAcc = [ if abs(ChunkId - T) < D -> {Chunk, abs(ChunkId - T)};
-                          true -> {B, D}
-                      end || {{B, D}, T} <- lists:zip(Acc, Targets) ],
-            fold_index_records(Fd, Targets, NewAcc);
+read_idx_chunk_at(IdxFile, RecordIndex) when RecordIndex >= 0 ->
+    Pos = ?IDX_HEADER_SIZE + RecordIndex * ?INDEX_RECORD_SIZE_B,
+    case file:pread(IdxFile, Pos, ?INDEX_RECORD_SIZE_B) of
+        {ok, <<ChunkId:64/unsigned, Ts:64/signed, _/binary>>}
+          when ChunkId =/= 0 orelse Ts =/= 0 ->
+            {ok, {ChunkId, Ts}};
         {ok, ?ZERO_IDX_MATCH(_)} ->
-            fold_index_records(Fd, Targets, Acc);
-        {ok, _} ->
-            fold_index_records(Fd, Targets, Acc);
-        eof ->
-            Acc
+            {ok, zero};
+        X ->
+            X
     end.
+
+closest_chunk_for_target(Bounds, Target, FirstChunk) when Bounds =/= [] ->
+    {F1, Ft1} = FirstChunk,
+    [{_IdxFile1, F1, Ft1, _L1, _Lt1, _N1} | _] = Bounds,
+    Last = lists:last(Bounds),
+    {_IdxFileK, _Fk, _Ftk, Lk, Ltk, _Nk} = Last,
+    if
+        Target =< F1 -> {F1, Ft1};
+        Target >= Lk -> {Lk, Ltk};
+        true ->
+            case find_file_for_target(Bounds, Target) of
+                {single, IdxFile, F, Ft, L, Lt, NumRec} ->
+                    bsearch_closest_in_file(IdxFile, Target, NumRec, F, Ft, L, Lt);
+                {between, {Ca, Ta}, {Cb, Tb}} ->
+                    if abs(Ca - Target) =< abs(Cb - Target) -> {Ca, Ta};
+                       true -> {Cb, Tb}
+                    end
+            end
+    end.
+
+find_file_for_target([{IdxFile, F, Ft, L, Lt, N}], _Target) ->
+    {single, IdxFile, F, Ft, L, Lt, N};
+find_file_for_target([{IdxFile, F, Ft, L, Lt, N} | Rest], Target) ->
+    if
+        Target >= F, Target =< L -> {single, IdxFile, F, Ft, L, Lt, N};
+        true ->
+            [{_NextFile, F2, Ft2, _L2, _Lt2, _N2} | _] = Rest,
+            if
+                Target > L, Target < F2 -> {between, {L, Lt}, {F2, Ft2}};
+                true -> find_file_for_target(Rest, Target)
+            end
+    end.
+
+bsearch_closest_in_file(IdxFile, Target, NumRecords, _FirstChunkId, _FirstTs, _LastChunkId, _LastTs) ->
+    %% Largest record index with ChunkId =< Target
+    Idx = bsearch_lower(IdxFile, Target, 0, NumRecords - 1),
+    {ok, {C0, T0}} = read_idx_chunk_at(IdxFile, Idx),
+    if
+        Idx + 1 >= NumRecords -> {C0, T0};
+        true ->
+            {ok, {C1, T1}} = read_idx_chunk_at(IdxFile, Idx + 1),
+            if abs(C0 - Target) =< abs(C1 - Target) -> {C0, T0};
+               true -> {C1, T1}
+            end
+    end.
+
+bsearch_lower(IdxFile, Target, Low, High) when Low =< High ->
+    Mid = (Low + High) div 2,
+    case read_idx_chunk_at(IdxFile, Mid) of
+        {ok, {ChunkId, _}} when ChunkId =< Target ->
+            bsearch_lower(IdxFile, Target, Mid + 1, High);
+        {ok, zero} ->
+            bsearch_lower(IdxFile, Target, Mid + 1, High);
+        _ ->
+            bsearch_lower(IdxFile, Target, Low, Mid - 1)
+    end;
+bsearch_lower(_IdxFile, _Target, Low, _High) ->
+    max(0, Low - 1).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
