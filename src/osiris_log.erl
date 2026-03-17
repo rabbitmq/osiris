@@ -3670,9 +3670,7 @@ process_one_file({IdxFile, _BoundsTuple, TargetList}) ->
     end.
 
 merge_file_results(#{results := FileResults}, Acc) ->
-    maps:merge(Acc, FileResults);
-merge_file_results(_, Acc) ->
-    Acc.
+    maps:merge(Acc, FileResults).
 
 finalize_pending(#{results := Results, pending := Pending}) ->
     FinalResults = lists:foldl(
