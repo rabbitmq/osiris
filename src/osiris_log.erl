@@ -3586,14 +3586,150 @@ seg_last_landmark(#seg_info{last = #chunk_info{id = Id, num = Num, timestamp = T
 seg_last_landmark(_) ->
     undefined.
 
-%% Find chunk (offset, timestamp) closest to each target by binary search in index
-%% files (ordered by ChunkId). Reads O(num_targets * log(records)) instead of all records.
+%% Find chunk (offset, timestamp) closest to each target. Groups targets by index
+%% file (using Bounds), then for each file that has targets opens it once and
+%% runs a single idx_skip_search pass to resolve all targets for that file.
 fold_index_files_closest(IdxFiles, Targets, FirstChunk) when is_list(Targets) ->
     case index_files_bounds(IdxFiles) of
-        {ok, Bounds} ->
-            [closest_chunk_for_target(Bounds, T, FirstChunk) || T <- Targets];
+        {ok, Bounds} when Bounds =/= [] ->
+            {InitialResults, FileGroups} = group_targets_by_file(Bounds, Targets, FirstChunk),
+            NumTargets = length(Targets),
+            FinalResults = lists:foldl(
+                fun(FileGroup, Acc) ->
+                    merge_file_results(process_one_file(FileGroup), Acc)
+                end,
+                InitialResults,
+                FileGroups),
+            {F1, Ft1} = FirstChunk,
+            [case maps:find(I, FinalResults) of
+                 {ok, R} -> R;
+                 error -> {F1, Ft1}
+             end || I <- lists:seq(0, NumTargets - 1)];
+        {ok, []} ->
+            [FirstChunk || _ <- Targets];
         {error, _} ->
             [FirstChunk || _ <- Targets]
+    end.
+
+group_targets_by_file(Bounds, Targets, _FirstChunk) ->
+    [{_IdxFile1, F1, Ft1, _L1, _Lt1, _N1} | _] = Bounds,
+    LastBound = lists:last(Bounds),
+    {_IdxFileK, _Fk, _Ftk, Lk, Ltk, _Nk} = LastBound,
+    FirstChunkPair = {F1, Ft1},
+    LastChunkPair = {Lk, Ltk},
+    WithIndices = lists:zip(lists:seq(0, length(Targets) - 1), Targets),
+    {InitialResults, FileMap} = lists:foldl(
+        fun({I, Target}, {ResAcc, GroupAcc}) ->
+            if
+                Target =< F1 ->
+                    {maps:put(I, FirstChunkPair, ResAcc), GroupAcc};
+                Target >= Lk ->
+                    {maps:put(I, LastChunkPair, ResAcc), GroupAcc};
+                true ->
+                    case find_file_for_target(Bounds, Target) of
+                        {single, IdxFile, _F, _Ft, _L, _Lt, _N} ->
+                            {ResAcc, add_to_file_group(IdxFile, I, Target, GroupAcc)};
+                        {between, {Ca, Ta}, {Cb, Tb}} ->
+                            R = if abs(Ca - Target) =< abs(Cb - Target) -> {Ca, Ta};
+                                   true -> {Cb, Tb}
+                                end,
+                            {maps:put(I, R, ResAcc), GroupAcc}
+                    end
+            end
+        end,
+        {#{}, #{}},
+        WithIndices),
+    FileGroups = lists:filtermap(
+        fun({IdxFile, _F, _Ft, _L, _Lt, _N} = BoundsTuple) ->
+            List = maps:get(IdxFile, FileMap, []),
+            case List of
+                [] -> false;
+                _ -> {true, {IdxFile, BoundsTuple, List}}
+            end
+        end,
+        Bounds),
+    {InitialResults, FileGroups}.
+
+add_to_file_group(IdxFile, I, Target, Map) ->
+    maps:update_with(IdxFile, fun(L) -> [{I, Target} | L] end, [{I, Target}], Map).
+
+process_one_file({IdxFile, _BoundsTuple, TargetList}) ->
+    Acc0 = #{results => #{}, pending => [{I, Tgt, none} || {I, Tgt} <- TargetList]},
+    case file:open(IdxFile, [read, raw, binary]) of
+        {ok, Fd} ->
+            try
+                Acc = idx_skip_search(Fd, ?IDX_HEADER_SIZE,
+                                      fun multi_target_offset_search_fun/3,
+                                      Acc0),
+                finalize_pending(Acc)
+            after
+                _ = file:close(Fd)
+            end;
+        _ ->
+            finalize_pending(Acc0)
+    end.
+
+merge_file_results(#{results := FileResults}, Acc) ->
+    maps:merge(Acc, FileResults);
+merge_file_results(_, Acc) ->
+    Acc.
+
+finalize_pending(#{results := Results, pending := Pending}) ->
+    FinalResults = lists:foldl(
+        fun({I, _Tgt, Best}, R) when Best =/= none ->
+                maps:put(I, Best, R);
+           (_, R) ->
+                R
+        end,
+        Results,
+        Pending),
+    #{results => FinalResults, pending => []}.
+
+multi_target_offset_search_fun(_Type, IdxRecordBin, Acc) ->
+    do_multi_target_offset_step(IdxRecordBin, Acc).
+
+do_multi_target_offset_step(IdxRecordBin, #{results := Results, pending := Pending} = Acc) ->
+    case decode_idx_record(IdxRecordBin) of
+        zero ->
+            {continue, Acc};
+        {ok, {ChunkId, Ts}} ->
+            {NewResults, NewPending} = update_offset_pending(ChunkId, Ts, Results, Pending),
+            case NewPending of
+                [] ->
+                    {return, Acc#{results => NewResults, pending => []}};
+                _ ->
+                    {continue, Acc#{results => NewResults, pending => NewPending}}
+            end
+    end.
+
+decode_idx_record(<<ChunkId:64/unsigned, Ts:64/signed, _/binary>>)
+  when ChunkId =/= 0 orelse Ts =/= 0 ->
+    {ok, {ChunkId, Ts}};
+decode_idx_record(?ZERO_IDX_MATCH(_)) ->
+    zero;
+decode_idx_record(_) ->
+    zero.
+
+update_offset_pending(ChunkId, Ts, Results, Pending) ->
+    lists:foldl(
+        fun({I, Tgt, Best}, {ResAcc, PendAcc}) ->
+            if
+                ChunkId =< Tgt ->
+                    NewBest = {ChunkId, Ts},
+                    {ResAcc, [{I, Tgt, NewBest} | PendAcc]};
+                ChunkId > Tgt ->
+                    Final = choose_closest_chunk(Best, {ChunkId, Ts}, Tgt),
+                    {maps:put(I, Final, ResAcc), PendAcc}
+            end
+        end,
+        {Results, []},
+        Pending).
+
+choose_closest_chunk(none, {C, T}, _Tgt) ->
+    {C, T};
+choose_closest_chunk({C1, T1}, {C2, T2}, Tgt) ->
+    if abs(C1 - Tgt) =< abs(C2 - Tgt) -> {C1, T1};
+       true -> {C2, T2}
     end.
 
 index_files_bounds(IdxFiles) ->
@@ -3643,25 +3779,6 @@ read_idx_chunk_at(IdxFile, RecordIndex) when RecordIndex >= 0 ->
             X
     end.
 
-closest_chunk_for_target(Bounds, Target, FirstChunk) when Bounds =/= [] ->
-    {F1, Ft1} = FirstChunk,
-    [{_IdxFile1, F1, Ft1, _L1, _Lt1, _N1} | _] = Bounds,
-    Last = lists:last(Bounds),
-    {_IdxFileK, _Fk, _Ftk, Lk, Ltk, _Nk} = Last,
-    if
-        Target =< F1 -> {F1, Ft1};
-        Target >= Lk -> {Lk, Ltk};
-        true ->
-            case find_file_for_target(Bounds, Target) of
-                {single, IdxFile, F, Ft, L, Lt, NumRec} ->
-                    bsearch_closest_in_file(IdxFile, Target, NumRec, F, Ft, L, Lt);
-                {between, {Ca, Ta}, {Cb, Tb}} ->
-                    if abs(Ca - Target) =< abs(Cb - Target) -> {Ca, Ta};
-                       true -> {Cb, Tb}
-                    end
-            end
-    end.
-
 find_file_for_target([{IdxFile, F, Ft, L, Lt, N}], _Target) ->
     {single, IdxFile, F, Ft, L, Lt, N};
 find_file_for_target([{IdxFile, F, Ft, L, Lt, N} | Rest], Target) ->
@@ -3674,32 +3791,6 @@ find_file_for_target([{IdxFile, F, Ft, L, Lt, N} | Rest], Target) ->
                 true -> find_file_for_target(Rest, Target)
             end
     end.
-
-bsearch_closest_in_file(IdxFile, Target, NumRecords, _FirstChunkId, _FirstTs, _LastChunkId, _LastTs) ->
-    %% Largest record index with ChunkId =< Target
-    Idx = bsearch_lower(IdxFile, Target, 0, NumRecords - 1),
-    {ok, {C0, T0}} = read_idx_chunk_at(IdxFile, Idx),
-    if
-        Idx + 1 >= NumRecords -> {C0, T0};
-        true ->
-            {ok, {C1, T1}} = read_idx_chunk_at(IdxFile, Idx + 1),
-            if abs(C0 - Target) =< abs(C1 - Target) -> {C0, T0};
-               true -> {C1, T1}
-            end
-    end.
-
-bsearch_lower(IdxFile, Target, Low, High) when Low =< High ->
-    Mid = (Low + High) div 2,
-    case read_idx_chunk_at(IdxFile, Mid) of
-        {ok, {ChunkId, _}} when ChunkId =< Target ->
-            bsearch_lower(IdxFile, Target, Mid + 1, High);
-        {ok, zero} ->
-            bsearch_lower(IdxFile, Target, Mid + 1, High);
-        _ ->
-            bsearch_lower(IdxFile, Target, Low, Mid - 1)
-    end;
-bsearch_lower(_IdxFile, _Target, Low, _High) ->
-    max(0, Low - 1).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
