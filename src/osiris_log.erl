@@ -2123,12 +2123,6 @@ build_segment_info(SegFile, LastChunkPos, IdxFile) ->
                    _Reserved:24>>} ->
                     LastChunkSize = LastFSize + LastSize + LastTSize,
                     Size = LastChunkPos + ?HEADER_SIZE_B + LastChunkSize,
-                    %% TODO: this file:position/2 all has no actual function and
-                    %% is only used to emit a debug log. Remove?
-                    {ok, Eof} = file:position(Fd, eof),
-                    ?DEBUG_IF("~s: segment ~ts has trailing data ~w ~w",
-                              [?MODULE, filename:basename(SegFile),
-                               Size, Eof], Size =/= Eof),
                     _ = file:close(Fd),
                     FstChInfo = #chunk_info{epoch = FirstEpoch,
                                             timestamp = FirstTs,
