@@ -14,6 +14,7 @@
 
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("kernel/include/file.hrl").
 
 -include("src/osiris.hrl").
 % -include("src/osiris_peer_shim.hrl").
@@ -103,18 +104,26 @@ all_tests() ->
      resolve_offset_spec_empty,
      resolve_offset_spec_empty_directory,
      resolve_offset_spec,
-     stream_offset_samples_empty_log,
-     stream_offset_samples_nonexistent,
-     stream_offset_samples_with_single_chunk,
-     stream_offset_samples_with_multiple_chunks,
-     stream_offset_all_samples,
-     init_stream_offset_samples_via_config_map,
-     stream_offset_with_empty_samples,
-     stream_offset_first_and_last_samples,
-     stream_offset_unordered_fraction_samples,
-     stream_offset_subset_samples_only,
-     stream_offset_unnormalized_samples,
-     stream_offset_with_samples_over_multi_segments
+     samples_empty_log,
+     samples_nonexistent,
+     samples_with_single_chunk,
+     samples_single_message_all_fractions,
+     samples_with_multiple_chunks,
+     samples_several_fractions,
+     init_samples_via_config_map,
+     samples_empty_fractions,
+     sample_first_and_last_offsets,
+     samples_unordered_fractions,
+     samples_fewer_fractions,
+     samples_first_offset_only,
+     samples_last_offset_only,
+     samples_duplicate_fractions,
+     samples_unnormalized_fractions,
+     samples_over_multi_segments,
+     samples_over_three_index_files,
+     samples_over_more_than_five_segments,
+     samples_over_boundaries,
+     samples_fail_with_io_error
     ].
 
 groups() ->
@@ -2063,38 +2072,55 @@ overview_with_missing_index_at_start(Config) ->
                         filename:join(?config(dir, Config), "*.index")))),
     ok.
 
-stream_offset_samples_empty_log(Config) ->
+samples_empty_log(Config) ->
     %% Empty log (init but no writes) returns {error, empty}.
     LDir = ?config(leader_dir, Config),
     Log0 = seed_log(LDir, [], Config),
     osiris_log:close(Log0),
-    ?assertEqual({error, empty}, osiris_log:stream_offset_samples(LDir, ?ALL_SAMPLES)),
+    ?assertEqual({error, empty}, osiris_log:samples(LDir, ?ALL_SAMPLES)),
     ok.
 
-stream_offset_samples_nonexistent(Config) ->
+samples_nonexistent(Config) ->
     %% Non-existent stream path returns {error, empty}.
-    NonExistent = filename:join(?config(priv_dir, Config), "stream_offset_samples_nonexistent"),
-    ?assertEqual({error, empty}, osiris_log:stream_offset_samples(NonExistent, ?ALL_SAMPLES)),
+    NonExistent = filename:join(?config(priv_dir, Config), "samples_nonexistent"),
+    ?assertEqual({error, empty}, osiris_log:samples(NonExistent, ?ALL_SAMPLES)),
     ok.
 
-stream_offset_samples_with_single_chunk(Config) ->
-    %% Single chunk: first, last, p25, p50, p75 all equal. last is the last
-    %% message offset (same as first when the only chunk has one record).
+samples_with_single_chunk(Config) ->
+    %% Single chunk with two records (offsets 0 and 1). Intermediate fractions
+    %% use linear target offsets in [first, last]: P25->0, P50/P75->1; timestamp
+    %% is still the enclosing index chunk time.
     Now = now_ms(),
     FirstTs = Now - 10000,
     EpochChunks = [{2, FirstTs, [<<"one">>, <<"two">>]}],
     LDir = ?config(leader_dir, Config),
     Log0 = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(Log0),
-    {ok, [First, P25, P50, P75, Last]} = osiris_log:stream_offset_samples(LDir, ?ALL_SAMPLES),
-    ?assertMatch({0.0, 0, FirstTs}, First),
+    {ok, [First, P25, P50, P75, Last]} = osiris_log:samples(LDir, ?ALL_SAMPLES),
+    ?assertMatch({+0.0, 0, FirstTs}, First),
     ?assertMatch({1.0, 1, FirstTs}, Last),
     ?assertMatch({0.25, 0, FirstTs}, P25),
-    ?assertMatch({0.5, 0, FirstTs}, P50),
-    ?assertMatch({0.75, 0, FirstTs}, P75),
+    ?assertMatch({0.5, 1, FirstTs}, P50),
+    ?assertMatch({0.75, 1, FirstTs}, P75),
     ok.
 
-stream_offset_samples_with_multiple_chunks(Config) ->
+samples_single_message_all_fractions(Config) ->
+    %% One message: first and last offset coincide (Range = 0). Intermediates skip
+    %% index scan and reuse first offset and timestamp.
+    Now = now_ms(),
+    Ts = Now - 10000,
+    LDir = ?config(leader_dir, Config),
+    Log0 = seed_log(LDir, [{1, Ts, [<<"solo">>]}], Config),
+    osiris_log:close(Log0),
+    {ok, [First, P25, P50, P75, Last]} = osiris_log:samples(LDir, ?ALL_SAMPLES),
+    ?assertMatch({+0.0, 0, Ts}, First),
+    ?assertMatch({1.0, 0, Ts}, Last),
+    ?assertMatch({0.25, 0, Ts}, P25),
+    ?assertMatch({0.5, 0, Ts}, P50),
+    ?assertMatch({0.75, 0, Ts}, P75),
+    ok.
+
+samples_with_multiple_chunks(Config) ->
     %% Multiple chunks: first < p25 <= p50 <= p75 < last (by offset). last is
     %% the very last message offset in the log (last offset in the last chunk),
     %% not the last chunk's first offset. Last chunk here has 2 records -> 5.
@@ -2110,7 +2136,7 @@ stream_offset_samples_with_multiple_chunks(Config) ->
     LDir = ?config(leader_dir, Config),
     Log0 = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(Log0),
-    {ok, [First, P25, P50, P75, Last]} = osiris_log:stream_offset_samples(LDir, ?ALL_SAMPLES),
+    {ok, [First, P25, P50, P75, Last]} = osiris_log:samples(LDir, ?ALL_SAMPLES),
     {_, FirstOff, FirstTs} = First,
     {_, LastOff, LastTs} = Last,
     {_, P25Off, _} = P25,
@@ -2124,7 +2150,7 @@ stream_offset_samples_with_multiple_chunks(Config) ->
     ?assertEqual(LastOff, 5),
     ok.
 
-stream_offset_all_samples(Config) ->
+samples_several_fractions(Config) ->
     %% Minimum layout for non-overlapping percentiles: chunk starts at 0,1,2,3,4
     %% so Range=4, T25=1, T50=2, T75=3 each land on a distinct chunk.
     Now = now_ms(),
@@ -2143,36 +2169,36 @@ stream_offset_all_samples(Config) ->
     LDir = ?config(leader_dir, Config),
     Log0 = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(Log0),
-    {ok, [First, P25, P50, P75, Last]} = osiris_log:stream_offset_samples(LDir, ?ALL_SAMPLES),
-    {0.0, 0, Ts0} = First,
+    {ok, [First, P25, P50, P75, Last]} = osiris_log:samples(LDir, ?ALL_SAMPLES),
+    {+0.0, 0, Ts0} = First,
     {1.0, 4, Ts4} = Last,
     {0.25, 1, Ts1} = P25,
     {0.5, 2, Ts2} = P50,
     {0.75, 3, Ts3} = P75.
 
-init_stream_offset_samples_via_config_map(Config) ->
+init_samples_via_config_map(Config) ->
     %% Calling with config map #{dir => Dir} works like path.
     EpochChunks = [{1, [<<"a">>]}, {1, [<<"b">>]}],
     LDir = ?config(leader_dir, Config),
     Log0 = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(Log0),
-    {ok, ByPath} = osiris_log:stream_offset_samples(LDir, ?ALL_SAMPLES),
+    {ok, ByPath} = osiris_log:samples(LDir, ?ALL_SAMPLES),
     Conf = ?config(osiris_conf, Config),
     RConf = Conf#{dir => LDir},
-    {ok, ByConf} = osiris_log:stream_offset_samples(RConf, ?ALL_SAMPLES),
+    {ok, ByConf} = osiris_log:samples(RConf, ?ALL_SAMPLES),
     ?assertEqual(ByPath, ByConf),
     ok.
 
-stream_offset_with_empty_samples(Config) ->
+samples_empty_fractions(Config) ->
     %% Requesting no fractions returns {ok, []} (no error).
     EpochChunks = [{1, [<<"a">>]}, {1, [<<"b">>]}],
     LDir = ?config(leader_dir, Config),
     Log0 = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(Log0),
-    ?assertEqual({ok, []}, osiris_log:stream_offset_samples(LDir, [])),
+    ?assertEqual({ok, []}, osiris_log:samples(LDir, [])),
     ok.
 
-stream_offset_first_and_last_samples(Config) ->
+sample_first_and_last_offsets(Config) ->
     %% Only 0.0 and 1.0 requested; no intermediate fractions (MiddleTargets = []).
     Now = now_ms(),
     Ts0 = Now - 10000,
@@ -2181,12 +2207,12 @@ stream_offset_first_and_last_samples(Config) ->
     LDir = ?config(leader_dir, Config),
     Log0 = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(Log0),
-    {ok, Samples} = osiris_log:stream_offset_samples(LDir, [0.0, 1.0]),
+    {ok, Samples} = osiris_log:samples(LDir, [0.0, 1.0]),
     ?assertEqual(2, length(Samples)),
-    [{0.0, 0, Ts0}, {1.0, 1, Ts1}] = lists:sort(Samples),
+    [{+0.0, 0, Ts0}, {1.0, 1, Ts1}] = lists:sort(Samples),
     ok.
 
-stream_offset_unordered_fraction_samples(Config) ->
+samples_unordered_fractions(Config) ->
     %% Request fractions in non-ascending order; result has correct {F, O, Ts} per fraction.
     Now = now_ms(),
     Ts0 = Now - 10000,
@@ -2204,7 +2230,7 @@ stream_offset_unordered_fraction_samples(Config) ->
     Log0 = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(Log0),
     Fractions = [1.0, 0.25, 0.0, 0.75, 0.5],
-    {ok, Samples} = osiris_log:stream_offset_samples(LDir, Fractions),
+    {ok, Samples} = osiris_log:samples(LDir, Fractions),
     ?assertEqual(5, length(Samples)),
     ByF = maps:from_list([{F, {O, Ts}} || {F, O, Ts} <- Samples]),
     ?assertMatch({0, _}, maps:get(0.0, ByF)),
@@ -2214,7 +2240,7 @@ stream_offset_unordered_fraction_samples(Config) ->
     ?assertMatch({3, _}, maps:get(0.75, ByF)),
     ok.
 
-stream_offset_subset_samples_only(Config) ->
+samples_fewer_fractions(Config) ->
     %% Request subsets so first/last are omitted when not in Fractions (assemble_offset_samples).
     Now = now_ms(),
     Ts0 = Now - 10000,
@@ -2225,24 +2251,76 @@ stream_offset_subset_samples_only(Config) ->
     Log0 = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(Log0),
     %% Only middle fraction.
-    {ok, MidOnly} = osiris_log:stream_offset_samples(LDir, [0.5]),
+    {ok, MidOnly} = osiris_log:samples(LDir, [0.5]),
     ?assertEqual(1, length(MidOnly)),
     ?assertMatch({0.5, _, _}, hd(MidOnly)),
     %% First and middle, no last.
-    {ok, FirstMid} = osiris_log:stream_offset_samples(LDir, [0.0, 0.5]),
+    {ok, FirstMid} = osiris_log:samples(LDir, [0.0, 0.5]),
     ?assertEqual(2, length(FirstMid)),
     [S0, S05] = lists:sort(FirstMid),
-    ?assertMatch({0.0, 0, Ts0}, S0),
+    ?assertMatch({+0.0, 0, Ts0}, S0),
     ?assertMatch({0.5, 1, Ts1}, S05),
     %% Middle and last, no first.
-    {ok, MidLast} = osiris_log:stream_offset_samples(LDir, [0.5, 1.0]),
+    {ok, MidLast} = osiris_log:samples(LDir, [0.5, 1.0]),
     ?assertEqual(2, length(MidLast)),
     [S05b, S1] = lists:sort(MidLast),
     ?assertMatch({0.5, 1, Ts1}, S05b),
     ?assertMatch({1.0, 2, Ts2}, S1),
     ok.
 
-stream_offset_unnormalized_samples(Config) ->
+samples_first_offset_only(Config) ->
+    %% Request only 0.0: single sample at first offset.
+    Now = now_ms(),
+    Ts = Now - 8000,
+    LDir = ?config(leader_dir, Config),
+    Log0 = seed_log(LDir, [{1, Ts, [<<"only">>]}], Config),
+    osiris_log:close(Log0),
+    {ok, Samples} = osiris_log:samples(LDir, [+0.0]),
+    ?assertEqual([{+0.0, 0, Ts}], Samples),
+    ok.
+
+samples_last_offset_only(Config) ->
+    %% Request only 1.0: single sample at last offset (same as first when one message).
+    Now = now_ms(),
+    Ts = Now - 5000,
+    LDir = ?config(leader_dir, Config),
+    Log0 = seed_log(LDir, [{1, Ts, [<<"only">>]}], Config),
+    osiris_log:close(Log0),
+    {ok, Samples} = osiris_log:samples(LDir, [1.0]),
+    ?assertEqual([{1.0, 0, Ts}], Samples),
+    ok.
+
+samples_duplicate_fractions(Config) ->
+    %% Duplicate 0.0 / 1.0 in the fraction list still yield one first and one last
+    %% (assemble uses lists:member). Duplicate intermediates yield one row per request.
+    Now = now_ms(),
+    Ts0 = Now - 10000,
+    Ts1 = Now - 5000,
+    Ts2 = Now - 1000,
+    EpochChunks = [{1, Ts0, [<<"a">>]}, {1, Ts1, [<<"b">>]}, {1, Ts2, [<<"c">>]}],
+    LDir = ?config(leader_dir, Config),
+    Log0 = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(Log0),
+    {ok, DupBounds} = osiris_log:samples(LDir, [0.0, 0.0, 1.0, 1.0]),
+    ?assertEqual(2, length(DupBounds)),
+    [B0, B1] = lists:sort(DupBounds),
+    ?assertMatch({+0.0, 0, Ts0}, B0),
+    ?assertMatch({1.0, 2, Ts2}, B1),
+    {ok, DupMid} = osiris_log:samples(LDir, [0.5, 0.5]),
+    ?assertEqual(2, length(DupMid)),
+    ?assertEqual([0.5, 0.5], [F || {F, _, _} <- DupMid]),
+    lists:foreach(
+      fun(S) -> ?assertMatch({0.5, 1, Ts1}, S) end,
+      DupMid),
+    {ok, Mix} =
+        osiris_log:samples(LDir, [0.0, 1.0, 0.5, 0.5, 0.0, 1.0]),
+    ?assertEqual(4, length(Mix)),
+    ?assertMatch(
+      [{+0.0, 0, Ts0}, {0.5, 1, Ts1}, {0.5, 1, Ts1}, {1.0, 2, Ts2}],
+      Mix),
+    ok.
+
+samples_unnormalized_fractions(Config) ->
     %% Fractions outside [0.0, 1.0] are clamped (normalize_fraction).
     Now = now_ms(),
     Ts0 = Now - 10000,
@@ -2252,7 +2330,7 @@ stream_offset_unnormalized_samples(Config) ->
     LDir = ?config(leader_dir, Config),
     Log0 = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(Log0),
-    {ok, Samples} = osiris_log:stream_offset_samples(LDir, [-0.5, 0.5, 1.5]),
+    {ok, Samples} = osiris_log:samples(LDir, [-0.5, 0.5, 1.5]),
     ?assertEqual(3, length(Samples)),
     Fractions = [F || {F, _, _} <- Samples],
     ?assert(lists:member(0.0, Fractions)),
@@ -2260,27 +2338,162 @@ stream_offset_unnormalized_samples(Config) ->
     ?assert(lists:member(1.0, Fractions)),
     ok.
 
-stream_offset_with_samples_over_multi_segments(Config) ->
+samples_over_multi_segments(Config) ->
     %% Multiple segments: 2 chunks per segment -> 4 segments for 8 chunks (offsets 0..7).
     %% Request 3 fractions so that two samples land in segment 2 (offsets 2,3) and one in segment 4 (offset 6).
     %% Exercises locate_index_with_target_offsets across index files.
-    Now = now_ms(),
-    Ts = [Now - (8000 - I * 1000) || I <- lists:seq(0, 7)],
-    EpochChunks = [{1, T, [<<"chunk">>]} || T <- Ts],
-    LDir = ?config(leader_dir, Config),
-    Conf0 = ?config(osiris_conf, Config),
-    Conf = Conf0#{dir => LDir, max_segment_size_chunks => 2},
-    Log0 = seed_log(Conf, EpochChunks, Config),
-    osiris_log:close(Log0),
-    %% Range = 7 (chunk ids 0..7). Target offsets: 2, 3, 6 -> fractions 2/7, 3/7, 6/7.
-    Fractions = [2/7, 3/7, 6/7],
-    {ok, Samples} = osiris_log:stream_offset_samples(LDir, Fractions),
-    ?assertEqual(3, length(Samples)),
-    ByF = maps:from_list([{F, {O, TsVal}} || {F, O, TsVal} <- Samples]),
-    ?assertMatch({2, _}, maps:get(2/7, ByF)),
-    ?assertMatch({3, _}, maps:get(3/7, ByF)),
-    ?assertMatch({6, _}, maps:get(6/7, ByF)),
-    ok.
+    application:set_env(osiris, max_segment_size_chunks, 2),
+    try
+        Now = now_ms(),
+        Ts = [Now - (8000 - I * 1000) || I <- lists:seq(0, 7)],
+        EpochChunks = [{1, T, [<<"chunk">>]} || T <- Ts],
+        LDir = ?config(leader_dir, Config),
+        Conf0 = ?config(osiris_conf, Config),
+        Conf = Conf0#{dir => LDir},
+        Log0 = seed_log(Conf, EpochChunks, Config),
+        osiris_log:close(Log0),
+        %% Range = 7 (chunk ids 0..7). Target offsets: 2, 3, 6 -> fractions 2/7, 3/7, 6/7.
+        Fractions = [2/7, 3/7, 6/7],
+        {ok, Samples} = osiris_log:samples(LDir, Fractions),
+        ?assertEqual(3, length(Samples)),
+        ByF = maps:from_list([{F, {O, TsVal}} || {F, O, TsVal} <- Samples]),
+        ?assertMatch({2, _}, maps:get(2/7, ByF)),
+        ?assertMatch({3, _}, maps:get(3/7, ByF)),
+        ?assertMatch({6, _}, maps:get(6/7, ByF)),
+        ok
+    after
+        application:unset_env(osiris, max_segment_size_chunks)
+    end.
+
+samples_over_three_index_files(Config) ->
+    %% Exactly 3 index files with one intermediate target per segment so that
+    %% locate_index_with_target_offsets opens all three index files.
+    %% 3 segments, 2 chunks each -> 6 chunks (offsets 0..5), Range = 5.
+    %% Targets 1, 3, 4 -> open seg0 (resolve 1), seg1 (resolve 3), seg2 (resolve 4).
+    application:set_env(osiris, max_segment_size_chunks, 2),
+    try
+        Now = now_ms(),
+        Ts = [Now - (7000 - I * 1000) || I <- lists:seq(0, 5)],
+        EpochChunks = [{1, T, [<<"c">>]} || T <- Ts],
+        LDir = ?config(leader_dir, Config),
+        Conf0 = ?config(osiris_conf, Config),
+        Conf = Conf0#{dir => LDir},
+        Log0 = seed_log(Conf, EpochChunks, Config),
+        osiris_log:close(Log0),
+        Indexes = lists:sort(filelib:wildcard(filename:join(LDir, "*.index"))),
+        ?assertEqual(3, length(Indexes)),
+        Fractions = [1/5, 3/5, 4/5],
+        {ok, Samples} = osiris_log:samples(LDir, Fractions),
+        ?assertEqual(3, length(Samples)),
+        ByF = maps:from_list([{F, {O, _TsVal}} || {F, O, _TsVal} <- Samples]),
+        ?assertMatch({1, _}, maps:get(1/5, ByF)),
+        ?assertMatch({3, _}, maps:get(3/5, ByF)),
+        ?assertMatch({4, _}, maps:get(4/5, ByF)),
+        ok
+    after
+        application:unset_env(osiris, max_segment_size_chunks)
+    end.
+
+samples_over_more_than_five_segments(Config) ->
+    %% 5+ segments: one target in seg0, one in seg2, one in seg4 so we skip
+    %% seg1 then open seg2, skip seg3 then open seg4 (deeper recursion).
+    %% 5 segments, 2 chunks each -> 10 chunks (offsets 0..9), Range = 9.
+    application:set_env(osiris, max_segment_size_chunks, 2),
+    try
+        Now = now_ms(),
+        Ts = [Now - (10000 - I * 1000) || I <- lists:seq(0, 9)],
+        EpochChunks = [{1, T, [<<"c">>]} || T <- Ts],
+        LDir = ?config(leader_dir, Config),
+        Conf0 = ?config(osiris_conf, Config),
+        Conf = Conf0#{dir => LDir},
+        Log0 = seed_log(Conf, EpochChunks, Config),
+        osiris_log:close(Log0),
+        Indexes = lists:sort(filelib:wildcard(filename:join(LDir, "*.index"))),
+        ?assertEqual(5, length(Indexes)),
+        Fractions = [1/9, 4/9, 8/9],
+        {ok, Samples} = osiris_log:samples(LDir, Fractions),
+        ?assertEqual(3, length(Samples)),
+        ByF = maps:from_list([{F, {O, _TsVal}} || {F, O, _TsVal} <- Samples]),
+        ?assertMatch({1, _}, maps:get(1/9, ByF)),
+        ?assertMatch({4, _}, maps:get(4/9, ByF)),
+        ?assertMatch({8, _}, maps:get(8/9, ByF)),
+        ok
+    after
+        application:unset_env(osiris, max_segment_size_chunks)
+    end.
+
+samples_over_boundaries(Config) ->
+    %% Target offset exactly equals first chunk id of a segment (TargetOffset = CurIdxOffset).
+    %% We skip the previous index and resolve the target in the segment that starts there.
+    %% 4 segments, 8 chunks (offsets 0..7), Range = 7. Fractions 2/7, 4/7, 6/7 -> targets 2, 4, 6.
+    application:set_env(osiris, max_segment_size_chunks, 2),
+    try
+        Now = now_ms(),
+        Ts = [Now - (8000 - I * 1000) || I <- lists:seq(0, 7)],
+        EpochChunks = [{1, T, [<<"c">>]} || T <- Ts],
+        LDir = ?config(leader_dir, Config),
+        Conf0 = ?config(osiris_conf, Config),
+        Conf = Conf0#{dir => LDir},
+        Log0 = seed_log(Conf, EpochChunks, Config),
+        osiris_log:close(Log0),
+        Fractions = [2/7, 4/7, 6/7],
+        {ok, Samples} = osiris_log:samples(LDir, Fractions),
+        ?assertEqual(3, length(Samples)),
+        ByF = maps:from_list([{F, {O, _TsVal}} || {F, O, _TsVal} <- Samples]),
+        ?assertMatch({2, _}, maps:get(2/7, ByF)),
+        ?assertMatch({4, _}, maps:get(4/7, ByF)),
+        ?assertMatch({6, _}, maps:get(6/7, ByF)),
+        ok
+    after
+        application:unset_env(osiris, max_segment_size_chunks)
+    end.
+
+samples_fail_with_io_error(Config) ->
+    %% Three segments so first/last index are readable for landmarks, but the middle
+    %% index cannot be opened: must return {error, _} (no partial {ok, [...]}).
+    case os:type() of
+        {unix, _} ->
+            samples_fail_with_io_error_unix(Config);
+        _ ->
+            {skip, not_unix}
+    end.
+
+samples_fail_with_io_error_unix(Config) ->
+    application:set_env(osiris, max_segment_size_chunks, 2),
+    try
+        Now = now_ms(),
+        Ts = [Now - (9000 - I * 1000) || I <- lists:seq(0, 5)],
+        EpochChunks = [{1, T, [<<"x">>]} || T <- Ts],
+        LDir = ?config(leader_dir, Config),
+        Conf0 = ?config(osiris_conf, Config),
+        Conf = Conf0#{dir => LDir},
+        Log0 = seed_log(Conf, EpochChunks, Config),
+        osiris_log:close(Log0),
+        Indexes = lists:sort(filelib:wildcard(filename:join(LDir, "*.index"))),
+        ?assertEqual(3, length(Indexes)),
+        MidIdx = lists:nth(2, Indexes),
+        {ok, FI} = file:read_file_info(MidIdx),
+        PrevMode = FI#file_info.mode,
+        try
+            ok = file:write_file_info(MidIdx, FI#file_info{mode = 8#000}),
+            %% sorted_index_files uses binary path components; wildcard returns lists
+            case osiris_log:samples(LDir, ?ALL_SAMPLES) of
+                {error, {index_file_open_failed, ErrIdx, _Reason}} ->
+                    %% basename/1 returns list or binary depending on path type
+                    MidBase = samples_test_index_basename_bin(MidIdx),
+                    ErrBase = samples_test_index_basename_bin(ErrIdx),
+                    ?assertEqual(MidBase, ErrBase);
+                Other ->
+                    ct:fail({expected_index_open_error, Other})
+            end
+        after
+            {ok, FI2} = file:read_file_info(MidIdx),
+            _ = file:write_file_info(MidIdx, FI2#file_info{mode = PrevMode})
+        end,
+        ok
+    after
+        application:unset_env(osiris, max_segment_size_chunks)
+    end.
 
 read_ahead_send_file(Config) ->
     RAL = 4096, %% read ahead limit
@@ -2785,6 +2998,14 @@ truncate_at(File, Pos) ->
     _ = file:truncate(Fd),
     _ = file:close(Fd),
     ok.
+
+samples_test_index_basename_bin(Path) ->
+    case filename:basename(Path) of
+        B when is_binary(B) ->
+            B;
+        L ->
+            unicode:characters_to_binary(L)
+    end.
 
 seed_log(Conf, EpochChunks, Config) ->
     Trk = osiris_tracking:init(undefined, #{}),
