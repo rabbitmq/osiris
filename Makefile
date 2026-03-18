@@ -15,7 +15,7 @@ PROJECT = osiris
 # This project uses an app.src file
 
 LOCAL_DEPS = sasl crypto
-dep_gen_batch_server = hex 0.8.9
+dep_gen_batch_server = hex 0.9.0
 dep_seshat = hex 1.0.1
 DEPS = gen_batch_server seshat
 
