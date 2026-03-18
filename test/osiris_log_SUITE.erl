@@ -114,7 +114,7 @@ all_tests() ->
      stream_offset_unordered_fraction_samples,
      stream_offset_subset_samples_only,
      stream_offset_unnormalized_samples,
-     stream_offset_samples_multi_segment_two_in_second_one_in_fourth
+     stream_offset_with_samples_over_multi_segments
     ].
 
 groups() ->

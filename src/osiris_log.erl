@@ -122,9 +122,6 @@
 
 -define(SKIP_SEARCH_JUMP, 2048).
 -define(DEFAULT_READ_AHEAD_LIMIT, 4096).
-%% Block size for index scan in fold_index_files_closest (records per read)
--define(INDEX_READ_BLOCK_RECORDS, 1024).
--define(INDEX_READ_BLOCK_BYTES, (?INDEX_READ_BLOCK_RECORDS * ?INDEX_RECORD_SIZE_B)).
 
 %% Specification of the Log format.
 %%
@@ -3522,7 +3519,8 @@ write_in_chunks(_, _, _, W) ->
 %% Fractions is a list of floats in [0.0, 1.0]: 0.0 = first, 1.0 = last;
 %% values in between are linear (e.g. 0.5 = midpoint by chunk id).
 %% Returns {ok, [ {float(), offset(), timestamp()} ]} (one 3-tuple per requested fraction),
-%% or {error, empty}. Fractions are clamped to [0.0, 1.0].
+%% or {error, empty}. 
+%% Fractions below 0.0 are normalized to 0.0; fractions above 1.0 are normalized to 1.0.
 -spec stream_offset_samples(file:filename_all() | config(), [float()]) ->
     {ok, [{float(), offset(), osiris:timestamp()}]} | {error, empty}.
 stream_offset_samples(_DirOrConfig, []) ->
@@ -3539,7 +3537,7 @@ stream_offset_samples(DirOrConfig, Fractions0) ->
 
 -spec stream_offset_samples_with_index(Fractions :: [float()], IdxFiles :: list()) ->
     {ok, [{float(), offset(), osiris:timestamp()}]} | {error, empty}.
-%% Pre: IdxFiles is non-empty.
+
 stream_offset_samples_with_index(Fractions, IdxFiles) ->
     case first_and_last_seginfos0(IdxFiles) of
         none ->
@@ -3575,7 +3573,6 @@ normalize_fraction(F) when F =< 0.0 -> 0.0;
 normalize_fraction(F) when F >= 1.0 -> 1.0;
 normalize_fraction(F) -> F.
 
-%% Returns [{float(), offset(), timestamp()}]. Order: first (if requested), middle samples, last (if requested).
 assemble_offset_samples(Fractions, First, Last, MiddleSamples) ->
     FirstPart = case lists:member(0.0, Fractions) of
                     true -> [First];
@@ -3592,7 +3589,8 @@ target_chunk_id(FirstChId, Range, 1.0) -> FirstChId + Range;
 target_chunk_id(FirstChId, Range, F) ->
     FirstChId + round((Range * F)).
 
-    %% Multi-target version: one idx_skip_search pass over the index.
+%% multi_offset_sample_search_fun: one idx_skip_search pass over the index to gather 
+%% as many offset samples in Pending list as exists in one index file.
 %% Acc = {Pending, Results, LastChunk}.
 %% Pending = [{float(), offset()}] remaining targets.
 %% Results = [{float(), offset(), timestamp()}]. LastChunk = undefined | {ChunkId, Ts}.
@@ -3680,8 +3678,6 @@ find_offsets_on_index_file(TargetOffsets, IdxFile, AccResults) ->
         _ ->
             {TargetOffsets, AccResults}
     end.
-
-
 
 
 -ifdef(TEST).
