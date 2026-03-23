@@ -987,7 +987,7 @@ cluster_failure(Config) ->
     _PreRRs =
         supervisor:which_children({osiris_replica_reader_sup, node(Leader)}),
     %% stop the leader
-    _ = gen_batch_server:stop(Leader, bananas, 5000),
+    _ = osiris_batch_server:stop(Leader, bananas, 5000),
 
     R1Ref = monitor(process, R1),
     R2Ref = monitor(process, R2),

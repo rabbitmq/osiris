@@ -8,7 +8,7 @@
 %% @hidden
 -module(osiris_writer).
 
--behaviour(gen_batch_server).
+-behaviour(osiris_batch_server).
 -behaviour(osiris_member).
 
 -include("osiris.hrl").
@@ -30,6 +30,7 @@
          init/1,
          handle_continue/2,
          handle_batch/2,
+         batch_item_size/1,
          terminate/2,
          format_status/1,
          stop/1,
@@ -117,8 +118,10 @@ delete(#{leader_node := Node} = Config) ->
     {ok, pid()} | {error, {already_started, pid()}}.
 start_link(Config) ->
     Mod = ?MODULE,
-    Opts = [{reversed_batch, true}],
-    gen_batch_server:start_link(undefined, Mod, Config, Opts).
+    MaxBatchBytes = maps:get(max_chunk_size_bytes, Config, 64 * 1000 * 1000),
+    Opts = [{reversed_batch, true},
+            {max_batch_bytes, MaxBatchBytes}],
+    osiris_batch_server:start_link(undefined, Mod, Config, Opts).
 
 overview(Pid) when node(Pid) == node() ->
     case erlang:is_process_alive(Pid) of
@@ -142,21 +145,21 @@ init_data_reader(Pid, TailInfo, Config)
 
 register_data_listener(Pid, Offset) ->
     ok =
-        gen_batch_server:cast(Pid, {register_data_listener, self(), Offset}).
+        osiris_batch_server:cast(Pid, {register_data_listener, self(), Offset}).
 
 -spec ack(identifier(), {osiris:offset(), osiris:timestamp()} |
           osiris:tail_info()) -> ok.
 ack(LeaderPid, {Offset, _} = OffsetTs)
   when is_integer(Offset) andalso Offset >= 0 ->
-    gen_batch_server:cast(LeaderPid, {ack, node(), OffsetTs});
+    osiris_batch_server:cast(LeaderPid, {ack, node(), OffsetTs});
 ack(LeaderPid, ?TAIL_INFO(ChkId) = TailInfo)
   when is_integer(ChkId) andalso ChkId >= 0 ->
-    gen_batch_server:cast(LeaderPid, {ack, node(), TailInfo}).
+    osiris_batch_server:cast(LeaderPid, {ack, node(), TailInfo}).
 
 -spec write(Pid :: pid(), Data :: osiris:data()) -> ok.
 write(Pid, Data)
     when is_pid(Pid) ->
-    gen_batch_server:cast(Pid, {write, Data}).
+    osiris_batch_server:cast(Pid, {write, Data}).
 
 -spec write(Pid :: pid(),
             Sender :: pid(),
@@ -165,7 +168,7 @@ write(Pid, Data)
             Data :: osiris:data()) -> ok.
 write(Pid, Sender, WriterId, Corr, Data)
     when is_pid(Pid) andalso is_pid(Sender) ->
-    gen_batch_server:cast(Pid, {write, Sender, WriterId, Corr, Data}).
+    osiris_batch_server:cast(Pid, {write, Sender, WriterId, Corr, Data}).
 
 -spec write_tracking(pid(), binary(), {offset | timestamp, osiris:offset() | osiris:timestamp()}) -> ok.
 write_tracking(Pid, TrackingId, {TrackingType, TrackingData})
@@ -173,19 +176,19 @@ write_tracking(Pid, TrackingId, {TrackingType, TrackingData})
          andalso is_binary(TrackingId)
          andalso byte_size(TrackingId) =< 255
          andalso is_integer(TrackingData) ->
-    gen_batch_server:cast(Pid, {write_tracking, TrackingId, TrackingType, TrackingData}).
+    osiris_batch_server:cast(Pid, {write_tracking, TrackingId, TrackingType, TrackingData}).
 
 read_tracking(Pid, TrackingType, TrackingId) ->
-    gen_batch_server:call(Pid, {read_tracking, TrackingType, TrackingId}).
+    osiris_batch_server:call(Pid, {read_tracking, TrackingType, TrackingId}).
 
 read_tracking(Pid) ->
-    gen_batch_server:call(Pid, read_tracking).
+    osiris_batch_server:call(Pid, read_tracking).
 
 query_writers(Pid, QueryFun) ->
-    gen_batch_server:call(Pid, {query_writers, QueryFun}).
+    osiris_batch_server:call(Pid, {query_writers, QueryFun}).
 
 query_replication_state(Pid) when is_pid(Pid) ->
-    gen_batch_server:call(Pid, query_replication_state).
+    osiris_batch_server:call(Pid, query_replication_state).
 
 init_fields_spec() ->
     persistent_term:put(?FIELDSPEC_KEY,
@@ -367,6 +370,20 @@ format_status(#?MODULE{cfg = #cfg{name = Name,
       num_offset_listeners => length(OffsetListeners),
       committed_chunk_id => CommittedChunkId
      }.
+
+batch_item_size({cast, {write, _Pid, _WriterId, _Corr, Data}}) ->
+    data_size(Data);
+batch_item_size({cast, {write, Data}}) ->
+    data_size(Data);
+batch_item_size(_) ->
+    0.
+
+data_size({batch, _NumRecords, _CompType, _UncompLen, B}) ->
+    iolist_size(B);
+data_size({_FilterValue, B}) ->
+    data_size(B);
+data_size(B) ->
+    iolist_size(B).
 
 %% Internal
 

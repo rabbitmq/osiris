@@ -7,13 +7,13 @@
 
 -module(osiris_retention).
 
--behaviour(gen_batch_server).
+-behaviour(osiris_batch_server).
 
 -include("osiris.hrl").
 %% API functions
 -export([start_link/0,
          eval/4]).
-%% gen_batch_server callbacks
+%% osiris_batch_server callbacks
 -export([init/1,
          handle_batch/2,
          terminate/2]).
@@ -28,7 +28,7 @@
 
 -spec start_link() -> {ok, pid()} | ignore | {error, term()}.
 start_link() ->
-    gen_batch_server:start_link({local, ?MODULE}, ?MODULE, [], [{reversed_batch, true}]).
+    osiris_batch_server:start_link({local, ?MODULE}, ?MODULE, [], [{reversed_batch, true}]).
 
 -spec eval(osiris:name(), file:name_all(), [osiris:retention_spec()],
            fun((osiris_log:range()) -> ok)) ->
@@ -36,17 +36,17 @@ start_link() ->
 eval(_Name, _Dir, [], _Fun) ->
     ok;
 eval(Name, Dir, Specs, Fun) ->
-    gen_batch_server:cast(?MODULE, {eval, self(), Name, Dir, Specs, Fun}).
+    osiris_batch_server:cast(?MODULE, {eval, self(), Name, Dir, Specs, Fun}).
 
 %%%===================================================================
-%%% gen_batch_server callbacks
+%%% osiris_batch_server callbacks
 %%%===================================================================
 
 -spec init([]) -> {ok, #state{}}.
 init([]) ->
     {ok, #state{}}.
 
--spec handle_batch([gen_batch_server:op()], #state{}) -> {ok, #state{}}.
+-spec handle_batch([osiris_batch_server:op()], #state{}) -> {ok, #state{}}.
 handle_batch(Ops, State0) ->
     %% Ops are in reverse order of arrival. Process newest first.
     {State1, _Seen} = lists:foldl(fun process_op/2, {State0, sets:new()}, Ops),
