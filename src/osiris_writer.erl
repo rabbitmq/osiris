@@ -117,7 +117,8 @@ delete(#{leader_node := Node} = Config) ->
     {ok, pid()} | {error, {already_started, pid()}}.
 start_link(Config) ->
     Mod = ?MODULE,
-    Opts = [{reversed_batch, true}],
+    Opts = [{reversed_batch, true},
+            {flush_mailbox_on_terminate, {true, 10}}],
     gen_batch_server:start_link(undefined, Mod, Config, Opts).
 
 overview(Pid) when node(Pid) == node() ->
