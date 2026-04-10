@@ -1122,7 +1122,7 @@ init_data_reader_from(ChunkId,
 %% `{abs, offset()}': Attach at the provided offset. If this offset does not exist
 %% in the log it will error with `{error, {offset_out_of_range, Range}}'
 %% `offset()': Like `{abs, offset()}' but instead of erroring it will fall back
-%% to `first' (if lower than first offset in log) or `nextl if higher than
+%% to `first' (if lower than first offset in log) or `next' if higher than
 %% last offset in log.
 %% @param Config The configuration. Requires the `dir' key.
 %% @returns `{ok, state()} | {error, Error}' when error can be
@@ -3508,7 +3508,7 @@ write_in_chunks(ToWrite, MsgsPerChunk, Msg, W0) when ToWrite > 0 ->
 write_in_chunks(_, _, _, W) ->
     W.
 
-    
+
 %% Returns offset samples at given fractions of the stream's offset range.
 %% Fractions is a list of floats in the range [0.0, 1.0]: 0.0 = first, 1.0 = last;
 %% values in between map to a linear target offset (rounded) between first and last.
@@ -3557,7 +3557,7 @@ samples_with_index(Fractions, IdxFiles) ->
             end
     end.
 
-collect_samples(Fractions, IdxFiles, FstOff, FstTs, LastOff, LastTs) ->    
+collect_samples(Fractions, IdxFiles, FstOff, FstTs, LastOff, LastTs) ->
     Range = LastOff - FstOff,
     MiddleTargets = [{F, calculate_target_offset(F, FstOff, LastOff)}
         || F <- Fractions, F > 0.0, F < 1.0],
@@ -3600,7 +3600,7 @@ assemble_offset_samples(Fractions, First, Last, MiddleSamples) ->
 calculate_target_offset(F, First, Last) ->
     First + round((Last - First) * F).
 
-%% multi_offset_sample_search_fun: one idx_skip_search pass over the index to gather 
+%% multi_offset_sample_search_fun: one idx_skip_search pass over the index to gather
 %% as many offset samples in Pending list as exists in one index file.
 %% Acc = {Pending, Results, LastChunk}.
 %% Pending = [{float(), offset()}] remaining targets.
@@ -3610,10 +3610,10 @@ multi_offset_sample_search_fun(scan, ?ZERO_IDX_MATCH(_), Acc) ->
     {continue, Acc};
 multi_offset_sample_search_fun(peek, ?ZERO_IDX_MATCH(_), Acc) ->
     {continue, Acc};
-multi_offset_sample_search_fun(Type, ?IDX_CHUNK_SAMPLE_MATCH(ChunkId, Ts), 
+multi_offset_sample_search_fun(Type, ?IDX_CHUNK_SAMPLE_MATCH(ChunkId, Ts),
                                {Pending, Results, LastChunk}) ->
     {Resolved, StillPending} = lists:splitwith(
-                                            fun({_, Off}) -> Off < ChunkId end, 
+                                            fun({_, Off}) -> Off < ChunkId end,
                                             Pending),
     Results1 = case LastChunk of
                    undefined ->
@@ -3627,7 +3627,7 @@ multi_offset_sample_search_fun(Type, ?IDX_CHUNK_SAMPLE_MATCH(ChunkId, Ts),
        true ->
             LargestPendingOffset = lists:max([Off || {_, Off} <- StillPending]),
             if ChunkId > LargestPendingOffset ->
-                    Results2 = Results1 ++ 
+                    Results2 = Results1 ++
                                 [{F, Offset, Ts} || {F, Offset} <- StillPending],
                     {return, {[], Results2, LastChunk1}};
                Type =:= peek ->
@@ -3652,7 +3652,7 @@ seg_last_landmark(_) ->
 
 
 %% TargetOffsets = [{float(), offset()}].
--spec find_intermediate_offsets(TargetOffsets :: [{float(), offset()}], 
+-spec find_intermediate_offsets(TargetOffsets :: [{float(), offset()}],
                                 IdxFiles :: list(),
                                 InitialResults :: [{float(), offset(), osiris:timestamp()}],
                                 LastStreamOff :: offset()) ->
@@ -3669,10 +3669,10 @@ find_intermediate_offsets(TargetOffsets, [Idx | RestIdx], AccResults, LastOff) -
 %% (i.e. is before CurIdx's first offset); otherwise skips to the next index file.
 %% FlushEndOff: last message offset covered by this index file (next segment start - 1,
 %% or LastStreamOff for the final file).
-locate_index_with_target_offsets([], _PrevIdxOffset, _PrevIdxFile, _RestIdxFiles, 
+locate_index_with_target_offsets([], _PrevIdxOffset, _PrevIdxFile, _RestIdxFiles,
                                 AccResults, _LastOff) ->
     {ok, AccResults};
-locate_index_with_target_offsets(TargetOffsets, _PrevIdxOffset, PrevIdxFile, [], 
+locate_index_with_target_offsets(TargetOffsets, _PrevIdxOffset, PrevIdxFile, [],
                                 AccResults, LastOff) ->
     case find_offsets_on_index_file(TargetOffsets, PrevIdxFile, AccResults,
                                     LastOff) of
@@ -3681,9 +3681,9 @@ locate_index_with_target_offsets(TargetOffsets, _PrevIdxOffset, PrevIdxFile, [],
         {ok, {_Still, Results}} ->
             {ok, Results}
     end;
-locate_index_with_target_offsets([{_TargetF, TargetOffset} | _] = TargetOffsets, 
-                                 _PrevIdxOffset, 
-                                 PrevIdxFile, 
+locate_index_with_target_offsets([{_TargetF, TargetOffset} | _] = TargetOffsets,
+                                 _PrevIdxOffset,
+                                 PrevIdxFile,
                                  [CurIdx | RestIdx], AccResults, LastOff) ->
     CurIdxOffset = index_file_first_offset(CurIdx),
     if TargetOffset < CurIdxOffset ->
@@ -3693,11 +3693,11 @@ locate_index_with_target_offsets([{_TargetF, TargetOffset} | _] = TargetOffsets,
                 {error, _} = Err ->
                     Err;
                 {ok, {RestTargetOffsets, NewAccResults}} ->
-                    locate_index_with_target_offsets(RestTargetOffsets, CurIdxOffset, 
+                    locate_index_with_target_offsets(RestTargetOffsets, CurIdxOffset,
                                                     CurIdx, RestIdx, NewAccResults, LastOff)
             end;
         true ->
-            locate_index_with_target_offsets(TargetOffsets, CurIdxOffset, 
+            locate_index_with_target_offsets(TargetOffsets, CurIdxOffset,
                                             CurIdx, RestIdx, AccResults, LastOff)
     end.
 
