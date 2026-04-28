@@ -451,7 +451,8 @@
          position = 0 :: non_neg_integer(),
          filter :: undefined | osiris_bloom:mstate(),
          filter_size = ?DEFAULT_FILTER_SIZE :: osiris_bloom:filter_size(),
-         read_ahead = #ra{} :: #ra{}}).
+         read_ahead = #ra{} :: #ra{},
+         use_sendfile = true :: boolean()}).
 -record(write,
         {type = writer :: writer | acceptor,
          segment_size = {?LOG_HEADER_SIZE, 0} :: {non_neg_integer(), non_neg_integer()},
@@ -1069,6 +1070,13 @@ check_chunk_has_expected_epoch(Name, ChunkId, Epoch, IdxFiles) ->
             end
     end.
 
+use_sendfile(ssl) -> false;
+use_sendfile(tcp) ->
+    case os:type() of
+        {unix, darwin} -> false;
+        _ -> true
+    end.
+
 init_data_reader_at(ChunkId, FilePos, File,
                     #{dir := Dir, name := Name,
                       shared := Shared,
@@ -1094,6 +1102,7 @@ init_data_reader_at(ChunkId, FilePos, File,
                             chunk_selector = all,
                             position = FilePos,
                             transport = maps:get(transport, Config, tcp),
+                            use_sendfile = use_sendfile(maps:get(transport, Config, tcp)),
                             read_ahead = ra(Config)},
                       fd = Fd}};
         Err ->
@@ -1355,6 +1364,7 @@ open_offset_reader_at(SegmentFile, NextChunkId, FilePos,
                                                          user_data),
                                next_offset = NextChunkId,
                                transport = maps:get(transport, Options, tcp),
+                               use_sendfile = use_sendfile(maps:get(transport, Options, tcp)),
                                filter = FilterMatcher,
                                read_ahead = ra(Conf)},
                   fd = Fd}}.
@@ -1781,7 +1791,8 @@ send_file(Sock,
           #?MODULE{mode = #read{type = RType,
                                 chunk_selector = Selector,
                                 transport = Transport,
-                                filter_size = RaFs}} = State0,
+                                filter_size = RaFs,
+                                use_sendfile = UseSendfile}} = State0,
           Callback) ->
     case catch read_header0(State0) of
         {ok, #{type := ChType,
@@ -1829,7 +1840,7 @@ send_file(Sock,
                             %% data read
                             case send(Transport, Sock, [FrameHeader, HeaderData]) of
                                 ok ->
-                                    case sendfile(Transport, Fd, Sock,
+                                    case sendfile(UseSendfile, Transport, Fd, Sock,
                                                   DataPos, ToSend) of
                                         ok ->
                                             State = State1#?MODULE{mode = Read},
@@ -2582,22 +2593,22 @@ max_segment_size_reached(
     CurrentSizeBytes >= MaxSizeBytes orelse
     CurrentSizeChunks >= MaxSizeChunks.
 
-sendfile(_Transport, _Fd, _Sock, _Pos, 0) ->
+sendfile(_UseSendfile, _Transport, _Fd, _Sock, _Pos, 0) ->
     ok;
-sendfile(tcp = Transport, Fd, Sock, Pos, ToSend) ->
+sendfile(true, Transport, Fd, Sock, Pos, ToSend) ->
     case file:sendfile(Fd, Sock, Pos, ToSend, []) of
         {ok, 0} ->
             %% TODO add counter for this?
-            sendfile(Transport, Fd, Sock, Pos, ToSend);
+            sendfile(true, Transport, Fd, Sock, Pos, ToSend);
         {ok, BytesSent} ->
-            sendfile(Transport, Fd, Sock, Pos + BytesSent, ToSend - BytesSent);
+            sendfile(true, Transport, Fd, Sock, Pos + BytesSent, ToSend - BytesSent);
         {error, _} = Err ->
             Err
     end;
-sendfile(ssl, Fd, Sock, Pos, ToSend) ->
+sendfile(false, Transport, Fd, Sock, Pos, ToSend) ->
     case file:pread(Fd, Pos, ToSend) of
         {ok, Data} ->
-            ssl:send(Sock, Data);
+            send(Transport, Sock, Data);
         {error, _} = Err ->
             Err
     end.
