@@ -2495,6 +2495,16 @@ samples_fail_with_io_error_unix(Config) ->
         application:unset_env(osiris, max_segment_size_chunks)
     end.
 
+assert_sendfile_pread(T, ExpectedSendfile, ExpectedPread) ->
+    case os:type() of
+        {unix, darwin} ->
+            ?assertEqual(0, osiris_tracer:call_count(T, file, sendfile)),
+            ?assertEqual(ExpectedPread + ExpectedSendfile, osiris_tracer:call_count(T, file, pread));
+        _ ->
+            ?assertEqual(ExpectedSendfile, osiris_tracer:call_count(T, file, sendfile)),
+            ?assertEqual(ExpectedPread, osiris_tracer:call_count(T, file, pread))
+    end.
+
 read_ahead_send_file(Config) ->
     RAL = 4096, %% read ahead limit
     HS = ?HEADER_SIZE_B,
@@ -2511,8 +2521,7 @@ read_ahead_send_file(Config) ->
              {ok, R1} = osiris_log:send_file(CS, R0),
              {ok, Read} = recv(SS, byte_size(D) + HS),
              ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
-             ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
-             ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+             assert_sendfile_pread(T, 1, 1),
              R1
      end,
      fun(write, #{w := W0}) ->
@@ -2539,8 +2548,7 @@ read_ahead_send_file(Config) ->
              {ok, R1} = osiris_log:send_file(CS, R0),
              {ok, Read} = recv(SS, byte_size(D) + HS),
              ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
-             ?assertEqual(0, osiris_tracer:call_count(T, file, pread)),
-             ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+             assert_sendfile_pread(T, 1, 0),
              R1
      end,
      fun(write, #{w := W0}) ->
@@ -2610,9 +2618,8 @@ read_ahead_send_file(Config) ->
              {ok, Read} = recv(SS, byte_size(D) + HS),
              ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
              %% we had the header already, no need to read
-             ?assertEqual(0, osiris_tracer:call_count(T, file, pread)),
              %% send the data with sendfile
-             ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+             assert_sendfile_pread(T, 1, 0),
              R1
      end
     ],
@@ -2692,15 +2699,13 @@ read_ahead_send_file_filter(Config) ->
                   case FSize =:= DFS of
                       true ->
                           %% just read the header
-                          ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
                           %% no read ahead data yet, used sendfile
-                          ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile));
+                          assert_sendfile_pread(T, 1, 1);
                       false ->
                           %% read the header, but the filter data did not fit,
                           %% so read again
-                          ?assertEqual(2, osiris_tracer:call_count(T, file, pread)),
                           %% read the data in the second pread call
-                          ?assertEqual(0, osiris_tracer:call_count(T, file, sendfile))
+                          assert_sendfile_pread(T, 0, 2)
                   end,
                   R1
           end,
@@ -2720,15 +2725,13 @@ read_ahead_send_file_filter(Config) ->
                   case FSize =:= DFS of
                       true ->
                           %% just read the header
-                          ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
                           %% data just fit in the read ahead, no sendfile
-                          ?assertEqual(0, osiris_tracer:call_count(T, file, sendfile));
+                          assert_sendfile_pread(T, 0, 1);
                       false ->
                           %% read the header ahead previously
                           %% (because it could not read the filter at first,
                           %% which triggered the read-ahead)
-                          ?assertEqual(0, osiris_tracer:call_count(T, file, pread)),
-                          ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile))
+                          assert_sendfile_pread(T, 1, 0)
                   end,
                   R1
           end,
@@ -2746,9 +2749,8 @@ read_ahead_send_file_filter(Config) ->
                   {ok, Read} = recv(SS, byte_size(D) + HS),
                   ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
                   %% just read the header
-                  ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
                   %% large chunk, used sendfile
-                  ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+                  assert_sendfile_pread(T, 1, 1),
                   R1
           end,
           fun(write, #{w := W0}) ->
@@ -2762,8 +2764,7 @@ read_ahead_send_file_filter(Config) ->
                   {ok, R1} = osiris_log:send_file(CS, R0),
                   {ok, Read} = recv(SS, byte_size(D) + HS),
                   ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
-                  ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
-                  ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+                  assert_sendfile_pread(T, 1, 1),
                   R1
           end,
           fun(write, #{w := W0}) ->
@@ -2779,8 +2780,7 @@ read_ahead_send_file_filter(Config) ->
                   {ok, R1} = osiris_log:send_file(CS, R0),
                   {ok, Read} = recv(SS, byte_size(D) + HS),
                   ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
-                  ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
-                  ?assertEqual(0, osiris_tracer:call_count(T, file, sendfile)),
+                  assert_sendfile_pread(T, 0, 1),
                   R1
           end,
           fun(write, #{w := W0}) ->
@@ -2796,8 +2796,7 @@ read_ahead_send_file_filter(Config) ->
                   {ok, R1} = osiris_log:send_file(CS, R0),
                   {ok, Read} = recv(SS, byte_size(D) + HS),
                   ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
-                  ?assertEqual(0, osiris_tracer:call_count(T, file, pread)),
-                  ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+                  assert_sendfile_pread(T, 1, 0),
                   R1
           end
          ],
@@ -2831,8 +2830,7 @@ read_ahead_send_file_on_off(Config) ->
              {ok, R1} = osiris_log:send_file(CS, R0),
              {ok, Read} = recv(SS, byte_size(D) + HS),
              ?assertEqual(D, binary:part(Read, HS, byte_size(Read) - HS)),
-             ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
-             ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile)),
+             assert_sendfile_pread(T, 1, 1),
              R1
      end,
      fun(write, #{w := W0}) ->
@@ -2847,8 +2845,7 @@ read_ahead_send_file_on_off(Config) ->
                  true ->
                      ?assertEqual(1, osiris_tracer:call_count(T));
                  false ->
-                     ?assertEqual(1, osiris_tracer:call_count(T, file, pread)),
-                     ?assertEqual(1, osiris_tracer:call_count(T, file, sendfile))
+                     assert_sendfile_pread(T, 1, 1)
              end,
              R1
      end
