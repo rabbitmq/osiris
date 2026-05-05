@@ -17,6 +17,7 @@ start_link() ->
 
 init([]) ->
     osiris_counters:init(),
+    osiris_histograms:init(),
     SupFlags =
         #{strategy => one_for_all,
           intensity => 5,

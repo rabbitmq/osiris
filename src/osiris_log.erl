@@ -786,9 +786,10 @@ write([_ | _] = Entries,
          is_integer(ChType) ->
     %% The osiris writer always pass Entries in the reversed order
     %% in order to avoid unnecessary lists rev|trav|ersals
-    {ChunkData, NumRecords} =
+    {ChunkData, NumRecords, ChunkSize} =
         make_chunk(Entries, Trailer, ChType, Now, Epoch, Next, FilterSize),
-    write_chunk(ChunkData, ChType, Now, Epoch, NumRecords, State0);
+    ok = osiris_histograms:observe_chunk(ChunkSize),
+    write_chunk(ChunkData, ChType, Now, Epoch, NumRecords, ChunkSize, State0);
 write([], _ChType, _Now, _Trailer, #?MODULE{} = State) ->
     State.
 
@@ -815,7 +816,8 @@ accept_chunk([<<?MAGIC:4/unsigned,
     validate_crc(Next, Crc, part(DataSize, DataAndTrailer)),
     %% assertion
     % true = iolist_size(DataAndTrailer) == (DataSize + TrailerSize),
-    write_chunk(Chunk, ChType, Timestamp, Epoch, NumRecords, State0);
+    write_chunk(Chunk, ChType, Timestamp, Epoch, NumRecords,
+                iolist_size(Chunk), State0);
 accept_chunk(Binary, State) when is_binary(Binary) ->
     accept_chunk([Binary], State);
 accept_chunk([<<?MAGIC:4/unsigned,
@@ -2530,13 +2532,15 @@ make_chunk(Blobs, TData, ChType, Timestamp, Epoch, Next, FilterSize) ->
       BloomData,
       EData,
       TData],
-     NumRecords}.
+     NumRecords,
+     ?HEADER_SIZE_B + BloomSize + Size + TSize}.
 
 write_chunk(Chunk,
             ChType,
             Timestamp,
             Epoch,
             NumRecords,
+            Size,
             #?MODULE{cfg = #cfg{counter = CntRef,
                                 shared = Shared} = Cfg,
                      fd = Fd,
@@ -2554,10 +2558,10 @@ write_chunk(Chunk,
                           Timestamp,
                           Epoch,
                           NumRecords,
+                          Size,
                           open_new_segment(State)));
         false ->
             NextOffset = Next + NumRecords,
-            Size = iolist_size(Chunk),
             {ok, Cur} = file:position(Fd, cur),
             ok = file:write(Fd, Chunk),
 

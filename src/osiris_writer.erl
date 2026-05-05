@@ -417,6 +417,7 @@ handle_command({cast, {write, Pid, WriterId, Corr, R}},
                                  [Corr],
                                  Corrs0),
             ChId = osiris_log:next_offset(Log),
+            ok = osiris_histograms:observe_entry(R),
             {State,
              [R | Records],
              Replies,
@@ -434,6 +435,7 @@ handle_command({cast, {write, Pid, WriterId, Corr, R}},
     end;
 handle_command({cast, {write, R}},
                {#?MODULE{} = State, Records, Replies, Corrs0, Trk, Dupes}) ->
+    ok = osiris_histograms:observe_entry(R),
     {State, [R | Records], Replies, Corrs0, Trk, Dupes};
 handle_command({cast, {write_tracking, TrackingId, TrackingType, TrackingData}},
                {#?MODULE{log = Log} = State, Records, Replies, Corrs, Trk0, Dupes}) ->
