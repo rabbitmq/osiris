@@ -4,7 +4,7 @@ EXTENDS Integers, Sequences, FiniteSets, TLC
 CONSTANTS R, \* The set of all replicas
           V \* The set of all message payloads that can be sent
 
-VARIABLES 
+VARIABLES
           \* state stored in each replica
           rep_state,            \* the state of each replica
           rep_epoch,            \* the epoch of each replica
@@ -13,14 +13,14 @@ VARIABLES
           rep_ler,              \* the Log End Record of each replica
           rep_max_ler_of_rep,   \* for each replica, what it knows to be the LER of every other replica
           rep_listener,         \* registered listeners
-          
+
           \* state stored in the coordinator
           coord_state,          \* the state of each replica, according to the coordinator
           coord_epoch,          \* the current epoch
           coord_leader,         \* the replica that was elected leader
           coord_election,       \* the election phase of each epoch
           coord_election_ler,   \* the LER of each fenced replica, per epoch
-          
+
           \* meta data required by the spec
           confirmed,            \* the confirmation status of each written value
           start_stop_ctr,       \* a counter to limit the state space
@@ -64,7 +64,7 @@ Init ==
 
 \* -----------------------------------------
 \* HELPER OPERATORS
-\* ----------------------------------------- 
+\* -----------------------------------------
 
 \* Reusing the meta record for maintaining the fencing status, to avoid more variables
 \* a dirty trick but worth avoiding another variable
@@ -75,7 +75,7 @@ PendingFencingResponse == [offset |-> -1, epoch |-> 0]
 SendRequest(request) ==
     /\ request \notin DOMAIN requests
     /\ requests' = requests @@ (request :> [type |-> "-"])
-    
+
 \* Send a reply to a request, given the request has been sent
 SendReply(request, reply) ==
     /\ request \in DOMAIN requests
@@ -86,29 +86,29 @@ NotSentReply(request) ==
     /\ request \in DOMAIN requests
     /\ requests[request].type = "-"
 
-\* True when a response has been received and processed     
+\* True when a response has been received and processed
 NotProcessedResponse(response) ==
     \/ response.type = "-"
     \/ /\ response.type # "-"
        /\ response \notin responses_processed
-    
+
 \* Signals that the response is processed so it is not processed again
 ResponseProcessed(response) ==
     responses_processed' = responses_processed \union { response }
 
-\* The replicas visible to the coordinator    
+\* The replicas visible to the coordinator
 CoordinatorVisibleReplicas ==
-    { r \in R : coord_state[r] # "offline" }    
+    { r \in R : coord_state[r] # "offline" }
 
-\* Does this set of replicas consistitute a quorum?    
+\* Does this set of replicas consistitute a quorum?
 IsQuorum(replicas) ==
-    Cardinality(replicas) >= (Cardinality(R) \div 2) + 1    
+    Cardinality(replicas) >= (Cardinality(R) \div 2) + 1
 
-\* Does this set of replicas consistitute one short of a quorum?    
+\* Does this set of replicas consistitute one short of a quorum?
 IsQuorumMinusOne(replicas) ==
     Cardinality(replicas) >= (Cardinality(R) \div 2)
-    
-\* Compares two records, with epoch taking precedence. 
+
+\* Compares two records, with epoch taking precedence.
 \* Offset only matters when both have the same epoch.
 \* When record1 > record2 then 1
 \* When record1 = record2 then 0
@@ -120,14 +120,14 @@ CompareRecords(record1, record2) ==
         ELSE
             IF record1.epoch = record2.epoch /\ record1.offset = record2.offset THEN 0
             ELSE -1
-            
+
 RemoveAnyListeners(r) ==
     /\ rep_max_ler_of_rep' = [rep_max_ler_of_rep EXCEPT ![r] = [rr \in R |-> NoMetaRecord]]
-    /\ rep_listener' = [rep_listener EXCEPT ![r] = [rr \in R |-> FALSE]]            
+    /\ rep_listener' = [rep_listener EXCEPT ![r] = [rr \in R |-> FALSE]]
 
 \* -----------------------------------------
 \* REPLICA START/STOP AND COORD-REPLICA VISIBILITY
-\* ----------------------------------------- 
+\* -----------------------------------------
 
 \* a replica stopping or becoming unavailable during an election will cause the election
 \* to abort
@@ -143,7 +143,7 @@ AbortElectionIfInProgress ==
 
 \* The coordinator tells the replica the current epoch, who the current leader is (if any)
 \* A replica that is started can only become a follower if it has an empty log
-\* Else it must enter the pending_truncate state 
+\* Else it must enter the pending_truncate state
 CoordinatorResetsReplica(r) ==
     LET new_state == IF rep_ler[r].offset = 0 THEN "follower" ELSE "pending_truncate"
     IN
@@ -165,7 +165,7 @@ ReplicaStarts ==
         \* end
         /\ CoordinatorResetsReplica(r)
         /\ start_stop_ctr' = start_stop_ctr + 1
-        /\ UNCHANGED << rep_log, rep_ler, coord_epoch, coord_leader, coord_election, 
+        /\ UNCHANGED << rep_log, rep_ler, coord_epoch, coord_leader, coord_election,
                         coord_election_ler, confirmed, requests, responses_processed >>
 
 \* An online replica stops
@@ -186,9 +186,9 @@ ReplicaStops ==
            \/ /\ coord_leader # r
               /\ coord_leader' = coord_leader
     /\ start_stop_ctr' = start_stop_ctr + 1
-    /\ UNCHANGED << rep_epoch, rep_leader, rep_log, rep_ler, rep_max_ler_of_rep, rep_listener, 
+    /\ UNCHANGED << rep_epoch, rep_leader, rep_log, rep_ler, rep_max_ler_of_rep, rep_listener,
                     coord_epoch, coord_election_ler,
-                    confirmed, requests, responses_processed >> 
+                    confirmed, requests, responses_processed >>
 
 \* A network partition causes the coordinator to lose visibility of a replica
 \* The replica could be the current leader
@@ -219,9 +219,9 @@ CoordinatorRestoresVisibilityOfReplica ==
         /\ CoordinatorResetsReplica(r)
         /\ start_stop_ctr' = start_stop_ctr + 1
     /\ UNCHANGED << rep_log, rep_ler, rep_max_ler_of_rep, rep_listener, coord_leader,
-                    coord_epoch, coord_election, coord_election_ler, 
+                    coord_epoch, coord_election, coord_election_ler,
                     confirmed, requests, responses_processed >>
-        
+
 \* ------------------------------------------
 \* LEADER ELECTION
 \* ------------------------------------------
@@ -242,11 +242,11 @@ CoordinatorTriggersElection ==
     /\ LET new_epoch == coord_epoch + 1
        IN  /\ coord_epoch' = new_epoch
            /\ coord_election' = coord_election @@ (new_epoch :> "fencing")
-           /\ coord_election_ler' = coord_election_ler @@ 
+           /\ coord_election_ler' = coord_election_ler @@
                                         (new_epoch :> [r \in R |-> PendingFencingRequest])
-           /\ UNCHANGED << RepVars, coord_state, coord_leader, confirmed, 
+           /\ UNCHANGED << RepVars, coord_state, coord_leader, confirmed,
                            start_stop_ctr, requests, responses_processed >>
-           
+
 \* The first phase of leader election is to fence a quorum of replicas
 \* A fenced replica will stop any replication with a stale leader
 \* The coordinator sends a replica a fencing request
@@ -265,8 +265,8 @@ CoordinatorSendsFencingRequest ==
                     confirmed, start_stop_ctr, responses_processed >>
 
 \* A replica processes a fencing requess, fences itself and responds with its LER
-\* If the replica has started and not yet truncated its log it can still fence, even 
-\* though it might have diverged, because it cannot be elected as epoch takes precedence.                    
+\* If the replica has started and not yet truncated its log it can still fence, even
+\* though it might have diverged, because it cannot be elected as epoch takes precedence.
 ReplicaHandlesFencingRequest ==
     \E request \in DOMAIN requests :
         \* Conditions to process the message
@@ -282,7 +282,7 @@ ReplicaHandlesFencingRequest ==
                                epoch  |-> request.epoch,
                                source |-> request.dest,
                                ler    |-> rep_ler[request.dest]])
-        /\ UNCHANGED << rep_leader, rep_log, rep_ler, CoordVars, confirmed, 
+        /\ UNCHANGED << rep_leader, rep_log, rep_ler, CoordVars, confirmed,
                         start_stop_ctr, responses_processed >>
 
 ReceivedLerResponseEnsemble ==
@@ -301,18 +301,18 @@ CoordinatorHandlesFencingResponse ==
             /\ coord_election[coord_epoch] = "fencing"
             /\ coord_election_ler[coord_epoch][response.source] = PendingFencingResponse
             /\ coord_state[response.source] # "offline"
-            \* Actions 
+            \* Actions
             /\ coord_election_ler' = [coord_election_ler EXCEPT ![coord_epoch] =
                                             [@ EXCEPT ![response.source] = response.ler]]
-            /\ coord_state' = [coord_state EXCEPT ![response.source] = "fenced"]                                            
+            /\ coord_state' = [coord_state EXCEPT ![response.source] = "fenced"]
             /\ IF IsQuorumMinusOne(ReceivedLerResponseEnsemble) THEN
                  coord_election' = [coord_election EXCEPT ![coord_epoch] = "notify_leader"]
                ELSE
                  coord_election' = coord_election
             /\ ResponseProcessed(response)
-            /\ UNCHANGED << RepVars, coord_epoch, coord_leader, confirmed, 
+            /\ UNCHANGED << RepVars, coord_epoch, coord_leader, confirmed,
                             start_stop_ctr, requests >>
-                            
+
 \* The coordinator selects the replica with the highest LER and sends it
 \* a become leader request
 CoordinatorSendsBecomeLeaderRequest ==
@@ -329,9 +329,9 @@ CoordinatorSendsBecomeLeaderRequest ==
                    /\ SendRequest([type  |-> "become_leader_request",
                                    epoch |-> coord_epoch,
                                    dest  |-> new_leader])
-    /\ UNCHANGED << RepVars, coord_state, coord_epoch, coord_leader, coord_election_ler, 
+    /\ UNCHANGED << RepVars, coord_state, coord_epoch, coord_leader, coord_election_ler,
                     confirmed, start_stop_ctr, responses_processed >>
-                                
+
 \* A replica processes a become leader request and responds with a confirmation reply
 ReplicaHandlesBecomeLeaderRequest ==
     \E request \in DOMAIN requests :
@@ -358,7 +358,7 @@ CoordinatorHandlesBecomeLeaderResponse ==
             \* Conditions to process the message
             /\ NotProcessedResponse(response)
             /\ response.type = "become_leader_response"
-            /\ response.epoch = coord_epoch 
+            /\ response.epoch = coord_epoch
             /\ coord_state[response.source] = "fenced"
             /\ coord_election[coord_epoch] = "pending_leader_confirm"
             \* Actions
@@ -381,7 +381,7 @@ CoordinatorSendsBecomeFollowerRequest ==
                         leader    |-> coord_leader,
                         dest      |-> r])
     /\ UNCHANGED << RepVars, CoordVars, confirmed, start_stop_ctr, responses_processed >>
-                
+
 \* A replica processes a become follower request and
 \* - if it has an empty log it immediately becomes a follower
 \* - else it enters the pending truncate state
@@ -389,7 +389,7 @@ ReplicaHandlesBecomeFollowerRequest ==
     \E request \in DOMAIN requests :
         \* Conditions to process the message
         /\ request.type = "become_follower_request"
-        /\ rep_state[request.dest] = "fenced" 
+        /\ rep_state[request.dest] = "fenced"
         /\ rep_epoch[request.dest] = request.epoch
         \* Actions
         /\ \/ /\ rep_log[request.dest] = {}
@@ -402,44 +402,44 @@ ReplicaHandlesBecomeFollowerRequest ==
 
 \* -----------------------------------------
 \* LOG TRUNCATION AFTER ELECTION or START
-\* ----------------------------------------- 
+\* -----------------------------------------
 
 \* Get the highest epoch in this replicas log
 GetMaxEpochInLog(r) ==
     LET rec == CHOOSE record \in rep_log[r] :
                     \A rec \in rep_log[r] : record.epoch >= rec.epoch
     IN rec.epoch
-    
-\* Return the highest record in this log that has the same or lower epoch    
+
+\* Return the highest record in this log that has the same or lower epoch
 GetMaxRecordInLogUnderEpoch(r, epoch) ==
     LET potentials == { rcd \in rep_log[r] : rcd.epoch <= epoch }
-    IN 
+    IN
         IF potentials # {} THEN
             CHOOSE record \in potentials : \A rec \in potentials : CompareRecords(record, rec) >= 0
         ELSE NoMetaRecord
-        
-\* Return the highest record in this log that either equal to or less than the given record   
+
+\* Return the highest record in this log that either equal to or less than the given record
 GetMaxRecordInLogEqLowerToRecord(r, record) ==
     IF \E rcd \in rep_log[r] : rcd.epoch = record.epoch /\ rcd.offset = record.offset THEN
         CHOOSE rcd \in rep_log[r] : rcd.epoch = record.epoch /\ rcd.offset = record.offset
     ELSE
         LET potentials == { rcd \in rep_log[r] : CompareRecords(rcd, record) = -1 }
-        IN 
+        IN
             IF potentials # {} THEN
                 CHOOSE rec1 \in potentials : \A rec2 \in potentials : CompareRecords(rec1, rec2) >= 0
             ELSE
                 NoMetaRecord
-                
+
 \* Is this offset, in this replica, quorum written - 1 (according to its own bookkeeping)
 QuorumWrittenMinusOne(offset, leader) ==
-    Cardinality({ r \in R : rep_max_ler_of_rep[leader][r].offset >= offset}) 
-                >= (Cardinality(R) \div 2) 
+    Cardinality({ r \in R : rep_max_ler_of_rep[leader][r].offset >= offset})
+                >= (Cardinality(R) \div 2)
 
-\* Is this offset, in this replica, quorum written (according to its own bookkeeping)    
+\* Is this offset, in this replica, quorum written (according to its own bookkeeping)
 QuorumWritten(record, leader) ==
-    Cardinality({ r \in R : rep_max_ler_of_rep[leader][r].offset >= record.offset}) 
-                >= (Cardinality(R) \div 2) + 1    
-    
+    Cardinality({ r \in R : rep_max_ler_of_rep[leader][r].offset >= record.offset})
+                >= (Cardinality(R) \div 2) + 1
+
 \* Return a new log that is truncated to this record
 TruncateLogTo(log, record) ==
     { rec \in log : CompareRecords(rec, record) <= 0 }
@@ -449,18 +449,18 @@ TruncateLerTo(r, record) ==
     IF CompareRecords(record, rep_ler[r]) = -1 THEN
         [offset |-> record.offset, epoch |-> record.epoch]
     ELSE rep_ler[r]
-    
+
 \* Truncate the log and ler to this record, which has bee identified as the highest
-\* safe record where no divergence has occurred   
+\* safe record where no divergence has occurred
 TruncateToSafePoint(r, record) ==
 \* Uncomment this to trigger divergence
 \*    /\ rep_log' = rep_log
 \*    /\ rep_ler' = rep_ler
     LET max_safe_record == GetMaxRecordInLogEqLowerToRecord(r, record)
     IN
-        /\ rep_log' = [rep_log EXCEPT ![r] = 
+        /\ rep_log' = [rep_log EXCEPT ![r] =
                         TruncateLogTo(rep_log[r], max_safe_record)]
-        /\ rep_ler' = [rep_ler EXCEPT ![r] = TruncateLerTo(r, max_safe_record)]                         
+        /\ rep_ler' = [rep_ler EXCEPT ![r] = TruncateLerTo(r, max_safe_record)]
 
 \* A replica in the pending truncate state potentially needs to truncate their log
 \* to match the new leader. So it sends a ler_at_epoch_request to the new leader,
@@ -468,15 +468,15 @@ TruncateToSafePoint(r, record) ==
 ReplicaSendsLastOffsetAtEpochRequest ==
     \E r \in R :
         /\ rep_leader[r] # 0
-        /\ rep_state[r] = "pending_truncate" 
+        /\ rep_state[r] = "pending_truncate"
         /\ LET last_epoch == GetMaxEpochInLog(r)
            IN SendRequest([type          |-> "ler_at_epoch_request",
                            epoch         |-> rep_epoch[r],
                            target_epoch  |-> last_epoch,
                            dest          |-> rep_leader[r],
-                           source        |-> r]) 
+                           source        |-> r])
         /\ UNCHANGED << RepVars, CoordVars, confirmed, start_stop_ctr, responses_processed >>
-        
+
 \* The leader replica processes the ler_at_epoch_request and responds with
 \* the highest record it has in its log, at that particular epoch or lower.
 \* Note that the current election epoch may not match this target epoch, especially
@@ -497,7 +497,7 @@ LeaderReplicaHandlesLastOffsetAtEpochRequest ==
                                   dest          |-> request.source,
                                   source        |-> request.dest])
         /\ UNCHANGED << RepVars, CoordVars, confirmed, start_stop_ctr, responses_processed >>
-    
+
 
 \* A replica in the pending_truncate state receives a response with the highest
 \* record the leader has at the requested epoch or lower
@@ -514,7 +514,7 @@ ReplicaHandlesLastOffsetAtEpochResponse ==
             /\ rep_state[response.dest] = "pending_truncate"
             /\ rep_epoch[response.dest] = response.epoch
             \* Actions
-            /\ TruncateToSafePoint(response.dest, response.record)                                     
+            /\ TruncateToSafePoint(response.dest, response.record)
             /\ rep_state' = [rep_state EXCEPT ![response.dest] = "follower"]
             /\ ResponseProcessed(response)
             /\ UNCHANGED << rep_leader, rep_epoch, rep_max_ler_of_rep, rep_listener,
@@ -526,16 +526,16 @@ ReplicaHandlesLastOffsetAtEpochResponse ==
 
 \* A client writes a value from V to a leader replica, if that
 \* value has not previously been written
-\* The leader adds the record to its log, updates its LER       
+\* The leader adds the record to its log, updates its LER
 Write ==
     \E r \in R, v \in V :
-        \* enabling conditions 
+        \* enabling conditions
         /\ rep_state[r] = "leader"
         /\ v \notin DOMAIN confirmed
         \* actions
         /\ LET record == [offset |-> rep_ler[r].offset + 1,
                           epoch  |-> rep_epoch[r],
-                          value  |-> v] 
+                          value  |-> v]
                meta_record == [offset |-> rep_ler[r].offset + 1,
                                epoch  |-> rep_epoch[r]]
            IN
@@ -566,25 +566,25 @@ ReplicaLeaderRegistersDataListener ==
         \* Conditions to process the message
         /\ NotSentReply(request)
         /\ request.type = "start_listener_request"
-        /\ rep_state[request.dest] = "leader" 
+        /\ rep_state[request.dest] = "leader"
         /\ rep_epoch[request.dest] = request.epoch
         /\ rep_listener[request.dest][request.source] = FALSE
         \* actions
-        /\ rep_max_ler_of_rep' = [rep_max_ler_of_rep EXCEPT ![request.dest] = 
+        /\ rep_max_ler_of_rep' = [rep_max_ler_of_rep EXCEPT ![request.dest] =
                                 [@ EXCEPT ![request.source] = request.ler]]
-        /\ rep_listener' = [rep_listener EXCEPT ![request.dest] = 
-                                [@ EXCEPT ![request.source] = TRUE]]                             
+        /\ rep_listener' = [rep_listener EXCEPT ![request.dest] =
+                                [@ EXCEPT ![request.source] = TRUE]]
         /\ SendReply(request, [type |-> "start_listener_response"])
-        /\ UNCHANGED << rep_state, rep_epoch, rep_leader, rep_log, rep_ler, CoordVars, 
+        /\ UNCHANGED << rep_state, rep_epoch, rep_leader, rep_log, rep_ler, CoordVars,
                         confirmed, start_stop_ctr, responses_processed >>
 
-\* Get the next lowest record above the current replica position                        
+\* Get the next lowest record above the current replica position
 NextRecord(leader, last_record) ==
     LET unreplicated == { rec \in rep_log[leader] : CompareRecords(rec, last_record) = 1 }
     IN CHOOSE next_record \in unreplicated : \A rd \in unreplicated : next_record.offset <= rd.offset
 
 \* The replica leader will send records when it has records in its log that are higher
-\* than the current replica position                                
+\* than the current replica position
 ReplicaLeaderSendsData ==
     \E leader \in R :
         \E follower \in R :
@@ -594,7 +594,7 @@ ReplicaLeaderSendsData ==
             /\ CompareRecords(rep_max_ler_of_rep[leader][follower], rep_ler[leader]) = -1
             \* Actions
             /\ LET next == NextRecord(leader, rep_max_ler_of_rep[leader][follower])
-               IN 
+               IN
                     SendRequest([type      |-> "send_data_request",
                                  epoch     |-> rep_epoch[leader],
                                  record    |-> next,
@@ -603,17 +603,17 @@ ReplicaLeaderSendsData ==
             /\ UNCHANGED << RepVars, CoordVars, confirmed, start_stop_ctr, responses_processed >>
 
 \* A replica sends an acknowledgement of records from the leader replica
-ReplicaAcksData ==    
+ReplicaAcksData ==
     \E request \in DOMAIN requests :
         \* Conditions to process the message
         /\ NotSentReply(request)
         /\ request.type = "send_data_request"
-        /\ rep_state[request.dest] = "follower" 
+        /\ rep_state[request.dest] = "follower"
         /\ rep_epoch[request.dest] = request.epoch
         \* actions
-        /\ LET meta_rec == [offset |-> request.record.offset, 
+        /\ LET meta_rec == [offset |-> request.record.offset,
                             epoch  |-> request.record.epoch]
-           IN 
+           IN
                 /\ rep_log' = [rep_log EXCEPT ![request.dest] = @ \union { request.record }]
                 /\ rep_ler' = [rep_ler EXCEPT ![request.dest] = meta_rec]
                 /\ SendReply(request, [type          |-> "send_data_response",
@@ -621,9 +621,9 @@ ReplicaAcksData ==
                                        record        |-> meta_rec,
                                        dest          |-> request.source,
                                        source        |-> request.dest])
-        /\ UNCHANGED << rep_state, rep_epoch, rep_leader, rep_max_ler_of_rep, rep_listener, 
+        /\ UNCHANGED << rep_state, rep_epoch, rep_leader, rep_max_ler_of_rep, rep_listener,
                         CoordVars, confirmed, start_stop_ctr, responses_processed >>
-                        
+
 \* The leader replica processes an ack and updates the position of that replica
 LeaderReplicaUpdatesReplicaPosition ==
     \E req \in DOMAIN requests :
@@ -635,13 +635,13 @@ LeaderReplicaUpdatesReplicaPosition ==
             /\ rep_state[response.dest] = "leader"
             /\ rep_epoch[response.dest] = response.epoch
             \* Actions
-            /\ rep_max_ler_of_rep' = [rep_max_ler_of_rep EXCEPT ![response.dest] = 
+            /\ rep_max_ler_of_rep' = [rep_max_ler_of_rep EXCEPT ![response.dest] =
                                         [@ EXCEPT ![response.source] = response.record]]
             /\ ResponseProcessed(response)
             /\ UNCHANGED << rep_state, rep_epoch, rep_leader, rep_log, rep_ler, rep_listener,
                             CoordVars, confirmed, start_stop_ctr, requests >>
-        
-\* A leader replica will confirm a write if a quorum of replicas have confirmed 
+
+\* A leader replica will confirm a write if a quorum of replicas have confirmed
 \* they have it (by including their LER in their fetch requests)
 ConfirmWrite ==
     \E r \in R :
@@ -650,7 +650,7 @@ ConfirmWrite ==
             /\ confirmed[record.value] = FALSE
             /\ QuorumWritten(record, r)
             /\ confirmed' = [confirmed EXCEPT ![record.value] = TRUE]
-        /\ UNCHANGED << RepVars, CoordVars, start_stop_ctr, requests, responses_processed >>                
+        /\ UNCHANGED << RepVars, CoordVars, start_stop_ctr, requests, responses_processed >>
 
 
 Next ==
@@ -680,8 +680,8 @@ Next ==
     \/ ReplicaLeaderSendsData
     \/ ReplicaAcksData
     \/ ConfirmWrite
-    
-\*-------------------------------------------------    
+
+\*-------------------------------------------------
 \*INVARIANTS
 \*-------------------------------------------------
 
@@ -706,7 +706,7 @@ TypeOK ==
     /\ \A epoch \in DOMAIN coord_election : coord_election[epoch] \in ElectionPhases
     /\ start_stop_ctr \in Nat
 
-\* There cannot exist a record in non-stale follower that does not exist in the leader        
+\* There cannot exist a record in non-stale follower that does not exist in the leader
 NoDivergence ==
     \/ coord_leader = 0
     \/ /\ coord_leader # 0
@@ -715,7 +715,7 @@ NoDivergence ==
                 /\ \A record \in rep_log[r] : record \in rep_log[coord_leader]
                 /\ \A record \in rep_log[coord_leader] :
                     \/ record.offset > rep_ler[r].offset
-                    \/ record \in rep_log[r]  
+                    \/ record \in rep_log[r]
             ELSE
                 TRUE
 
@@ -726,7 +726,7 @@ FollowerEqualOrLowerEpoch ==
             \/ rep_state[r] # "follower"
             \/ /\ rep_state[r] = "follower"
                /\ rep_epoch[r] <= rep_epoch[coord_leader]
-    
+
 \* There cannot be a confirmed write that does not exist in the leader's log
 NoLossOfConfirmedWrite ==
     IF coord_leader # 0 /\ Cardinality(DOMAIN confirmed) > 0 THEN
@@ -736,7 +736,7 @@ NoLossOfConfirmedWrite ==
             \/ confirmed[v] = FALSE
     ELSE
         TRUE
-        
+
 LerMatchesLog ==
     \A r \in R :
         IF rep_log[r] = {} THEN
