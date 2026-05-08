@@ -22,3 +22,8 @@ osiris.d
 *.jar
 
 /.vscode/
+
+# TLC model checker output
+tla/states/
+tla/*.dot
+tla/MC_TTrace_*
