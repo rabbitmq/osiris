@@ -13,6 +13,7 @@ VARIABLES
           rep_ler,              \* the Log End Record of each replica
           rep_max_ler_of_rep,   \* for each replica, what it knows to be the LER of every other replica
           rep_listener,         \* registered listeners
+          rep_committed_offset, \* the committed offset known to each replica
 
           \* state stored in the coordinator
           coord_state,          \* the state of each replica, according to the coordinator
@@ -28,9 +29,11 @@ VARIABLES
           responses_processed   \* the set of all processed responses
 
 AllVars == << rep_state, rep_epoch, rep_leader, rep_log, rep_ler, rep_max_ler_of_rep, rep_listener,
+              rep_committed_offset,
               coord_state, coord_epoch, coord_leader, coord_election, coord_election_ler, confirmed,
               start_stop_ctr, requests, responses_processed >>
-RepVars == << rep_state, rep_epoch, rep_leader, rep_log, rep_ler, rep_max_ler_of_rep, rep_listener >>
+RepVars == << rep_state, rep_epoch, rep_leader, rep_log, rep_ler, rep_max_ler_of_rep, rep_listener,
+              rep_committed_offset >>
 CoordVars == << coord_state, coord_epoch, coord_leader, coord_election, coord_election_ler >>
 
 Record == [offset: Nat, epoch: Nat, value: V]
@@ -52,6 +55,7 @@ Init ==
     /\ rep_ler = [r \in R |-> NoMetaRecord]
     /\ rep_max_ler_of_rep = [r \in R |-> [rr \in R |-> NoMetaRecord]]
     /\ rep_listener = [r \in R |-> [rr \in R |-> FALSE]]
+    /\ rep_committed_offset = [r \in R |-> 0]
     /\ coord_state = [r \in R |-> IF r = InitialLeader THEN "leader" ELSE "follower"]
     /\ coord_epoch = 1
     /\ coord_leader = InitialLeader
@@ -108,6 +112,15 @@ IsQuorum(replicas) ==
 IsQuorumMinusOne(replicas) ==
     Cardinality(replicas) >= (Cardinality(R) \div 2)
 
+\* Compute the committed offset for a leader: the highest offset that is quorum-written.
+\* Returns 0 if no offset is quorum-written.
+CommittedOffset(leader) ==
+    LET quorum_offsets == { offset \in { rec.offset : rec \in rep_log[leader] } :
+                             Cardinality({ r \in R : rep_max_ler_of_rep[leader][r].offset >= offset })
+                                >= (Cardinality(R) \div 2) + 1 }
+    IN IF quorum_offsets = {} THEN 0
+       ELSE CHOOSE offset \in quorum_offsets : \A o \in quorum_offsets : offset >= o
+
 \* Compares two records, with epoch taking precedence.
 \* Offset only matters when both have the same epoch.
 \* When record1 > record2 then 1
@@ -151,6 +164,7 @@ CoordinatorResetsReplica(r) ==
         /\ coord_state' = [coord_state EXCEPT ![r] = new_state]
         /\ rep_epoch' = [rep_epoch EXCEPT ![r] = coord_epoch]
         /\ rep_leader' = [rep_leader EXCEPT ![r] = coord_leader]
+        /\ rep_committed_offset' = [rep_committed_offset EXCEPT ![r] = 0]
         /\ RemoveAnyListeners(r)
 
 \* An offline replica starts up and is reset
@@ -187,7 +201,7 @@ ReplicaStops ==
               /\ coord_leader' = coord_leader
     /\ start_stop_ctr' = start_stop_ctr + 1
     /\ UNCHANGED << rep_epoch, rep_leader, rep_log, rep_ler, rep_max_ler_of_rep, rep_listener,
-                    coord_epoch, coord_election_ler,
+                    rep_committed_offset, coord_epoch, coord_election_ler,
                     confirmed, requests, responses_processed >>
 
 \* A network partition causes the coordinator to lose visibility of a replica
@@ -282,8 +296,8 @@ ReplicaHandlesFencingRequest ==
                                epoch  |-> request.epoch,
                                source |-> request.dest,
                                ler    |-> rep_ler[request.dest]])
-        /\ UNCHANGED << rep_leader, rep_log, rep_ler, CoordVars, confirmed,
-                        start_stop_ctr, responses_processed >>
+        /\ UNCHANGED << rep_leader, rep_log, rep_ler, rep_committed_offset, CoordVars,
+                        confirmed, start_stop_ctr, responses_processed >>
 
 ReceivedLerResponseEnsemble ==
     { r \in DOMAIN coord_election_ler[coord_epoch] : coord_election_ler[coord_epoch][r].offset >= 0 }
@@ -347,7 +361,8 @@ ReplicaHandlesBecomeLeaderRequest ==
                                epoch  |-> request.epoch,
                                source |-> request.dest])
         /\ UNCHANGED << rep_log, rep_ler, rep_epoch, rep_max_ler_of_rep, rep_listener,
-                        CoordVars, confirmed, start_stop_ctr, responses_processed >>
+                        rep_committed_offset, CoordVars, confirmed, start_stop_ctr,
+                        responses_processed >>
 
 \* The coordinator process the become leader response and moves to the next
 \* election phase: leader_elected where followers are notified
@@ -398,7 +413,8 @@ ReplicaHandlesBecomeFollowerRequest ==
               /\ rep_state' = [rep_state EXCEPT ![request.dest] = "pending_truncate"]
         /\ rep_leader' = [rep_leader EXCEPT ![request.dest] = request.leader]
         /\ UNCHANGED << rep_log, rep_ler, rep_epoch, rep_max_ler_of_rep, rep_listener,
-                        CoordVars, confirmed, start_stop_ctr, requests, responses_processed >>
+                        rep_committed_offset, CoordVars, confirmed, start_stop_ctr,
+                        requests, responses_processed >>
 
 \* -----------------------------------------
 \* LOG TRUNCATION AFTER ELECTION or START
@@ -518,7 +534,8 @@ ReplicaHandlesLastOffsetAtEpochResponse ==
             /\ rep_state' = [rep_state EXCEPT ![response.dest] = "follower"]
             /\ ResponseProcessed(response)
             /\ UNCHANGED << rep_leader, rep_epoch, rep_max_ler_of_rep, rep_listener,
-                            CoordVars, confirmed, start_stop_ctr, requests >>
+                            rep_committed_offset, CoordVars, confirmed, start_stop_ctr,
+                            requests >>
 
 \* ------------------------------------------
 \* WRITES and REPLICATION
@@ -544,7 +561,8 @@ Write ==
                 /\ rep_max_ler_of_rep' = [rep_max_ler_of_rep EXCEPT ![r] = [@ EXCEPT ![r] = meta_record]]
                 /\ confirmed' = confirmed @@ (v :> FALSE)
         /\ UNCHANGED << rep_state, rep_epoch, rep_leader, rep_listener,
-                        CoordVars, start_stop_ctr, requests, responses_processed >>
+                        rep_committed_offset, CoordVars, start_stop_ctr, requests,
+                        responses_processed >>
 
 \* A follower sends a start_listener_request to the replica it believes to be the leader
 \* It includes its current LER
@@ -575,8 +593,9 @@ ReplicaLeaderRegistersDataListener ==
         /\ rep_listener' = [rep_listener EXCEPT ![request.dest] =
                                 [@ EXCEPT ![request.source] = TRUE]]
         /\ SendReply(request, [type |-> "start_listener_response"])
-        /\ UNCHANGED << rep_state, rep_epoch, rep_leader, rep_log, rep_ler, CoordVars,
-                        confirmed, start_stop_ctr, responses_processed >>
+        /\ UNCHANGED << rep_state, rep_epoch, rep_leader, rep_log, rep_ler,
+                        rep_committed_offset, CoordVars, confirmed, start_stop_ctr,
+                        responses_processed >>
 
 \* Get the next lowest record above the current replica position
 NextRecord(leader, last_record) ==
@@ -622,7 +641,8 @@ ReplicaAcksData ==
                                        dest          |-> request.source,
                                        source        |-> request.dest])
         /\ UNCHANGED << rep_state, rep_epoch, rep_leader, rep_max_ler_of_rep, rep_listener,
-                        CoordVars, confirmed, start_stop_ctr, responses_processed >>
+                        rep_committed_offset, CoordVars, confirmed, start_stop_ctr,
+                        responses_processed >>
 
 \* The leader replica processes an ack and updates the position of that replica
 LeaderReplicaUpdatesReplicaPosition ==
@@ -639,7 +659,8 @@ LeaderReplicaUpdatesReplicaPosition ==
                                         [@ EXCEPT ![response.source] = response.record]]
             /\ ResponseProcessed(response)
             /\ UNCHANGED << rep_state, rep_epoch, rep_leader, rep_log, rep_ler, rep_listener,
-                            CoordVars, confirmed, start_stop_ctr, requests >>
+                            rep_committed_offset, CoordVars, confirmed, start_stop_ctr,
+                            requests >>
 
 \* A leader replica will confirm a write if a quorum of replicas have confirmed
 \* they have it (by including their LER in their fetch requests)
@@ -651,6 +672,49 @@ ConfirmWrite ==
             /\ QuorumWritten(record, r)
             /\ confirmed' = [confirmed EXCEPT ![record.value] = TRUE]
         /\ UNCHANGED << RepVars, CoordVars, start_stop_ctr, requests, responses_processed >>
+
+\* The leader computes its committed offset from quorum acknowledgements
+\* and updates its own view. This happens implicitly as acks arrive.
+LeaderAdvancesCommittedOffset ==
+    \E r \in R :
+        /\ rep_state[r] = "leader"
+        /\ LET new_committed == CommittedOffset(r)
+           IN /\ new_committed > rep_committed_offset[r]
+              /\ rep_committed_offset' = [rep_committed_offset EXCEPT ![r] = new_committed]
+        /\ UNCHANGED << rep_state, rep_epoch, rep_leader, rep_log, rep_ler,
+                        rep_max_ler_of_rep, rep_listener,
+                        CoordVars, confirmed, start_stop_ctr, requests, responses_processed >>
+
+\* The leader propagates its committed offset to a follower via the
+\* replication channel.
+LeaderSendsCommittedOffset ==
+    \E leader \in R :
+        \E follower \in R :
+            /\ rep_state[leader] = "leader"
+            /\ rep_listener[leader][follower] = TRUE
+            /\ rep_committed_offset[leader] > rep_committed_offset[follower]
+            /\ SendRequest([type             |-> "committed_offset_request",
+                            epoch            |-> rep_epoch[leader],
+                            committed_offset |-> rep_committed_offset[leader],
+                            dest             |-> follower,
+                            source           |-> leader])
+        /\ UNCHANGED << RepVars, CoordVars, confirmed, start_stop_ctr, responses_processed >>
+
+\* A follower receives the committed offset from the leader
+ReplicaHandlesCommittedOffset ==
+    \E request \in DOMAIN requests :
+        /\ NotSentReply(request)
+        /\ request.type = "committed_offset_request"
+        /\ rep_state[request.dest] = "follower"
+        /\ rep_epoch[request.dest] = request.epoch
+        \* Only advance, never go backwards
+        /\ request.committed_offset > rep_committed_offset[request.dest]
+        /\ rep_committed_offset' = [rep_committed_offset EXCEPT
+                                    ![request.dest] = request.committed_offset]
+        /\ SendReply(request, [type |-> "committed_offset_response"])
+        /\ UNCHANGED << rep_state, rep_epoch, rep_leader, rep_log, rep_ler,
+                        rep_max_ler_of_rep, rep_listener,
+                        CoordVars, confirmed, start_stop_ctr, responses_processed >>
 
 
 Next ==
@@ -680,6 +744,9 @@ Next ==
     \/ ReplicaLeaderSendsData
     \/ ReplicaAcksData
     \/ ConfirmWrite
+    \/ LeaderAdvancesCommittedOffset
+    \/ LeaderSendsCommittedOffset
+    \/ ReplicaHandlesCommittedOffset
 
 \*-------------------------------------------------
 \*INVARIANTS
@@ -700,6 +767,7 @@ TypeOK ==
     /\ rep_epoch \in [R -> Nat]
     /\ rep_max_ler_of_rep \in [R -> [R -> MetaRecord]]
     /\ rep_listener \in [R -> [R -> BOOLEAN]]
+    /\ rep_committed_offset \in [R -> Nat]
     /\ coord_state \in [R -> RepState]
     /\ coord_epoch \in Nat
     /\ coord_leader \in ReplicaOrNone
@@ -746,6 +814,16 @@ LerMatchesLog ==
                                 \A rec \in rep_log[r] : record.offset >= rec.offset
             IN rep_ler[r].offset = last_record.offset
 
+
+\* A follower's committed offset never exceeds the leader's committed offset
+\* (it may lag behind due to propagation delay)
+FollowerCommittedOffsetBounded ==
+    \/ coord_leader = 0
+    \/ /\ coord_leader # 0
+       /\ \A r \in R :
+            \/ rep_state[r] # "follower"
+            \/ rep_epoch[r] # rep_epoch[coord_leader]
+            \/ rep_committed_offset[r] <= rep_committed_offset[coord_leader]
 
 TestInv ==
     \* Add debugging expressions here to trigger error trace
