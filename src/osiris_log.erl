@@ -518,20 +518,11 @@ init(Config) ->
 -spec init(config(), writer | acceptor) -> state().
 init(#{dir := Dir,
        name := Name,
-       epoch := Epoch} = Config,
+       epoch := Epoch} = Config0,
      WriterType) ->
     %% scan directory for segments if in write mode
-    MaxSizeBytes = maps:get(max_segment_size_bytes, Config,
-                            ?DEFAULT_MAX_SEGMENT_SIZE_B),
-    MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks,
-                                        ?DEFAULT_MAX_SEGMENT_SIZE_C),
-    Retention = maps:get(retention, Config, []),
-    FilterSize = maps:get(filter_size, Config, ?DEFAULT_FILTER_SIZE),
     ?INFO("Stream: ~ts will use ~ts for osiris log data directory",
           [Name, Dir]),
-    ?DEBUG_(Name, "max_segment_size_bytes: ~b,
-           max_segment_size_chunks ~b, retention ~w, filter size ~b",
-            [MaxSizeBytes, MaxSizeChunks, Retention, FilterSize]),
     ok = filelib:ensure_dir(Dir),
     case file:make_dir(Dir) of
         ok ->
@@ -541,19 +532,36 @@ init(#{dir := Dir,
         Err ->
             throw(Err)
     end,
+    ok = maybe_fix_corrupted_files(Config0),
+    MaxSizeBytes = maps:get(max_segment_size_bytes, Config0,
+                            ?DEFAULT_MAX_SEGMENT_SIZE_B),
+    MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks,
+                                        ?DEFAULT_MAX_SEGMENT_SIZE_C),
+    FilterSize = maps:get(filter_size, Config0, ?DEFAULT_FILTER_SIZE),
+    ?DEBUG_(Name, "max_segment_size_bytes: ~b,
+           max_segment_size_chunks ~b, retention ~w, filter size ~b",
+            [MaxSizeBytes, MaxSizeChunks,
+             maps:get(retention, Config0, []), FilterSize]),
 
-    Cnt = make_counter(Config),
+    Cnt = make_counter(Config0),
     %% initialise offset counter to -1 as 0 is the first offset in the log and
     %% it hasn't necessarily been written yet, for an empty log the first offset
     %% is initialised to 0 however and will be updated after each retention run.
     counters:put(Cnt, ?C_OFFSET, -1),
     counters:put(Cnt, ?C_SEGMENTS, 0),
-    Shared = case Config of
+    Shared = case Config0 of
                  #{shared := S} ->
                      S;
                  _ ->
                      osiris_log_shared:new()
              end,
+    Config = case maps:get(log_hooks, Config0, app_env_log_hooks()) of
+                 undefined ->
+                     Config0;
+                 HookMod ->
+                     HookMod:on_init(WriterType, self(), Config0#{counter => Cnt, shared => Shared})
+             end,
+    Retention = maps:get(retention, Config, []),
     Cfg = #cfg{directory = Dir,
                name = Name,
                max_segment_size_bytes = MaxSizeBytes,
@@ -564,7 +572,6 @@ init(#{dir := Dir,
                counter_id = counter_id(Config),
                shared = Shared,
                filter_size = FilterSize},
-    ok = maybe_fix_corrupted_files(Config),
     DefaultNextOffset = case Config of
                             #{initial_offset := IO}
                               when WriterType == acceptor ->
@@ -2266,11 +2273,24 @@ format_status(#?MODULE{cfg = #cfg{directory = Dir,
       file => filename:basename(File)}.
 
 -spec update_retention([retention_spec()], state()) -> state().
-update_retention(Retention,
+update_retention(Retention0,
                  #?MODULE{cfg = #cfg{name = Name,
-                                     retention = Retention0} = Cfg} = State0)
-    when is_list(Retention) ->
-    ?DEBUG_(Name, " from: ~w to ~w", [Retention0, Retention]),
+                                     directory = Dir,
+                                     counter = Cnt,
+                                     shared = Shared,
+                                     retention = RetentionPrev} = Cfg} = State0)
+    when is_list(Retention0) ->
+    Retention = case application:get_env(osiris, log_hooks) of
+                    {ok, HookMod} ->
+                        HookMod:on_retention_updated(Retention0,
+                                                     #{name => Name,
+                                                       dir => Dir,
+                                                       counter => Cnt,
+                                                       shared => Shared});
+                    undefined ->
+                        Retention0
+                end,
+    ?DEBUG_(Name, " from: ~w to ~w", [RetentionPrev, Retention]),
     State = State0#?MODULE{cfg = Cfg#cfg{retention = Retention}},
     trigger_retention_eval(State).
 
@@ -2669,6 +2689,12 @@ maybe_set_first_offset(0, Timestamp, #cfg{shared = Ref, counter = CntRef}) ->
     osiris_log_shared:set_first_chunk_id(Ref, 0);
 maybe_set_first_offset(_, _Timestamp, _Cfg) ->
     ok.
+
+app_env_log_hooks() ->
+    case application:get_env(osiris, log_hooks) of
+        {ok, Mod} -> Mod;
+        undefined -> undefined
+    end.
 
 max_segment_size_reached(
   #?MODULE{mode = #write{segment_size = {CurrentSizeBytes,
