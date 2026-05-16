@@ -123,7 +123,8 @@ all_tests() ->
      samples_over_three_index_files,
      samples_over_more_than_five_segments,
      samples_over_boundaries,
-     samples_fail_with_io_error
+     samples_fail_with_io_error,
+     write_with_small_max_segment_size
     ].
 
 groups() ->
@@ -2494,6 +2495,20 @@ samples_fail_with_io_error_unix(Config) ->
     after
         application:unset_env(osiris, max_segment_size_chunks)
     end.
+
+write_with_small_max_segment_size(Config) ->
+    %% When max_segment_size_bytes is <= LOG_HEADER_SIZE (8 bytes),
+    %% the bytes-based segment roll is effectively disabled. The write
+    %% must still succeed (all data lands in one segment).
+    %% Previously this caused an infinite loop in write_chunk.
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf#{max_segment_size_bytes => 1}),
+    S1 = osiris_log:write([<<"hello">>], S0),
+    ?assertEqual(1, osiris_log:next_offset(S1)),
+    S2 = osiris_log:write([<<"world">>], S1),
+    ?assertEqual(2, osiris_log:next_offset(S2)),
+    osiris_log:close(S2),
+    ok.
 
 assert_sendfile_pread(T, ExpectedSendfile, ExpectedPread) ->
     case os:type() of
