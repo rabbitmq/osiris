@@ -237,7 +237,7 @@ CoordinatorRestoresVisibilityOfReplica ==
         /\ coord_state[r] = "offline"
         /\ CoordinatorResetsReplica(r)
         /\ start_stop_ctr' = start_stop_ctr + 1
-    /\ UNCHANGED << rep_log, rep_ler, rep_first_offset, rep_max_ler_of_rep, rep_listener,
+    /\ UNCHANGED << rep_log, rep_ler, rep_first_offset,
                     coord_leader, coord_epoch, coord_election, coord_election_ler,
                     confirmed, requests, confirmed_replicas, responses_processed >>
 
@@ -570,7 +570,7 @@ Write ==
                 /\ confirmed_replicas' = confirmed_replicas @@ (v :> {})
         /\ UNCHANGED << rep_state, rep_epoch, rep_leader, rep_listener,
                         rep_committed_offset, rep_first_offset, CoordVars, start_stop_ctr,
-                        requests, confirmed_replicas, responses_processed >>
+                        requests, responses_processed >>
 
 \* A follower sends a start_listener_request to the replica it believes to be the leader
 \* It includes its current LER
@@ -684,7 +684,7 @@ ConfirmWrite ==
             /\ confirmed' = [confirmed EXCEPT ![record.value] = record.offset]
             /\ confirmed_replicas' = confirmed_replicas @@
                 (record.value :> { rr \in R : rep_max_ler_of_rep[r][rr].offset >= record.offset })
-        /\ UNCHANGED << RepVars, CoordVars, start_stop_ctr, requests, confirmed_replicas, responses_processed >>
+        /\ UNCHANGED << RepVars, CoordVars, start_stop_ctr, requests, responses_processed >>
 
 \* The leader computes its committed offset from quorum acknowledgements
 \* and updates its own view. This happens implicitly as acks arrive.
