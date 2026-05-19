@@ -84,6 +84,8 @@
 -define(C_FIRST_TIMESTAMP, 3).
 -define(C_CHUNKS, 4).
 -define(C_SEGMENTS, 5).
+-define(C_SEGMENT_SIZE_BYTES, 6).
+-define(C_INDEX_SIZE_BYTES, 7).
 -define(COUNTER_FIELDS,
         [
          {offset, ?C_OFFSET, counter,
@@ -91,7 +93,9 @@
          {first_offset, ?C_FIRST_OFFSET, counter, "First offset, not updated for readers"},
          {first_timestamp, ?C_FIRST_TIMESTAMP, counter, "First timestamp, not updated for readers"},
          {chunks, ?C_CHUNKS, counter, "Number of chunks read or written, incremented even if a reader only reads the header"},
-         {segments, ?C_SEGMENTS, counter, "Number of segments"}
+         {segments, ?C_SEGMENTS, counter, "Number of segments"},
+         {segment_size_bytes, ?C_SEGMENT_SIZE_BYTES, counter, "Total size of all segment files in bytes"},
+         {index_size_bytes, ?C_INDEX_SIZE_BYTES, counter, "Total size of all index files in bytes"}
         ]
        ).
 
@@ -596,10 +600,13 @@ init(#{dir := Dir,
             TailInfo = {LastChId + LastNum,
                         {LastEpoch, LastChId, LastTs}},
 
+            {InitSegBytes, InitIdxBytes} = sum_log_sizes(Config),
             counters:put(Cnt, ?C_FIRST_OFFSET, FstChId),
             counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
             counters:put(Cnt, ?C_OFFSET, LastChId + LastNum - 1),
             counters:put(Cnt, ?C_SEGMENTS, NumSegments),
+            counters:put(Cnt, ?C_SEGMENT_SIZE_BYTES, InitSegBytes),
+            counters:put(Cnt, ?C_INDEX_SIZE_BYTES, InitIdxBytes),
             osiris_log_shared:set_first_chunk_id(Shared, FstChId),
             osiris_log_shared:set_last_chunk_id(Shared, LastChId),
             ?DEBUG_(Name, " next offset ~b first offset ~b",
@@ -632,6 +639,8 @@ init(#{dir := Dir,
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, _} = file:position(SegFd, ?LOG_HEADER_SIZE),
             counters:put(Cnt, ?C_SEGMENTS, 1),
+            counters:put(Cnt, ?C_SEGMENT_SIZE_BYTES, ?LOG_HEADER_SIZE),
+            counters:put(Cnt, ?C_INDEX_SIZE_BYTES, ?IDX_HEADER_SIZE),
             %% the segment could potentially have trailing data here so we'll
             %% do a truncate just in case. The index would have been truncated
             %% earlier
@@ -924,16 +933,18 @@ chunk_id_index_scan0(Fd, ChunkId) ->
 delete_segment_from_index(Index) ->
     File = segment_from_index_file(Index),
     ?DEBUG("osiris_log: deleting segment ~ts", [File]),
+    SegSize = file_size_or_zero(File),
+    IdxSize = file_size_or_zero(Index),
     ok = prim_file:delete(Index),
     ok = prim_file:delete(File),
-    ok.
+    {SegSize, IdxSize}.
 
 truncate_to(_Name, _Range, _EpochOffsets, []) ->
     %% the target log is empty
     [];
 truncate_to(_Name, _Range, [], IdxFiles) ->
     %% ?????  this means the entire log is out
-    [begin ok = delete_segment_from_index(I) end || I <- IdxFiles],
+    [delete_segment_from_index(I) || I <- IdxFiles],
     [];
 truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
     case find_segment_for_offset(ChId, IdxFiles) of
@@ -958,8 +969,7 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
                         true ->
                             %% there is no overlap, need to delete all
                             %% local segments
-                            [begin ok = delete_segment_from_index(I) end
-                             || I <- IdxFiles],
+                            [delete_segment_from_index(I) || I <- IdxFiles],
                             [];
                         false ->
                             %% there is overlap
@@ -1001,7 +1011,7 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
                       fun (I) ->
                               case index_file_first_offset(I) > ChId of
                                   true ->
-                                      ok = delete_segment_from_index(I),
+                                      _ = delete_segment_from_index(I),
                                       false;
                                   false ->
                                       true
@@ -2254,35 +2264,34 @@ update_retention(Retention,
 
 -spec evaluate_retention(file:filename_all(), [retention_spec()]) ->
     {range(), FirstTimestamp :: osiris:timestamp(),
-     NumRemainingFiles :: non_neg_integer()}.
+     NumRemainingFiles :: non_neg_integer(),
+     {DeletedSegBytes :: non_neg_integer(), DeletedIndexBytes :: non_neg_integer()}}.
 evaluate_retention(Dir, Specs) when is_list(Dir) ->
-    % convert to binary for faster operations later
-    % mostly in segment_from_index_file/1
     evaluate_retention(unicode:characters_to_binary(Dir), Specs);
 evaluate_retention(Dir, Specs) when is_binary(Dir) ->
-
     {Time, Result} = timer:tc(
                        fun() ->
                                IdxFiles0 = sorted_index_files(Dir),
-                               IdxFiles = evaluate_retention0(IdxFiles0, Specs),
+                               {IdxFiles, DeletedBytes} =
+                                   evaluate_retention0(IdxFiles0, Specs, {0, 0}),
                                OffsetRange = offset_range_from_idx_files(IdxFiles),
                                FirstTs = first_timestamp_from_index_files(IdxFiles),
-                               {OffsetRange, FirstTs, length(IdxFiles)}
+                               {OffsetRange, FirstTs, length(IdxFiles), DeletedBytes}
                        end),
     ?DEBUG_(<<>>," (~w) completed in ~fms", [Specs, Time/1_000]),
     Result.
 
-evaluate_retention0(IdxFiles, []) ->
-    IdxFiles;
-evaluate_retention0(IdxFiles, [{max_bytes, MaxSize} | Specs]) ->
-    RemIdxFiles = eval_max_bytes(IdxFiles, MaxSize),
-    evaluate_retention0(RemIdxFiles, Specs);
-evaluate_retention0(IdxFiles, [{max_age, Age} | Specs]) ->
-    RemIdxFiles = eval_age(IdxFiles, Age),
-    evaluate_retention0(RemIdxFiles, Specs).
+evaluate_retention0(IdxFiles, [], DeletedBytes) ->
+    {IdxFiles, DeletedBytes};
+evaluate_retention0(IdxFiles, [{max_bytes, MaxSize} | Specs], {AccSeg, AccIdx}) ->
+    {RemIdxFiles, {DelSeg, DelIdx}} = eval_max_bytes(IdxFiles, MaxSize),
+    evaluate_retention0(RemIdxFiles, Specs, {AccSeg + DelSeg, AccIdx + DelIdx});
+evaluate_retention0(IdxFiles, [{max_age, Age} | Specs], {AccSeg, AccIdx}) ->
+    {RemIdxFiles, {DelSeg, DelIdx}} = eval_age(IdxFiles, Age),
+    evaluate_retention0(RemIdxFiles, Specs, {AccSeg + DelSeg, AccIdx + DelIdx}).
 
 eval_age([_] = IdxFiles, _Age) ->
-    IdxFiles;
+    {IdxFiles, {0, 0}};
 eval_age([IdxFile | IdxFiles] = AllIdxFiles, Age) ->
     case last_timestamp_in_index_file(IdxFile) of
         {ok, Ts} ->
@@ -2292,41 +2301,65 @@ eval_age([IdxFile | IdxFiles] = AllIdxFiles, Age) ->
                     %% the oldest timestamp is older than retention
                     %% and there are other segments available
                     %% we can delete
-                    ok = delete_segment_from_index(IdxFile),
-                    eval_age(IdxFiles, Age);
+                    {SegSize, IdxSize} = delete_segment_from_index(IdxFile),
+                    {RemIdxFiles, {AccSeg, AccIdx}} = eval_age(IdxFiles, Age),
+                    {RemIdxFiles, {AccSeg + SegSize, AccIdx + IdxSize}};
                 false ->
-                    AllIdxFiles
+                    {AllIdxFiles, {0, 0}}
             end;
         _Err ->
-            AllIdxFiles
+            {AllIdxFiles, {0, 0}}
     end;
 eval_age([], _Age) ->
     %% this could happen if retention is evaluated whilst
     %% a stream is being deleted
-    [].
+    {[], {0, 0}}.
 
-eval_max_bytes([], _) -> [];
+eval_max_bytes([], _) -> {[], {0, 0}};
 eval_max_bytes(IdxFiles, MaxSize) ->
-    [Latest|Older] = lists:reverse(IdxFiles),
+    [Latest | Older] = lists:reverse(IdxFiles),
     eval_max_bytes(Older,
                    %% for retention eval it is ok to use a file size function
                    %% that implicitly return 0 when file is not found
                    MaxSize - file_size_or_zero(
                                segment_from_index_file(Latest)),
-                   [Latest]).
+                   [Latest],
+                   {0, 0}).
 
-eval_max_bytes([], _, Acc) ->
-    Acc;
-eval_max_bytes([IdxFile | Rest], Limit, Acc) ->
+eval_max_bytes([], _, Acc, DeletedBytes) ->
+    {Acc, DeletedBytes};
+eval_max_bytes([IdxFile | Rest], Limit, Acc, {AccSeg, AccIdx}) ->
     SegFile = segment_from_index_file(IdxFile),
     Size = file_size(SegFile),
     case Size =< Limit of
         true ->
-            eval_max_bytes(Rest, Limit - Size, [IdxFile | Acc]);
+            eval_max_bytes(Rest, Limit - Size, [IdxFile | Acc], {AccSeg, AccIdx});
         false ->
-            [ok = delete_segment_from_index(Seg) || Seg <- [IdxFile | Rest]],
-            Acc
+            {TotalSeg, TotalIdx} =
+                lists:foldl(fun(Seg, {S, I}) ->
+                                    {SegSize, IdxSize} = delete_segment_from_index(Seg),
+                                    {S + SegSize, I + IdxSize}
+                            end,
+                            {AccSeg, AccIdx},
+                            [IdxFile | Rest]),
+            {Acc, {TotalSeg, TotalIdx}}
     end.
+
+%% Sums the on-disk sizes of all segment and index files in a log directory.
+%% Used once at writer/replica init to initialise the size counters.
+sum_log_sizes(Config) ->
+    IdxFiles = case Config of
+                   #{index_files := F} -> F;
+                   #{dir := Dir} -> sorted_index_files(Dir)
+               end,
+    lists:foldl(
+      fun(IdxFile, {SegAcc, IdxAcc}) ->
+              SegFile = segment_from_index_file(IdxFile),
+              {SegAcc + file_size_or_zero(SegFile),
+               IdxAcc + file_size_or_zero(IdxFile)}
+      end,
+      {0, 0},
+      IdxFiles).
 
 file_size(Path) ->
     case prim_file:read_file_info(Path) of
@@ -2571,6 +2604,8 @@ write_chunk(Chunk,
             %% update counters
             counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
             counters:add(CntRef, ?C_CHUNKS, 1),
+            counters:add(CntRef, ?C_SEGMENT_SIZE_BYTES, Size),
+            counters:add(CntRef, ?C_INDEX_SIZE_BYTES, ?INDEX_RECORD_SIZE_B),
             maybe_set_first_offset(Next, Cfg),
             State#?MODULE{mode =
                           Write#write{tail_info = {NextOffset,
@@ -2806,6 +2841,8 @@ open_new_segment(#?MODULE{cfg = #cfg{name = Name,
     {ok, _} = file:position(Fd, eof),
     {ok, _} = file:position(IdxFd, eof),
     counters:add(Cnt, ?C_SEGMENTS, 1),
+    counters:add(Cnt, ?C_SEGMENT_SIZE_BYTES, ?LOG_HEADER_SIZE),
+    counters:add(Cnt, ?C_INDEX_SIZE_BYTES, ?IDX_HEADER_SIZE),
 
     State0#?MODULE{current_file = Filename,
                    fd = Fd,
@@ -3170,13 +3207,15 @@ trigger_retention_eval(#?MODULE{cfg =
 
     %% updates first offset and first timestamp
     %% after retention has been evaluated
-    EvalFun = fun ({{FstOff, _}, FstTs, NumSegLeft})
+    EvalFun = fun ({{FstOff, _}, FstTs, NumSegLeft, {DelSegBytes, DelIdxBytes}})
                     when is_integer(FstOff),
                          is_integer(FstTs) ->
                       osiris_log_shared:set_first_chunk_id(Shared, FstOff),
                       counters:put(Cnt, ?C_FIRST_OFFSET, FstOff),
                       counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
-                      counters:put(Cnt, ?C_SEGMENTS, NumSegLeft);
+                      counters:put(Cnt, ?C_SEGMENTS, NumSegLeft),
+                      counters:sub(Cnt, ?C_SEGMENT_SIZE_BYTES, DelSegBytes),
+                      counters:sub(Cnt, ?C_INDEX_SIZE_BYTES, DelIdxBytes);
                   (_) ->
                       ok
               end,
