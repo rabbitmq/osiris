@@ -2471,6 +2471,59 @@ idx_lin_scan(<<IdxRecordBin:?INDEX_RECORD_SIZE_B/binary, Rem/binary>>, Fun, Acc0
             Ret
     end.
 
+%% Block binary search: binary search over block boundaries to find the
+%% target block, then linear scan within that block. O(log2(n/B) + B) where
+%% B = ?SKIP_SEARCH_JUMP. Uses the same callback interface as idx_skip_search.
+%%
+%% NumRecords is the number of index records in the file (excluding header).
+idx_block_binary_search(Fd, NumRecords, Fun, Acc0) ->
+    NumBlocks = (NumRecords + ?SKIP_SEARCH_JUMP - 1) div ?SKIP_SEARCH_JUMP,
+    BlockIdx = idx_bbs_find_block(Fd, 0, NumBlocks - 1, Fun, Acc0, NumRecords),
+    BlockStart = BlockIdx * ?SKIP_SEARCH_JUMP,
+    BlockEnd = min(BlockStart + ?SKIP_SEARCH_JUMP, NumRecords),
+    ReadSize = (BlockEnd - BlockStart) * ?INDEX_RECORD_SIZE_B,
+    ReadPos = ?IDX_HEADER_SIZE + BlockStart * ?INDEX_RECORD_SIZE_B,
+    case file:pread(Fd, ReadPos, ReadSize) of
+        {ok, Data} ->
+            case idx_lin_scan(Data, Fun, Acc0) of
+                {continue, Acc} -> Acc;
+                {return, Acc} -> Acc
+            end;
+        eof ->
+            Acc0
+    end.
+
+%% Binary search over block boundaries. Returns the index of the block
+%% that should contain the target (the last block whose first record
+%% does not overshoot the target).
+idx_bbs_find_block(_Fd, Lo, Hi, _Fun, _Acc, _NumRecords) when Lo > Hi ->
+    max(0, Lo - 1);
+idx_bbs_find_block(Fd, Lo, Hi, Fun, Acc0, NumRecords) ->
+    Mid = (Lo + Hi) div 2,
+    RecIdx = Mid * ?SKIP_SEARCH_JUMP,
+    case RecIdx >= NumRecords of
+        true ->
+            idx_bbs_find_block(Fd, Lo, Mid - 1, Fun, Acc0, NumRecords);
+        false ->
+            Pos = ?IDX_HEADER_SIZE + RecIdx * ?INDEX_RECORD_SIZE_B,
+            case idx_read_at(Fd, Pos) of
+                {ok, IdxRecordBin} ->
+                    case Fun(peek, IdxRecordBin, Acc0) of
+                        {scan, _} ->
+                            %% Target is before this block
+                            idx_bbs_find_block(Fd, Lo, Mid - 1, Fun, Acc0, NumRecords);
+                        {continue, _} ->
+                            %% Target is at or after this block
+                            idx_bbs_find_block(Fd, Mid + 1, Hi, Fun, Acc0, NumRecords);
+                        {return, _} ->
+                            %% Exact match at block boundary
+                            Mid
+                    end;
+                _ ->
+                    idx_bbs_find_block(Fd, Lo, Mid - 1, Fun, Acc0, NumRecords)
+            end
+    end.
+
 segment_from_index_file(IdxFile) when is_list(IdxFile) ->
     unicode:characters_to_list(string:replace(IdxFile, ".index", ".segment", trailing));
 segment_from_index_file(IdxFile) when is_binary(IdxFile) ->
@@ -2835,10 +2888,13 @@ offset_idx_scan(Name, Offset, #seg_info{index = IndexFile} = SegmentInfo) ->
                              {ok, IdxFd} = open(IndexFile,
                                                 [read, raw, binary]),
                              _ = file:advise(IdxFd, 0, 0, random),
+                             {ok, EofPos} = file:position(IdxFd, eof),
+                             NumRecords = (EofPos - ?IDX_HEADER_SIZE)
+                                          div ?INDEX_RECORD_SIZE_B,
                              {Offset, SearchResult} =
-                                 idx_skip_search(IdxFd, ?IDX_HEADER_SIZE,
-                                                 fun offset_search_fun/3,
-                                                 {Offset, not_found}),
+                                 idx_block_binary_search(IdxFd, NumRecords,
+                                                         fun offset_search_fun/3,
+                                                         {Offset, not_found}),
                              ok = file:close(IdxFd),
                              SearchResult
                      end
@@ -2871,10 +2927,13 @@ open(File, Options) ->
 chunk_location_for_timestamp(Idx, Ts) ->
     {ok, IdxFd} = open(Idx, [read, raw, binary]),
     _ = file:advise(IdxFd, 0, 0, random),
+    {ok, EofPos} = file:position(IdxFd, eof),
+    NumRecords = (EofPos - ?IDX_HEADER_SIZE)
+                 div ?INDEX_RECORD_SIZE_B,
     {Ts, {ChunkId, _Timestamp, _Epoch, FilePos}} =
-        idx_skip_search(IdxFd, ?IDX_HEADER_SIZE,
-                        fun timestamp_search_fun/3,
-                        {Ts, not_found}),
+        idx_block_binary_search(IdxFd, NumRecords,
+                                fun timestamp_search_fun/3,
+                                {Ts, not_found}),
     ok = file:close(IdxFd),
     {ChunkId, FilePos}.
 
