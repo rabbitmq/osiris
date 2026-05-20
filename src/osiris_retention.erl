@@ -97,7 +97,7 @@ evaluate_retention({eval, Pid, Name, Dir, Specs, Fun} = Eval, State) ->
     end.
 
 schedule({eval, _Pid, Name, _Dir, Specs, _Fun} = Eval,
-         {_, _, NumSegmentRemaining},
+         {_, _, NumSegmentRemaining, _},
          #state{scheduled = Scheduled0} = State) ->
     %% we need to check the scheduled map even if the current specs do not
     %% include max_age as the retention config could have changed
