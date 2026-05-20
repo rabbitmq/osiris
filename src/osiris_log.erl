@@ -72,7 +72,11 @@
          index_files_unsorted/1,
          make_chunk/7,
          orphaned_segments/1,
-         read_header0/1
+         read_header0/1,
+         idx_skip_search/4,
+         idx_block_binary_search/4,
+         offset_search_fun/3,
+         timestamp_search_fun/3
         ]).
 
 % maximum size of a segment in bytes
