@@ -2345,8 +2345,6 @@ eval_max_bytes([IdxFile | Rest], Limit, Acc, {AccSeg, AccIdx}) ->
             {Acc, {TotalSeg, TotalIdx}}
     end.
 
-%% Sums the on-disk sizes of all segment and index files in a log directory.
-%% Used once at writer/replica init to initialise the size counters.
 sum_log_sizes(Config) ->
     IdxFiles = case Config of
                    #{index_files := F} -> F;

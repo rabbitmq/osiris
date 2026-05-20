@@ -1223,10 +1223,6 @@ retention(Config) ->
     ok.
 
 retention_size_counters(Config) ->
-    %% Verify that size counters are decremented through the full
-    %% osiris_retention:eval -> evaluate_retention -> EvalFun -> counters:sub path.
-    %% Use a very large max_bytes so no retention fires during writes, then
-    %% tighten it so that update_retention must delete segments.
     Name = ?config(cluster_name, Config),
     SegSize = 100 * 1000,
     Conf0 =
@@ -1237,12 +1233,10 @@ retention_size_counters(Config) ->
           max_segment_size_bytes => SegSize,
           replica_nodes => []},
     {ok, #{leader_pid := Leader} = Conf1} = osiris:start_cluster(Conf0),
-    %% ~500KB across multiple segments
     write_n(Leader, 1000, 0, 500 * 8, #{}),
     Key = {osiris_writer, Name},
     #{segment_size_bytes := SegBefore} =
         osiris_counters:counters(Key, [segment_size_bytes]),
-    %% Tighten retention to one segment — must delete previously retained segments.
     ok = osiris:update_retention(Leader, [{max_bytes, SegSize}]),
     await_condition(
         fun() ->

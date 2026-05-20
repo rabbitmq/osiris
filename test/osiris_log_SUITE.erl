@@ -278,7 +278,6 @@ size_counters_after_retention_max_bytes(Config) ->
     SegBefore = counter_get(Cnt, segment_size_bytes),
     IdxBefore = counter_get(Cnt, index_size_bytes),
     ok = osiris_log:close(Log0),
-    %% reload so counters reflect files on disk
     Log1 = osiris_log:init(Conf#{dir => LDir}),
     Cnt1 = osiris_log:counters_ref(Log1),
     SegInit = counter_get(Cnt1, segment_size_bytes),
@@ -286,7 +285,6 @@ size_counters_after_retention_max_bytes(Config) ->
     ?assertEqual(SegBefore, SegInit),
     ?assertEqual(IdxBefore, IdxInit),
     ok = osiris_log:close(Log1),
-    %% retention should delete segments and reduce counters
     {_, _, _, {DelSeg, DelIdx}} =
         osiris_log:evaluate_retention(LDir, [{max_bytes, 1500 * 100}]),
     ?assert(DelSeg > 0),
@@ -314,7 +312,6 @@ size_counters_after_retention_max_age(Config) ->
     SegInit = counter_get(Cnt1, segment_size_bytes),
     IdxInit = counter_get(Cnt1, index_size_bytes),
     ok = osiris_log:close(Log1),
-    %% max_age of 1000ms: all chunks are 2000ms old so at least one segment deleted
     {_, _, _, {DelSeg, DelIdx}} =
         osiris_log:evaluate_retention(LDir, [{max_bytes, 100000000}, {max_age, 1000}]),
     ?assert(DelSeg > 0),
@@ -1770,7 +1767,7 @@ evaluate_retention_max_bytes(Config) ->
     %% this should delete at least one segment
     Spec = {max_bytes, 1500 * 100},
     {OffRange, FstTs, NumSeg, _} = osiris_log:evaluate_retention(LDir, [Spec]),
-    %% idempotency check: range and segment count must be stable; deleted bytes differ
+    %% idempotency check
     {OffRange, FstTs, NumSeg, _} = osiris_log:evaluate_retention(LDir, [Spec]),
     SegFiles =
         filelib:wildcard(
@@ -3230,8 +3227,6 @@ recv(Socket, Expected, Acc) ->
             Other
     end.
 
-%% Returns the value of a named counter field from a raw counters ref.
-%% Looks up the slot position from osiris_log:counter_fields/0.
 counter_get(Cnt, Name) ->
     Fields = osiris_log:counter_fields(),
     {Name, Pos, _, _} = lists:keyfind(Name, 1, Fields),
