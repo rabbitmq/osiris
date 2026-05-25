@@ -38,6 +38,7 @@ all_tests() ->
      write_with_filter_attach_next,
      write_batch_with_filter,
      write_batch_with_filters_variable_size,
+     bloom_filtered_count,
      subbatch,
      subbatch_compressed,
      iterator_read_chunk,
@@ -304,6 +305,39 @@ write_batch_with_filters_variable_size(Config) ->
     % int:break(osiris_log, 2908),
     {[{2, <<"hi">>}, _], F2} = osiris_log:read_chunk_parsed(F1),
     osiris_log:close(F2),
+    ok.
+
+bloom_filtered_count(Config) ->
+    Conf0 = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf0#{filter_size => 32}),
+    %% chunk 0: 3 banana records — will not match the apple filter (3 records skipped)
+    {_, S1} = write_committed([{<<"banana">>, <<"a">>},
+                                {<<"banana">>, <<"b">>},
+                                {<<"banana">>, <<"c">>}], S0),
+    %% chunk 1: 1 apple record — will match the apple filter
+    {_, S2} = write_committed([{<<"apple">>, <<"hi">>}], S1),
+    %% chunk 2: 3 banana records — will not match the apple filter (3 records skipped)
+    {_, S3} = write_committed([{<<"banana">>, <<"d">>},
+                                {<<"banana">>, <<"e">>},
+                                {<<"banana">>, <<"f">>}], S2),
+    %% chunk 3: 1 apple record — will match the apple filter
+    {_, S4} = write_committed([{<<"apple">>, <<"hey">>}], S3),
+    %% chunk 4: 3 banana records — will not match (3 records skipped, tail after last match)
+    {_, _S5} = write_committed([{<<"banana">>, <<"g">>},
+                                 {<<"banana">>, <<"h">>},
+                                 {<<"banana">>, <<"i">>}], S4),
+    Shared = osiris_log:get_shared(S0),
+    {ok, R0} = osiris_log:init_offset_reader(
+                   0, add_filter(<<"apple">>, Conf0#{shared => Shared})),
+    %% chunk starting at offset 3 is the first match; chunk 0 (3 records) was skipped
+    {ok, #{chunk_id := 3, bloom_filtered_count := 3}, R1} =
+        osiris_log:read_header(R0),
+    %% chunk starting at offset 7 is the second match; chunk 2 (3 records) was skipped
+    {ok, #{chunk_id := 7, bloom_filtered_count := 3}, R2} =
+        osiris_log:read_header(R1),
+    %% stream ends; chunk 4 (3 records) was skipped after the last match
+    {end_of_stream, R3} = osiris_log:read_header(R2),
+    ?assertEqual(3, osiris_log:bloom_filtered_count(R3)),
     ok.
 
 add_filter(Filter, #{options := Opts} = Conf) ->

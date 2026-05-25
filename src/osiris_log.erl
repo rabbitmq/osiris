@@ -59,7 +59,8 @@
          counter_fields/0,
          samples/2,
          make_counter/1,
-         generate_log/4]).
+         generate_log/4,
+         bloom_filtered_count/1]).
 
 -export([dump_init/1,
          dump_init_idx/1,
@@ -417,7 +418,8 @@
       filter_size => 16..255,
       header_data => binary(),
       position => non_neg_integer(),
-      next_position => non_neg_integer()}.
+      next_position => non_neg_integer(),
+      bloom_filtered_count => non_neg_integer()}.
 -type transport() :: tcp | ssl.
 
 %% holds static or rarely changing fields
@@ -451,6 +453,7 @@
          position = 0 :: non_neg_integer(),
          filter :: undefined | osiris_bloom:mstate(),
          filter_size = ?DEFAULT_FILTER_SIZE :: osiris_bloom:filter_size(),
+         bloom_filtered_count = 0 :: non_neg_integer(),
          read_ahead = #ra{} :: #ra{},
          use_sendfile = true :: boolean()}).
 -record(write,
@@ -1461,6 +1464,13 @@ get_default_max_segment_size_bytes() ->
 
 -spec counters_ref(state()) -> counters:counters_ref().
 counters_ref(#?MODULE{cfg = #cfg{counter = C}}) ->
+    C.
+
+%% Returns the number of records in bloom-filtered (skipped) chunks accumulated
+%% since the last yielded chunk. Useful after end_of_stream to account for
+%% records skipped following the final match.
+-spec bloom_filtered_count(state()) -> non_neg_integer().
+bloom_filtered_count(#?MODULE{mode = #read{bloom_filtered_count = C}}) ->
     C.
 
 -spec read_header(state()) ->
@@ -3119,11 +3129,13 @@ parse_header(<<?MAGIC:4/unsigned,
             case osiris_bloom:is_match(ChunkFilter, Filter) of
                 true ->
                     <<HeaderData:?HEADER_SIZE_B/binary, _/binary>> = HeaderData0,
+                    #read{bloom_filtered_count = BloomCount} = Read0,
                     State = case Ra1 of
                                 Ra0 ->
-                                    State0;
+                                    State0#?MODULE{mode = Read0#read{bloom_filtered_count = 0}};
                                 Ra ->
-                                    State0#?MODULE{mode = Read0#read{read_ahead = Ra}}
+                                    State0#?MODULE{mode = Read0#read{read_ahead = Ra,
+                                                                     bloom_filtered_count = 0}}
                             end,
                     {ok, #{chunk_id => NextChId0,
                            epoch => Epoch,
@@ -3137,11 +3149,14 @@ parse_header(<<?MAGIC:4/unsigned,
                            header_data => HeaderData,
                            filter_size => FilterSize,
                            next_position => NextPos,
-                           position => Pos},
+                           position => Pos,
+                           bloom_filtered_count => BloomCount},
                      State};
                 false ->
+                    #read{bloom_filtered_count = BloomCount} = Read0,
                     Read = Read0#read{next_offset = NextChId0 + NumRecords,
                                       position = NextPos,
+                                      bloom_filtered_count = BloomCount + NumRecords,
                                       read_ahead = Ra1},
                     read_header0(State0#?MODULE{mode = Read});
                 {retry_with, NewFilter} ->
