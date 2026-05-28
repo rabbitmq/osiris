@@ -327,19 +327,36 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%%===================================================================
 
-do_sendfile(#state{socket = Sock,
+do_sendfile(#state{name = Name,
+                   socket = Sock,
                    transport = Transport} = State) ->
-    ok = setopts(Transport, Sock, [{nopush, true}]),
-    do_sendfile0(State).
+    case setopts(Transport, Sock, [{nopush, true}]) of
+        ok ->
+            do_sendfile0(State);
+        {error, Err} ->
+            ?DEBUG_(Name, "setopts nopush true err ~w", [Err]),
+            State
+    end.
 
+do_sendfile0(State) ->
+    do_sendfile0(State, 100).
+
+do_sendfile0(State0, 0) ->
+    receive
+        {'EXIT', _Pid, _Reason} = ExitMsg ->
+            self() ! ExitMsg,
+            State0
+    after 0 ->
+        do_sendfile0(State0, 100)
+    end;
 do_sendfile0(#state{name = Name,
                     socket = Sock,
                     transport = Transport,
-                    log = Log0} = State0) ->
+                    log = Log0} = State0, N) ->
     State = maybe_send_committed_chunk_id(State0),
     case osiris_log:send_file(Sock, Log0) of
         {ok, Log} ->
-            do_sendfile0(State#state{log = Log});
+            do_sendfile0(State#state{log = Log}, N - 1);
         {error, _Err} ->
             %% ignore return value here as we've already hit an error
             %% and it is likely we'll get another one when setting opts
@@ -347,7 +364,7 @@ do_sendfile0(#state{name = Name,
             ?DEBUG_(Name, "sendfile err ~w", [_Err]),
             State;
         {end_of_stream, Log} ->
-            ok = setopts(Transport, Sock, [{nopush, false}]),
+            _ = setopts(Transport, Sock, [{nopush, false}]),
             State#state{log = Log}
     end.
 
