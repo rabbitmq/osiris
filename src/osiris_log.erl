@@ -600,13 +600,10 @@ init(#{dir := Dir,
             TailInfo = {LastChId + LastNum,
                         {LastEpoch, LastChId, LastTs}},
 
-            {InitSegBytes, InitIdxBytes} = sum_log_sizes(Config),
             counters:put(Cnt, ?C_FIRST_OFFSET, FstChId),
             counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
             counters:put(Cnt, ?C_OFFSET, LastChId + LastNum - 1),
             counters:put(Cnt, ?C_SEGMENTS, NumSegments),
-            counters:put(Cnt, ?C_SEGMENT_SIZE_BYTES, InitSegBytes),
-            counters:put(Cnt, ?C_INDEX_SIZE_BYTES, InitIdxBytes),
             osiris_log_shared:set_first_chunk_id(Shared, FstChId),
             osiris_log_shared:set_last_chunk_id(Shared, LastChId),
             ?DEBUG_(Name, " next offset ~b first offset ~b",
@@ -619,6 +616,9 @@ init(#{dir := Dir,
             %% at a valid chunk we can now truncate the segment to size in
             %% case there is trailing data
             ok = file:truncate(SegFd),
+            {InitSegBytes, InitIdxBytes} = sum_log_sizes(Config),
+            counters:put(Cnt, ?C_SEGMENT_SIZE_BYTES, InitSegBytes),
+            counters:put(Cnt, ?C_INDEX_SIZE_BYTES, InitIdxBytes),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, IdxEof} = file:position(IdxFd, eof),
             NumChunks = (IdxEof - ?IDX_HEADER_SIZE) div ?INDEX_RECORD_SIZE_B,
@@ -944,7 +944,7 @@ truncate_to(_Name, _Range, _EpochOffsets, []) ->
     [];
 truncate_to(_Name, _Range, [], IdxFiles) ->
     %% ?????  this means the entire log is out
-    [delete_segment_from_index(I) || I <- IdxFiles],
+    _ = [delete_segment_from_index(I) || I <- IdxFiles],
     [];
 truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
     case find_segment_for_offset(ChId, IdxFiles) of
@@ -969,7 +969,7 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
                         true ->
                             %% there is no overlap, need to delete all
                             %% local segments
-                            [delete_segment_from_index(I) || I <- IdxFiles],
+                            _ = [delete_segment_from_index(I) || I <- IdxFiles],
                             [];
                         false ->
                             %% there is overlap
@@ -2273,13 +2273,16 @@ evaluate_retention(Dir, Specs) when is_binary(Dir) ->
                        fun() ->
                                IdxFiles0 = sorted_index_files(Dir),
                                {IdxFiles, DeletedBytes} =
-                                   evaluate_retention0(IdxFiles0, Specs, {0, 0}),
+                                   evaluate_retention0(IdxFiles0, Specs),
                                OffsetRange = offset_range_from_idx_files(IdxFiles),
                                FirstTs = first_timestamp_from_index_files(IdxFiles),
                                {OffsetRange, FirstTs, length(IdxFiles), DeletedBytes}
                        end),
     ?DEBUG_(<<>>," (~w) completed in ~fms", [Specs, Time/1_000]),
     Result.
+
+evaluate_retention0(IdxFiles, Specs) ->
+    evaluate_retention0(IdxFiles, Specs, {0, 0}).
 
 evaluate_retention0(IdxFiles, [], DeletedBytes) ->
     {IdxFiles, DeletedBytes};
@@ -2290,9 +2293,12 @@ evaluate_retention0(IdxFiles, [{max_age, Age} | Specs], {AccSeg, AccIdx}) ->
     {RemIdxFiles, {DelSeg, DelIdx}} = eval_age(IdxFiles, Age),
     evaluate_retention0(RemIdxFiles, Specs, {AccSeg + DelSeg, AccIdx + DelIdx}).
 
-eval_age([_] = IdxFiles, _Age) ->
-    {IdxFiles, {0, 0}};
-eval_age([IdxFile | IdxFiles] = AllIdxFiles, Age) ->
+eval_age(IdxFiles, Age) ->
+    eval_age(IdxFiles, Age, {0, 0}).
+
+eval_age([_] = IdxFiles, _Age, Acc) ->
+    {IdxFiles, Acc};
+eval_age([IdxFile | IdxFiles] = AllIdxFiles, Age, {AccSeg, AccIdx} = Acc) ->
     case last_timestamp_in_index_file(IdxFile) of
         {ok, Ts} ->
             Now = erlang:system_time(millisecond),
@@ -2302,18 +2308,18 @@ eval_age([IdxFile | IdxFiles] = AllIdxFiles, Age) ->
                     %% and there are other segments available
                     %% we can delete
                     {SegSize, IdxSize} = delete_segment_from_index(IdxFile),
-                    {RemIdxFiles, {AccSeg, AccIdx}} = eval_age(IdxFiles, Age),
-                    {RemIdxFiles, {AccSeg + SegSize, AccIdx + IdxSize}};
+                    eval_age(IdxFiles, Age,
+                             {AccSeg + SegSize, AccIdx + IdxSize});
                 false ->
-                    {AllIdxFiles, {0, 0}}
+                    {AllIdxFiles, Acc}
             end;
         _Err ->
-            {AllIdxFiles, {0, 0}}
+            {AllIdxFiles, Acc}
     end;
-eval_age([], _Age) ->
+eval_age([], _Age, Acc) ->
     %% this could happen if retention is evaluated whilst
     %% a stream is being deleted
-    {[], {0, 0}}.
+    {[], Acc}.
 
 eval_max_bytes([], _) -> {[], {0, 0}};
 eval_max_bytes(IdxFiles, MaxSize) ->
