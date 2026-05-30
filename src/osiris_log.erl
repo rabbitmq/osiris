@@ -3101,12 +3101,8 @@ read_header0(State) ->
             {end_of_stream, State}
     end.
 
-read_header_with_ra(#?MODULE{cfg = #cfg{directory = Dir,
-                                        shared = Shared},
-                             mode = #read{next_offset = NextChId0,
-                                          position = Pos,
+read_header_with_ra(#?MODULE{mode = #read{position = Pos,
                                           read_ahead = Ra0} = Read0,
-                             current_file = CurFile,
                              fd = Fd} = State) ->
     case ra_read(Pos, ?HEADER_SIZE_B, Ra0) of
         Bin when is_binary(Bin) andalso
@@ -3118,33 +3114,48 @@ read_header_with_ra(#?MODULE{cfg = #cfg{directory = Dir,
                     ?FUNCTION_NAME(State#?MODULE{mode =
                                                  Read0#read{read_ahead = Ra}});
                 eof ->
-                    FirstOffset = osiris_log_shared:first_chunk_id(Shared),
-                    %% open next segment file and start there if it exists
-                    NextChId = max(FirstOffset, NextChId0),
-                    %% TODO: replace this check with a last chunk id counter
-                    %% updated by the writer and replicas
-                    SegFile = make_file_name(NextChId, "segment"),
-                    case SegFile == CurFile of
-                        true ->
-                            %% the new filename is the same as the old one
-                            %% this should only really happen for an empty
-                            %% log but would cause an infinite loop if it does
-                            {end_of_stream, State};
-                        false ->
-                            case file:open(filename:join(Dir, SegFile),
-                                           [raw, binary, read]) of
-                                {ok, Fd2} ->
-                                    ok = file:close(Fd),
-                                    Read = Read0#read{next_offset = NextChId,
-                                                      read_ahead = ra_clear(Ra0),
-                                                      position = ?LOG_HEADER_SIZE},
-                                    read_header0(State#?MODULE{current_file = SegFile,
-                                                               fd = Fd2,
-                                                               mode = Read});
-                                {error, enoent} ->
-                                    {end_of_stream, State}
-                            end
-                    end
+                    advance_to_next_segment(State);
+                {error, einval} ->
+                    %% pread/3 returns einval if the underlying file has been
+                    %% truncated or removed, or if our Fd has been closed.
+                    %% This can happen when retention concurrently rotates
+                    %% the segment out from under a slow reader. Treat the
+                    %% same as eof and try to advance to the next segment.
+                    advance_to_next_segment(State)
+            end
+    end.
+
+advance_to_next_segment(#?MODULE{cfg = #cfg{directory = Dir,
+                                            shared = Shared},
+                                 mode = #read{next_offset = NextChId0,
+                                              read_ahead = Ra0} = Read0,
+                                 current_file = CurFile,
+                                 fd = Fd} = State) ->
+    FirstOffset = osiris_log_shared:first_chunk_id(Shared),
+    %% open next segment file and start there if it exists
+    NextChId = max(FirstOffset, NextChId0),
+    %% TODO: replace this check with a last chunk id counter
+    %% updated by the writer and replicas
+    SegFile = make_file_name(NextChId, "segment"),
+    case SegFile == CurFile of
+        true ->
+            %% the new filename is the same as the old one
+            %% this should only really happen for an empty
+            %% log but would cause an infinite loop if it does
+            {end_of_stream, State};
+        false ->
+            case file:open(filename:join(Dir, SegFile),
+                           [raw, binary, read]) of
+                {ok, Fd2} ->
+                    ok = file:close(Fd),
+                    Read = Read0#read{next_offset = NextChId,
+                                      read_ahead = ra_clear(Ra0),
+                                      position = ?LOG_HEADER_SIZE},
+                    read_header0(State#?MODULE{current_file = SegFile,
+                                               fd = Fd2,
+                                               mode = Read});
+                {error, enoent} ->
+                    {end_of_stream, State}
             end
     end.
 
