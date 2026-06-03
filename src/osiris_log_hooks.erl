@@ -18,3 +18,8 @@
 
 -callback on_retention_updated([osiris:retention_spec()], map()) ->
     [osiris:retention_spec()].
+
+-callback on_retention_evaluated(counters:counters_ref(), map()) ->
+    ok.
+
+-optional_callbacks([on_retention_evaluated/2]).

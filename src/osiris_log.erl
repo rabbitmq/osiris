@@ -2696,6 +2696,14 @@ app_env_log_hooks() ->
         undefined -> undefined
     end.
 
+run_retention_evaluated_hook(undefined, _Cnt, _Ctx) ->
+    ok;
+run_retention_evaluated_hook(HookMod, Cnt, Ctx) ->
+    case erlang:function_exported(HookMod, on_retention_evaluated, 2) of
+        true -> HookMod:on_retention_evaluated(Cnt, Ctx);
+        false -> ok
+    end.
+
 max_segment_size_reached(
   #?MODULE{mode = #write{segment_size = {CurrentSizeBytes,
                                          CurrentSizeChunks}},
@@ -3299,13 +3307,16 @@ trigger_retention_eval(#?MODULE{cfg =
 
     %% updates first offset and first timestamp
     %% after retention has been evaluated
+    HookMod = app_env_log_hooks(),
     EvalFun = fun ({{FstOff, _}, FstTs, NumSegLeft})
                     when is_integer(FstOff),
                          is_integer(FstTs) ->
                       osiris_log_shared:set_first_chunk_id(Shared, FstOff),
                       counters:put(Cnt, ?C_FIRST_OFFSET, FstOff),
                       counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
-                      counters:put(Cnt, ?C_SEGMENTS, NumSegLeft);
+                      counters:put(Cnt, ?C_SEGMENTS, NumSegLeft),
+                      run_retention_evaluated_hook(HookMod, Cnt,
+                                                   #{name => Name});
                   (_) ->
                       ok
               end,
