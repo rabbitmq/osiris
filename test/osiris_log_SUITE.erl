@@ -233,7 +233,6 @@ size_counters_fresh_log(Config) ->
     S0 = osiris_log:init(Conf),
     Cnt = osiris_log:counters_ref(S0),
     ?assertEqual(?LOG_HEADER_SIZE, counter_get(Cnt, segment_size_bytes)),
-    ?assertEqual(?IDX_HEADER_SIZE, counter_get(Cnt, index_size_bytes)),
     ok = osiris_log:close(S0),
     ok.
 
@@ -242,10 +241,8 @@ size_counters_after_write(Config) ->
     S0 = osiris_log:init(Conf),
     Cnt = osiris_log:counters_ref(S0),
     SegBefore = counter_get(Cnt, segment_size_bytes),
-    IdxBefore = counter_get(Cnt, index_size_bytes),
     S1 = osiris_log:write([<<"hello">>], S0),
     ?assert(counter_get(Cnt, segment_size_bytes) > SegBefore),
-    ?assertEqual(IdxBefore + ?INDEX_RECORD_SIZE_B, counter_get(Cnt, index_size_bytes)),
     ok = osiris_log:close(S1),
     ok.
 
@@ -256,12 +253,10 @@ size_counters_restart(Config) ->
     Log0 = seed_log(Conf#{dir => LDir}, EpochChunks, Config),
     Cnt0 = osiris_log:counters_ref(Log0),
     SegBytes = counter_get(Cnt0, segment_size_bytes),
-    IdxBytes = counter_get(Cnt0, index_size_bytes),
     ok = osiris_log:close(Log0),
     Log1 = osiris_log:init(Conf#{dir => LDir}),
     Cnt1 = osiris_log:counters_ref(Log1),
     ?assertEqual(SegBytes, counter_get(Cnt1, segment_size_bytes)),
-    ?assertEqual(IdxBytes, counter_get(Cnt1, index_size_bytes)),
     ok = osiris_log:close(Log1),
     ok.
 
@@ -276,23 +271,18 @@ size_counters_after_retention_max_bytes(Config) ->
                     EpochChunks, Config),
     Cnt = osiris_log:counters_ref(Log0),
     SegBefore = counter_get(Cnt, segment_size_bytes),
-    IdxBefore = counter_get(Cnt, index_size_bytes),
     ok = osiris_log:close(Log0),
     Log1 = osiris_log:init(Conf#{dir => LDir}),
     Cnt1 = osiris_log:counters_ref(Log1),
     SegInit = counter_get(Cnt1, segment_size_bytes),
-    IdxInit = counter_get(Cnt1, index_size_bytes),
     ?assertEqual(SegBefore, SegInit),
-    ?assertEqual(IdxBefore, IdxInit),
     ok = osiris_log:close(Log1),
-    {_, _, _, {DelSeg, DelIdx}} =
+    #{deleted_segment_bytes := DelSeg} =
         osiris_log:evaluate_retention(LDir, [{max_bytes, 1500 * 100}]),
     ?assert(DelSeg > 0),
-    ?assert(DelIdx > 0),
     Log2 = osiris_log:init(Conf#{dir => LDir}),
     Cnt2 = osiris_log:counters_ref(Log2),
     ?assertEqual(SegInit - DelSeg, counter_get(Cnt2, segment_size_bytes)),
-    ?assertEqual(IdxInit - DelIdx, counter_get(Cnt2, index_size_bytes)),
     ok = osiris_log:close(Log2),
     ok.
 
@@ -310,16 +300,13 @@ size_counters_after_retention_max_age(Config) ->
     Log1 = osiris_log:init(Conf#{dir => LDir}),
     Cnt1 = osiris_log:counters_ref(Log1),
     SegInit = counter_get(Cnt1, segment_size_bytes),
-    IdxInit = counter_get(Cnt1, index_size_bytes),
     ok = osiris_log:close(Log1),
-    {_, _, _, {DelSeg, DelIdx}} =
+    #{deleted_segment_bytes := DelSeg} =
         osiris_log:evaluate_retention(LDir, [{max_bytes, 100000000}, {max_age, 1000}]),
     ?assert(DelSeg > 0),
-    ?assert(DelIdx > 0),
     Log2 = osiris_log:init(Conf#{dir => LDir}),
     Cnt2 = osiris_log:counters_ref(Log2),
     ?assertEqual(SegInit - DelSeg, counter_get(Cnt2, segment_size_bytes)),
-    ?assertEqual(IdxInit - DelIdx, counter_get(Cnt2, index_size_bytes)),
     ok = osiris_log:close(Log2),
     ok.
 
@@ -1766,9 +1753,15 @@ evaluate_retention_max_bytes(Config) ->
     osiris_log:close(Log),
     %% this should delete at least one segment
     Spec = {max_bytes, 1500 * 100},
-    {OffRange, FstTs, NumSeg, _} = osiris_log:evaluate_retention(LDir, [Spec]),
+    #{range := OffRange,
+      first_timestamp := FstTs,
+      num_remaining_segments := NumSeg} =
+        osiris_log:evaluate_retention(LDir, [Spec]),
     %% idempotency check
-    {OffRange, FstTs, NumSeg, _} = osiris_log:evaluate_retention(LDir, [Spec]),
+    #{range := OffRange,
+      first_timestamp := FstTs,
+      num_remaining_segments := NumSeg} =
+        osiris_log:evaluate_retention(LDir, [Spec]),
     SegFiles =
         filelib:wildcard(
             filename:join(LDir, "*.segment")),
@@ -1810,9 +1803,15 @@ evaluate_retention_max_age(Config) ->
     %% this should delete at least one segment as all chunks should be older
     %% than the retention of 1000ms; max_bytes shouldn't affect the result
     Spec = [{max_bytes, 100000000}, {max_age, 1000}],
-    {OffRange, FstTs, NumSeg, _} = osiris_log:evaluate_retention(LDir, Spec),
+    #{range := OffRange,
+      first_timestamp := FstTs,
+      num_remaining_segments := NumSeg} =
+        osiris_log:evaluate_retention(LDir, Spec),
     %% idempotency check: range and segment count must be stable; deleted bytes differ
-    {OffRange, FstTs, NumSeg, _} = osiris_log:evaluate_retention(LDir, Spec),
+    #{range := OffRange,
+      first_timestamp := FstTs,
+      num_remaining_segments := NumSeg} =
+        osiris_log:evaluate_retention(LDir, Spec),
     SegFiles =
         filelib:wildcard(
             filename:join(LDir, "*.segment")),
