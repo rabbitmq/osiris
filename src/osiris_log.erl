@@ -2590,7 +2590,7 @@ max_segment_size_reached(
                                          CurrentSizeChunks}},
            cfg = #cfg{max_segment_size_bytes = MaxSizeBytes,
                       max_segment_size_chunks = MaxSizeChunks}}) ->
-    (CurrentSizeBytes >= MaxSizeBytes andalso MaxSizeBytes > ?LOG_HEADER_SIZE) orelse
+    (CurrentSizeBytes >= MaxSizeBytes andalso CurrentSizeChunks >= 2) orelse
     CurrentSizeChunks >= MaxSizeChunks.
 
 sendfile(_UseSendfile, _Transport, _Fd, _Sock, _Pos, 0) ->
