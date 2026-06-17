@@ -573,6 +573,11 @@ init(#{dir := Dir,
         none ->
             osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
             osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
+            %% When the log starts at a non-zero offset (e.g. after a
+            %% retry_accept_chunk reset), reflect that in the first_offset counter
+            %% so that message-count calculations (last_offset + 1 - first_offset)
+            %% remain correct.
+            counters:put(Cnt, ?C_FIRST_OFFSET, DefaultNextOffset),
             open_new_segment(#?MODULE{cfg = Cfg,
                                       mode =
                                           #write{type = WriterType,
