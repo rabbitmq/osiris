@@ -74,6 +74,9 @@
     {max_bytes, non_neg_integer()} |
     {max_age, milliseconds()} |
     {'fun', retention_fun()}.
+-type retention_update() ::
+    [retention_spec()] |
+    fun(([retention_spec()]) -> [retention_spec()]).
 -type writer_id() :: binary().
 -type batch() :: {batch, NumRecords :: non_neg_integer(),
                   compression_type(),
@@ -96,6 +99,7 @@
               tracking_id/0,
               offset_spec/0,
               retention_spec/0,
+              retention_update/0,
               retention_fun/0,
               timestamp/0,
               writer_id/0,
@@ -275,10 +279,10 @@ register_offset_listener(Pid, Offset, EvtFormatter) ->
     end,
     ok.
 
--spec update_retention(pid(), [osiris:retention_spec()]) ->
+-spec update_retention(pid(), retention_update()) ->
     ok | {error, term()}.
 update_retention(Pid, Retention)
-    when is_pid(Pid) andalso is_list(Retention) ->
+    when is_pid(Pid) andalso (is_list(Retention) orelse is_function(Retention, 1)) ->
     Msg = {update_retention, Retention},
     try
         case gen:call(Pid, '$gen_call', Msg) of

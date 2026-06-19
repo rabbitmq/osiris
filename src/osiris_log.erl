@@ -2272,23 +2272,29 @@ format_status(#?MODULE{cfg = #cfg{directory = Dir,
       filter_size => FilterSize,
       file => filename:basename(File)}.
 
--spec update_retention([retention_spec()], state()) -> state().
-update_retention(Retention0,
+-spec update_retention(osiris:retention_update(), state()) -> state().
+update_retention(RetentionOrFun,
                  #?MODULE{cfg = #cfg{name = Name,
                                      directory = Dir,
                                      counter = Cnt,
                                      shared = Shared,
                                      retention = RetentionPrev} = Cfg} = State0)
-    when is_list(Retention0) ->
+    when is_list(RetentionOrFun) orelse is_function(RetentionOrFun, 1) ->
+    Retention1 = case RetentionOrFun of
+                     Fun when is_function(Fun, 1) ->
+                         Fun(RetentionPrev);
+                     List ->
+                         List
+                 end,
     Retention = case application:get_env(osiris, log_hooks) of
                     {ok, HookMod} ->
-                        HookMod:on_retention_updated(Retention0,
+                        HookMod:on_retention_updated(Retention1,
                                                      #{name => Name,
                                                        dir => Dir,
                                                        counter => Cnt,
                                                        shared => Shared});
                     undefined ->
-                        Retention0
+                        Retention1
                 end,
     ?DEBUG_(Name, " from: ~w to ~w", [RetentionPrev, Retention]),
     State = State0#?MODULE{cfg = Cfg#cfg{retention = Retention}},
