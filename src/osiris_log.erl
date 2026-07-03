@@ -931,10 +931,9 @@ chunk_id_index_scan0(Fd, ChunkId) ->
 delete_segment_from_index(Index) ->
     File = segment_from_index_file(Index),
     ?DEBUG("osiris_log: deleting segment ~ts", [File]),
-    SegSize = file_size_or_zero(File),
     ok = prim_file:delete(Index),
     ok = prim_file:delete(File),
-    SegSize.
+    ok.
 
 truncate_to(_Name, _Range, _EpochOffsets, []) ->
     %% the target log is empty
@@ -2308,7 +2307,8 @@ eval_age([IdxFile | IdxFiles] = AllIdxFiles, Age, Acc) ->
                     %% the oldest timestamp is older than retention
                     %% and there are other segments available
                     %% we can delete
-                    SegSize = delete_segment_from_index(IdxFile),
+                    SegSize = file_size_or_zero(segment_from_index_file(IdxFile)),
+                    ok = delete_segment_from_index(IdxFile),
                     eval_age(IdxFiles, Age, Acc + SegSize);
                 false ->
                     {AllIdxFiles, Acc}
@@ -2341,8 +2341,9 @@ eval_max_bytes([IdxFile | Rest], Limit, Acc, AccSeg) ->
         true ->
             eval_max_bytes(Rest, Limit - Size, [IdxFile | Acc], AccSeg);
         false ->
-            Total = lists:foldl(fun(Seg, S) ->
-                                        S + delete_segment_from_index(Seg)
+            Total = lists:foldl(fun(_, S) ->
+                                        _ = delete_segment_from_index(IdxFile),
+                                        S + Size
                                 end,
                                 AccSeg,
                                 [IdxFile | Rest]),
