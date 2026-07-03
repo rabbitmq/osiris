@@ -560,6 +560,8 @@ init(#{dir := Dir,
                shared = Shared,
                filter_size = FilterSize},
     ok = maybe_fix_corrupted_files(Config),
+    IndexFiles = sorted_index_files(Config),
+    Config0 = Config#{index_files => IndexFiles},
     DefaultNextOffset = case Config of
                             #{initial_offset := IO}
                               when WriterType == acceptor ->
@@ -567,7 +569,7 @@ init(#{dir := Dir,
                             _ ->
                                 0
                         end,
-    case first_and_last_seginfos(Config) of
+    case first_and_last_seginfos(Config0) of
         none ->
             osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
             osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
@@ -614,7 +616,7 @@ init(#{dir := Dir,
             %% at a valid chunk we can now truncate the segment to size in
             %% case there is trailing data
             ok = file:truncate(SegFd),
-            InitSegBytes = sum_log_sizes(Config),
+            InitSegBytes = sum_log_sizes(IndexFiles),
             counters:put(Cnt, ?C_SEGMENT_SIZE_BYTES, InitSegBytes),
             {ok, IdxFd} = open(IdxFilename, ?FILE_OPTS_WRITE),
             {ok, IdxEof} = file:position(IdxFd, eof),
@@ -2003,9 +2005,7 @@ orphaned_segments([_Unexpected | Rem], Acc) ->
     orphaned_segments(Rem, Acc).
 
 first_and_last_seginfos(#{index_files := IdxFiles}) ->
-    first_and_last_seginfos0(IdxFiles);
-first_and_last_seginfos(#{dir := Dir}) ->
-    first_and_last_seginfos0(sorted_index_files(Dir)).
+    first_and_last_seginfos0(IdxFiles).
 
 first_and_last_seginfos0([]) ->
     none;
@@ -2349,11 +2349,7 @@ eval_max_bytes([IdxFile | Rest], Limit, Acc, AccSeg) ->
             {Acc, Total}
     end.
 
-sum_log_sizes(Config) ->
-    IdxFiles = case Config of
-                   #{index_files := F} -> F;
-                   #{dir := Dir} -> sorted_index_files(Dir)
-               end,
+sum_log_sizes(IdxFiles) ->
     lists:foldl(
       fun(IdxFile, SegAcc) ->
               SegFile = segment_from_index_file(IdxFile),
