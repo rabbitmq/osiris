@@ -293,7 +293,7 @@ handle_info({'EXIT', Ref, Info}, #state{name = Name} = State) ->
            [Ref, Info]),
     {stop, normal, State};
 handle_info(Info, #state{name = Name} = State) ->
-    ?DEBUG_(Name, "'~ts' unhandled message ~W",
+    ?DEBUG_(Name, "unhandled message ~W",
            [Info, 10]),
     {noreply, State}.
 
