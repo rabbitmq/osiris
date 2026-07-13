@@ -12,6 +12,7 @@
 -include("osiris.hrl").
 
 -define(DEF_SND_BUF, 146988 * 10).
+-define(RETRY_COMMITTED_OFFSET_MS, 50).
 %% replica reader, spawned remotely by replica process, connects back to
 %% configured host/port, reads entries from master and uses file:sendfile to
 %% replicate read records
@@ -42,7 +43,8 @@
          counter_id :: term(),
          committed_offset = -1 :: -1 | osiris:offset(),
          offset_listener :: undefined | osiris:offset(),
-         committed_offset_calculate :: boolean()}).
+         committed_offset_calculate :: boolean(),
+         retry_timer = undefined :: undefined | reference()}).
 
 -define(C_OFFSET_LISTENERS, ?C_NUM_LOG_FIELDS + 1).
 -define(COUNTER_FIELDS,
@@ -250,6 +252,13 @@ handle_info({osiris_offset, _, _Offs}, State0) ->
         maybe_register_offset_listener(State1#state{offset_listener =
                                                         undefined}),
     {noreply, State};
+handle_info({timeout, TRef, retry_committed_offset},
+            #state{retry_timer = TRef} = State0) ->
+    State = maybe_send_committed_chunk_id(State0#state{retry_timer = undefined}),
+    {noreply, State};
+handle_info({timeout, _OldTRef, retry_committed_offset}, State) ->
+    %% Stale timer ref, ignore.
+    {noreply, State};
 handle_info({'DOWN', Ref, _, _, Info},
             #state{name = Name,
                    transport = Transport,
@@ -352,6 +361,7 @@ do_sendfile0(#state{name = Name,
     end.
 
 maybe_send_committed_chunk_id(#state{log = Log,
+                                     name = Name,
                                      committed_offset = Last,
                                      replica_pid = RPid} =
                               State) ->
@@ -366,12 +376,34 @@ maybe_send_committed_chunk_id(#state{log = Log,
                           COffs
                   end,
 
-            ok = erlang:send(RPid, {'$gen_cast', {committed_offset, Msg}},
-                             [noconnect, nosuspend]),
-            State#state{committed_offset = COffs};
+            case erlang:send(RPid, {'$gen_cast', {committed_offset, Msg}},
+                                   [noconnect, nosuspend]) of
+                ok ->
+                    cancel_retry_timer(State#state{committed_offset = COffs});
+                Reason ->
+                    %% Cast couldn't be delivered. We will try again soon if
+                    %% there is an 'osiris_offset' or 'more_data' message, or
+                    %% on a timer (as a backstop, in case neither arrives).
+                    ?DEBUG_(Name, "failed to send committed_offset to ~w, "
+                            "reason: ~w, scheduling retry", [RPid, Reason]),
+                    set_retry_timer(State)
+            end;
         _ ->
             State
     end.
+
+set_retry_timer(#state{retry_timer = undefined} = State) ->
+    TRef = erlang:start_timer(?RETRY_COMMITTED_OFFSET_MS, self(),
+                              retry_committed_offset),
+    State#state{retry_timer = TRef};
+set_retry_timer(State) ->
+    State.
+
+cancel_retry_timer(#state{retry_timer = undefined} = State) ->
+    State;
+cancel_retry_timer(#state{retry_timer = TRef} = State) ->
+    _ = erlang:cancel_timer(TRef),
+    State#state{retry_timer = undefined}.
 
 formatter(Evt) ->
     Evt.
