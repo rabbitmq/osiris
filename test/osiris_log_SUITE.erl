@@ -40,6 +40,7 @@ all_tests() ->
      size_counters_after_retention_max_bytes,
      size_counters_after_retention_max_age,
      write_batch,
+     write_first_chunk_updates_first_timestamp,
      write_with_filter_attach_next,
      write_batch_with_filter,
      write_batch_with_filters_variable_size,
@@ -316,6 +317,15 @@ write_batch(Config) ->
     ?assertEqual(0, osiris_log:next_offset(S0)),
     S1 = osiris_log:write([<<"hi">>], S0),
     ?assertEqual(1, osiris_log:next_offset(S1)),
+    ok.
+
+write_first_chunk_updates_first_timestamp(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf),
+    ?assertEqual(0, osiris_log:first_timestamp(S0)),
+    Ts = 424242,
+    S1 = osiris_log:write([<<"hi">>], ?CHNK_USER, Ts, <<>>, S0),
+    ?assertEqual(Ts, osiris_log:first_timestamp(S1)),
     ok.
 
 write_with_filter_attach_next(Config) ->

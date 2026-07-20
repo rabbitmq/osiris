@@ -2660,7 +2660,7 @@ write_chunk(Chunk,
             counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
             counters:add(CntRef, ?C_CHUNKS, 1),
             counters:add(CntRef, ?C_SEGMENT_SIZE_BYTES, Size),
-            maybe_set_first_offset(Next, Cfg),
+            maybe_set_first_offset(Next, Timestamp, Cfg),
             State#?MODULE{mode =
                           Write#write{tail_info = {NextOffset,
                                                    {Epoch, Next, Timestamp}},
@@ -2669,9 +2669,11 @@ write_chunk(Chunk,
     end.
 
 
-maybe_set_first_offset(0, #cfg{shared = Ref}) ->
+maybe_set_first_offset(0, Timestamp, #cfg{shared = Ref, counter = CntRef}) ->
+    counters:put(CntRef, ?C_FIRST_OFFSET, 0),
+    counters:put(CntRef, ?C_FIRST_TIMESTAMP, Timestamp),
     osiris_log_shared:set_first_chunk_id(Ref, 0);
-maybe_set_first_offset(_, _Cfg) ->
+maybe_set_first_offset(_, _Timestamp, _Cfg) ->
     ok.
 
 max_segment_size_reached(
