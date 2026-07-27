@@ -2345,9 +2345,11 @@ eval_max_bytes([IdxFile | Rest], Limit, Acc, AccSeg) ->
         true ->
             eval_max_bytes(Rest, Limit - Size, [IdxFile | Acc], AccSeg);
         false ->
-            Total = lists:foldl(fun(_, S) ->
-                                        _ = delete_segment_from_index(IdxFile),
-                                        S + Size
+            Total = lists:foldl(fun(Seg, S) ->
+                                        SegSize = file_size_or_zero(
+                                                    segment_from_index_file(Seg)),
+                                        _ = delete_segment_from_index(Seg),
+                                        S + SegSize
                                 end,
                                 AccSeg,
                                 [IdxFile | Rest]),
