@@ -451,7 +451,7 @@ handle_cast({committed_offset, {CommittedChId, LastOffset}},
              notify_offset_listeners(
                State#?MODULE{committed_chunk_id = CommittedChId})};
         false ->
-            State
+            {noreply, State}
     end;
 handle_cast({committed_offset, CommittedChId}, State) ->
     handle_cast({committed_offset, {CommittedChId, -1}}, State);
