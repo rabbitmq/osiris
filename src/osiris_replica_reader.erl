@@ -329,7 +329,7 @@ code_change(_OldVsn, State, _Extra) ->
 
 do_sendfile(#state{socket = Sock,
                    transport = Transport} = State) ->
-    ok = setopts(Transport, Sock, [{nopush, true}]),
+    _ = setopts(Transport, Sock, [{nopush, true}]),
     do_sendfile0(State).
 
 do_sendfile0(#state{name = Name,
@@ -347,7 +347,7 @@ do_sendfile0(#state{name = Name,
             ?DEBUG_(Name, "sendfile err ~w", [_Err]),
             State;
         {end_of_stream, Log} ->
-            ok = setopts(Transport, Sock, [{nopush, false}]),
+            _ = setopts(Transport, Sock, [{nopush, false}]),
             State#state{log = Log}
     end.
 
