@@ -366,8 +366,7 @@ maybe_send_committed_chunk_id(#state{log = Log,
                           COffs
                   end,
 
-            ok = erlang:send(RPid, {'$gen_cast', {committed_offset, Msg}},
-                             [noconnect, nosuspend]),
+            _ = erlang:send(RPid, {'$gen_cast', {committed_offset, Msg}}),
             State#state{committed_offset = COffs};
         _ ->
             State
