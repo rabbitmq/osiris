@@ -81,7 +81,7 @@ start(Node, ReplicaReaderConf) when is_map(ReplicaReaderConf) ->
                                  %% instead they need to be re-started
                                  %% by their replica
                                  restart => temporary,
-                                 shutdown => 5000,
+                                 shutdown => 100,
                                  type => worker,
                                  modules => [osiris_replica_reader]})
     catch
