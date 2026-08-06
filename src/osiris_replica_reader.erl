@@ -81,7 +81,7 @@ start(Node, ReplicaReaderConf) when is_map(ReplicaReaderConf) ->
                                  %% instead they need to be re-started
                                  %% by their replica
                                  restart => temporary,
-                                 shutdown => 5000,
+                                 shutdown => 100,
                                  type => worker,
                                  modules => [osiris_replica_reader]})
     catch
@@ -366,8 +366,7 @@ maybe_send_committed_chunk_id(#state{log = Log,
                           COffs
                   end,
 
-            ok = erlang:send(RPid, {'$gen_cast', {committed_offset, Msg}},
-                             [noconnect, nosuspend]),
+            _ = erlang:send(RPid, {'$gen_cast', {committed_offset, Msg}}),
             State#state{committed_offset = COffs};
         _ ->
             State
