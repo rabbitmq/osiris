@@ -2655,7 +2655,20 @@ max_segment_size_reached(
 sendfile(_UseSendfile, _Transport, _Fd, _Sock, _Pos, 0) ->
     ok;
 sendfile(true, Transport, Fd, Sock, Pos, ToSend) ->
-    case file:sendfile(Fd, Sock, Pos, ToSend, []) of
+    %% file:sendfile/5 can raise (not just return {error, _}) on a peer socket
+    %% close that races the send. prim_inet:sendfile/4 checks the port is still
+    %% connected, then calls sendfile_maybe_cork/1 -> getprotocol/1, which does
+    %% `{name,Drv} = erlang:port_info(S, name)`. If the peer closes the port in
+    %% between, port_info/2 returns `undefined` and that match raises
+    %% `{badmatch,undefined}`. (A fully-closed socket instead fails the earlier
+    %% connected check and returns {error, einval}; only the race raises.) An
+    %% uncaught exception here would terminate the replica reader with a noisy
+    %% crash report, so map that specific badmatch to the {error, _} the caller
+    %% already handles gracefully. Any other exception is a real fault and is
+    %% left to propagate. The underlying getprotocol/1 badmatch is an OTP bug
+    %% (see rabbitmq/osiris#230) that will be investigated and patched upstream;
+    %% this guard is defence-in-depth for current OTP releases.
+    try file:sendfile(Fd, Sock, Pos, ToSend, []) of
         {ok, 0} ->
             %% TODO add counter for this?
             sendfile(true, Transport, Fd, Sock, Pos, ToSend);
@@ -2663,6 +2676,9 @@ sendfile(true, Transport, Fd, Sock, Pos, ToSend) ->
             sendfile(true, Transport, Fd, Sock, Pos + BytesSent, ToSend - BytesSent);
         {error, _} = Err ->
             Err
+    catch
+        error:{badmatch, _} = Reason ->
+            {error, {sendfile, Reason}}
     end;
 sendfile(false, Transport, Fd, Sock, Pos, ToSend) ->
     case file:pread(Fd, Pos, ToSend) of
