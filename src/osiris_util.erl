@@ -19,6 +19,7 @@
          get_replication_configuration_from_tls_dist/1,
          get_replication_configuration_from_tls_dist/2,
          get_replica_listener_inet_address_family/0,
+         optional_socket_opt/2,
          partition_parallel/3,
          normalise_name/1,
          get_reader_context/1,
@@ -246,6 +247,15 @@ get_replica_listener_inet_address_family() ->
         inet  -> inet;
         inet6 -> inet6;
         _     -> inet
+    end.
+
+-spec optional_socket_opt(atom(), atom()) -> [{atom(), pos_integer()}].
+optional_socket_opt(Opt, Key) ->
+    case application:get_env(osiris, Key) of
+        {ok, Value} when is_integer(Value) andalso Value > 0 ->
+            [{Opt, Value}];
+        _ ->
+            []
     end.
 
 inet_tls_enabled([]) ->

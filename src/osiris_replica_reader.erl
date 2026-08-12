@@ -11,7 +11,6 @@
 
 -include("osiris.hrl").
 
--define(DEF_SND_BUF, 146988 * 10).
 %% replica reader, spawned remotely by replica process, connects back to
 %% configured host/port, reads entries from master and uses file:sendfile to
 %% replicate read records
@@ -386,15 +385,14 @@ close(ssl, Socket) ->
     ssl:close(Socket).
 
 connect_options() ->
-    SndBuf = application:get_env(osiris, replica_sndbuf, ?DEF_SND_BUF),
     KeepAlive = application:get_env(osiris, replica_keepalive, false),
     IPAddrFamily = osiris_util:get_replica_listener_inet_address_family(),
     [binary,
      IPAddrFamily,
      {packet, 0},
      {nodelay, true},
-     {sndbuf, SndBuf},
-     {keepalive, KeepAlive}].
+     {keepalive, KeepAlive}]
+    ++ osiris_util:optional_socket_opt(sndbuf, replica_sndbuf).
 
 setopts(tcp, Sock, Opts) ->
     inet:setopts(Sock, Opts);
