@@ -230,26 +230,51 @@ init_reader(Pid, OffsetSpec, CounterSpec) ->
 -spec init_reader(pid(), offset_spec(), osiris_log:counter_spec(),
                   reader_options()) ->
     {ok, osiris_log:state()} |
+    {error, no_process} |
     {error, {offset_out_of_range, empty | {offset(), offset()}}} |
     {error, {invalid_last_offset_epoch, offset(), offset()}}.
 init_reader(Pid, OffsetSpec, {_, _} = CounterSpec, Options)
     when is_pid(Pid) andalso node(Pid) =:= node() ->
     ?DEBUG("osiris: initialising reader. Spec: ~w", [OffsetSpec]),
-    Ctx0 = osiris_util:get_reader_context(Pid),
-    Ctx = Ctx0#{counter_spec => CounterSpec,
-                options => Options},
-    osiris_log:init_offset_reader(OffsetSpec, Ctx).
+    case reader_context(Pid) of
+        {error, no_process} = Err ->
+            Err;
+        Ctx0 ->
+            Ctx = Ctx0#{counter_spec => CounterSpec,
+                        options => Options},
+            osiris_log:init_offset_reader(OffsetSpec, Ctx)
+    end.
 
 -spec resolve_offset_spec(pid(), offset_spec(), reader_options()) ->
     {ok, offset()} |
+    {error, no_process} |
     {error, no_index_file} |
     {error, {offset_out_of_range, osiris_log:range()}} |
     {error, retries_exhausted}.
 resolve_offset_spec(Pid, OffsetSpec, Options)
     when is_pid(Pid) andalso node(Pid) =:= node() ->
-    Ctx0 = osiris_util:get_reader_context(Pid),
-    Ctx = Ctx0#{options => Options},
-    osiris_log:resolve_offset_spec(OffsetSpec, Ctx).
+    case reader_context(Pid) of
+        {error, no_process} = Err ->
+            Err;
+        Ctx0 ->
+            Ctx = Ctx0#{options => Options},
+            osiris_log:resolve_offset_spec(OffsetSpec, Ctx)
+    end.
+
+%% osiris_util:get_reader_context/1 does a gen:call to the member process, which
+%% exits with noproc if that process has gone (e.g. a retention resync restarted
+%% it in the same instant a consumer subscribes or resolves an offset). Convert
+%% that exit into {error, no_process}, the shape reader callers already handle,
+%% rather than letting it crash the caller.
+reader_context(Pid) ->
+    try
+        osiris_util:get_reader_context(Pid)
+    catch
+        exit:noproc ->
+            {error, no_process};
+        exit:{noproc, _} ->
+            {error, no_process}
+    end.
 
 -spec register_offset_listener(pid(), offset()) -> ok.
 register_offset_listener(Pid, Offset) ->
