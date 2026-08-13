@@ -26,6 +26,7 @@
          read_tracking/1,
          query_writers/2,
          query_replication_state/1,
+         replica_staleness/1,
          init_fields_spec/0,
          init/1,
          handle_continue/2,
@@ -198,6 +199,25 @@ query_writers(Pid, QueryFun) ->
 
 query_replication_state(Pid) when is_pid(Pid) ->
     gen_batch_server:call(Pid, query_replication_state).
+
+%% Reads the writer's `replica_staleness' gauge (in milliseconds) from the
+%% writer's counters.
+-spec replica_staleness(pid()) -> non_neg_integer() | undefined.
+replica_staleness(Pid) when node(Pid) == node() ->
+    try osiris_util:get_reader_context(Pid) of
+        #{reference := Ref} ->
+            case osiris_counters:counters({?MODULE, Ref}, [replica_staleness]) of
+                #{replica_staleness := V} ->
+                    V;
+                undefined ->
+                    undefined
+            end
+    catch
+        _:_ ->
+            undefined
+    end;
+replica_staleness(Pid) ->
+    erpc:call(node(Pid), ?MODULE, replica_staleness, [Pid]).
 
 init_fields_spec() ->
     persistent_term:put(?FIELDSPEC_KEY,
