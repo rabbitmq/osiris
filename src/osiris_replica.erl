@@ -102,7 +102,7 @@ start(Node, Config = #{name := Name}) when ?IS_STRING(Name) ->
                                 #{id => Name,
                                   start => {?MODULE, start_link, [Config]},
                                   restart => temporary,
-                                  shutdown => 5000,
+                                  shutdown => 1000,
                                   type => worker,
                                   modules => [?MODULE]}) of
         {ok, Pid} = Res ->
@@ -513,7 +513,7 @@ handle_info({socket, Socket}, #?MODULE{cfg = #cfg{name = Name,
     case recv(Transport, Socket, ?TOKEN_SIZE, Timeout) of
         {ok, Token} ->
             %% token validated, all good we can let the flood of data begin
-            ok = setopts(Transport, Socket, [{active, 5}]),
+            ok = setopts(Transport, Socket, [{active, 2}]),
             {noreply, State#?MODULE{cfg = Cfg#cfg{socket = Socket}}};
         {ok, Other} ->
             ?WARN_(Name, "invalid token received ~w expected ~w",
