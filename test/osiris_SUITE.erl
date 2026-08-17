@@ -917,6 +917,9 @@ cluster_restart_new_leader(Config) ->
     timer:sleep(1000),
 
     ok = validate_log(Leader1, [{0, <<"before-restart">>}]),
+    %% the new leader has to recover the writer sequence from its own log,
+    %% else already written messages could be written a second time
+    ?assertEqual(42, osiris:fetch_writer_seq(Leader1, WriterId)),
 
     ok = osiris:write(Leader1, WriterId, 43, <<"after-restart">>),
     receive

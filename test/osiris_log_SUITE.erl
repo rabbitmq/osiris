@@ -92,6 +92,7 @@ all_tests() ->
      evaluate_retention_max_age_empty,
      offset_tracking,
      offset_tracking_snapshot,
+     tracking_snapshot_not_ahead_of_log,
      many_segment_overview,
      small_chunk_overview,
      overview,
@@ -1766,20 +1767,26 @@ offset_tracking_snapshot(Config) ->
          || _ <- lists:seq(1, 20)],
     S00 = osiris_log:init(Conf),
 
-    T0 = osiris_tracking:add(<<"wid1">>, sequence, 2, 0,
-           osiris_tracking:add(<<"id1">>, offset, 1, undefined,
-                             osiris_tracking:init(undefined, #{}))),
     S0 = osiris_log:write([<<"hi">>],
                           ?CHNK_USER,
                           ?LINE,
                           make_trailer(sequence, <<"wid1">>, 2),
                           S00),
-    %% write a tracking entry
-    S1 = osiris_log:write([],
+    %% write a tracking entry, the way osiris_writer:handle_batch/2 does for a
+    %% batch that contains tracking only: as the chunk's single entry
+    S1 = osiris_log:write([make_trailer(offset, <<"id1">>, 1)],
                           ?CHNK_TRK_DELTA,
                           ?LINE,
-                          make_trailer(offset, <<"id1">>, 1),
+                          <<>>,
                           S0),
+    %% the tracking state has to reflect that both entries are in the log
+    %% already: tracking that is not in the log yet is deliberately left out of
+    %% a snapshot, see osiris_tracking:snapshot/3
+    T0 = osiris_tracking:append_trailer(
+           1, make_trailer(offset, <<"id1">>, 1),
+           osiris_tracking:append_trailer(
+             0, make_trailer(sequence, <<"wid1">>, 2),
+             osiris_tracking:init(undefined, #{}))),
     %% this should create at least two segments
     {_, S2} = seed_log(Conf, S1, EpochChunks, Config, T0),
     osiris_log:close(S2),
@@ -1790,6 +1797,66 @@ offset_tracking_snapshot(Config) ->
                  osiris_tracking:overview(T)),
     osiris_log:close(S3),
     ok.
+
+tracking_snapshot_not_ahead_of_log(Config) ->
+    %% A tracking snapshot is written when a segment rolls over, i.e. _before_
+    %% the chunk carrying the tracking deltas of the batch that triggered the
+    %% rollover. It must therefore not contain any tracking of that batch:
+    %% a node crashing in between the two chunk writes would otherwise recover
+    %% a writer sequence for a message that never made it into the log, and
+    %% every attempt to write that message again would be rejected as a
+    %% duplicate, silently losing it.
+    Conf0 = ?config(osiris_conf, Config),
+    Conf = Conf0#{max_segment_size_bytes => 2000},
+    Data = crypto:strong_rand_bytes(500),
+    Trk0 = osiris_tracking:init(undefined, #{}),
+    %% write single entry batches until one of them rolls the segment over,
+    %% stopping right after the tracking snapshot chunk was written
+    {LastSeqInLog, Log0, Trk1} =
+        write_until_tracking_snapshot(Data, 1, osiris_log:init(Conf), Trk0),
+    ok = osiris_log:close(Log0),
+
+    %% recovery must not report a sequence that is ahead of the log
+    Log1 = osiris_log:init(Conf),
+    Recovered1 = osiris_log:recover_tracking(Log1),
+    ok = osiris_log:close(Log1),
+    ?assertMatch(#{sequences := #{<<"wid1">> := {_, LastSeqInLog}}},
+                 osiris_tracking:overview(Recovered1)),
+
+    %% the interrupted batch still has to have its tracking delta pending, so
+    %% that it is written into the trailer of its own chunk
+    {TrkData, _Trk2} = osiris_tracking:flush(Trk1),
+    ?assertNotEqual([], TrkData),
+    Log2 = osiris_log:write([Data], ?CHNK_USER, now_ms(), TrkData,
+                            osiris_log:init(Conf)),
+    ok = osiris_log:close(Log2),
+    Log3 = osiris_log:init(Conf),
+    Recovered2 = osiris_log:recover_tracking(Log3),
+    ok = osiris_log:close(Log3),
+    NextSeq = LastSeqInLog + 1,
+    ?assertMatch(#{sequences := #{<<"wid1">> := {_, NextSeq}}},
+                 osiris_tracking:overview(Recovered2)),
+    ok.
+
+%% Writes single entry batches the way osiris_writer:handle_batch/2 does and
+%% returns as soon as a batch has written a tracking snapshot, i.e. before that
+%% batch's own chunk is written. Returns the last sequence that is in the log,
+%% the log and the tracking state at that point.
+write_until_tracking_snapshot(Data, Seq, Log0, Trk0) when Seq < 100 ->
+    ChId = osiris_log:next_offset(Log0),
+    Trk1 = osiris_tracking:add(<<"wid1">>, sequence, Seq, ChId, Trk0),
+    {Log1, Trk2} = osiris_log:evaluate_tracking_snapshot(Log0, Trk1),
+    case osiris_log:next_offset(Log1) of
+        ChId ->
+            %% no snapshot was written, complete the batch
+            {TrkData, Trk3} = osiris_tracking:flush(Trk2),
+            Log2 = osiris_log:write([Data], ?CHNK_USER, now_ms(), TrkData, Log1),
+            write_until_tracking_snapshot(Data, Seq + 1, Log2, Trk3);
+        _ ->
+            {Seq - 1, Log1, Trk2}
+    end;
+write_until_tracking_snapshot(_Data, Seq, _Log, _Trk) ->
+    ct:fail("no tracking snapshot was written within ~b batches", [Seq]).
 
 small_chunk_overview(Config) ->
     Data = crypto:strong_rand_bytes(1000),
