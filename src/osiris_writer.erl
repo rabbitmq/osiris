@@ -26,6 +26,7 @@
          read_tracking/1,
          query_writers/2,
          query_replication_state/1,
+         replica_staleness/1,
          init_fields_spec/0,
          init/1,
          handle_continue/2,
@@ -44,12 +45,18 @@
 -define(C_READERS, ?C_NUM_LOG_FIELDS + 2).
 -define(C_EPOCH, ?C_NUM_LOG_FIELDS + 3).
 -define(C_COMMITTED_CHUNK_ID, ?C_NUM_LOG_FIELDS + 4).
+-define(C_REPLICA_STALENESS, ?C_NUM_LOG_FIELDS + 5).
+-define(C_REPLICATION_BACKLOG, ?C_NUM_LOG_FIELDS + 6).
 -define(ADD_COUNTER_FIELDS,
         [
          {committed_offset, ?C_COMMITTED_OFFSET, counter, "Last committed offset"},
          {readers, ?C_READERS, counter, "Number of readers"},
          {epoch, ?C_EPOCH, counter, "Current epoch"},
-         {committed_chunk_id, ?C_COMMITTED_CHUNK_ID, counter, "Last committed chunk ID"}
+         {committed_chunk_id, ?C_COMMITTED_CHUNK_ID, counter, "Last committed chunk ID"},
+         {replica_staleness, ?C_REPLICA_STALENESS, gauge,
+          "Timestamp difference between last chunk written and oldest last chunk of any replica"},
+         {replication_backlog, ?C_REPLICATION_BACKLOG, gauge,
+          "Number of offsets written but not yet confirmed, summed over all replicas"}
         ]
        ).
 -define(FIELDSPEC_KEY, osiris_writer_seshat_fields_spec).
@@ -65,7 +72,12 @@
          replicas = [] :: [node()],
          directory :: file:filename_all(),
          counter :: counters:counters_ref(),
-         event_formatter :: undefined | mfa()}).
+         event_formatter :: undefined | mfa(),
+         %% The next offset of the log when the writer started. The replication
+         %% backlog of a replica which has not acked yet is measured from this
+         %% point rather than from the start of the stream, so that the metric
+         %% begins at zero instead of the full extent of the stream.
+         init_offset :: osiris:offset()}).
 -record(?MODULE,
         {cfg :: #cfg{},
          log :: osiris_log:state(),
@@ -188,6 +200,25 @@ query_writers(Pid, QueryFun) ->
 query_replication_state(Pid) when is_pid(Pid) ->
     gen_batch_server:call(Pid, query_replication_state).
 
+%% Reads the writer's `replica_staleness' gauge (in milliseconds) from the
+%% writer's counters.
+-spec replica_staleness(pid()) -> non_neg_integer() | undefined.
+replica_staleness(Pid) when node(Pid) == node() ->
+    try osiris_util:get_reader_context(Pid) of
+        #{reference := Ref} ->
+            case osiris_counters:counters({?MODULE, Ref}, [replica_staleness]) of
+                #{replica_staleness := V} ->
+                    V;
+                undefined ->
+                    undefined
+            end
+    catch
+        _:_ ->
+            undefined
+    end;
+replica_staleness(Pid) ->
+    erpc:call(node(Pid), ?MODULE, replica_staleness, [Pid]).
+
 init_fields_spec() ->
     persistent_term:put(?FIELDSPEC_KEY,
                         osiris_log:counter_fields() ++ ?ADD_COUNTER_FIELDS).
@@ -259,7 +290,8 @@ handle_continue(#{name := Name,
                        event_formatter = EvtFmt,
                        replicas = Replicas,
                        directory = Dir,
-                       counter = CntRef},
+                       counter = CntRef,
+                       init_offset = osiris_log:next_offset(Log)},
               committed_chunk_id = LastChunkId,
               replica_state = maps:from_list([{R, {0, {0, -1, 0}}} || R <- Replicas]),
               log = Log,
@@ -304,6 +336,7 @@ handle_batch(Commands,
             TailInfo =
                 case osiris_log:tail_info(State2#?MODULE.log) of
                     ?TAIL_INFO(_) = TI ->
+                        ok = update_replication_counters(TI, State2),
                         TI;
                     _ ->
                         {-1, {-1, -1, 0}}
@@ -380,6 +413,35 @@ update_pending(BatchOffs, Corrs,
             State#?MODULE{pending_corrs =
                               queue:in({BatchOffs, Corrs}, Pending0)}
     end.
+
+-spec update_replication_counters(osiris:tail_info(), state()) -> ok.
+update_replication_counters({NextOffset, {_, _, TailTs}},
+                            #?MODULE{cfg = #cfg{counter = Cnt,
+                                                init_offset = InitOffs},
+                                     replica_state = ReplicaState}) ->
+    {MaxTs, MinTs, Backlog} =
+        maps:fold(fun(_, {ReplNextOffs, {_, ChId, ReplTs}},
+                      {Max, Min, Sum}) ->
+                          {Offs, Ts} =
+                              case ChId < 0 of
+                                  true ->
+                                      {InitOffs, TailTs};
+                                  false ->
+                                      %% replicas which do not calculate the
+                                      %% committed offset ack without a next
+                                      %% offset. A chunk ID is the offset of
+                                      %% the chunk's first record and so is a
+                                      %% close under-estimate of the next
+                                      %% offset.
+                                      {max(ReplNextOffs, ChId), ReplTs}
+                              end,
+                          {max(Ts, Max),
+                           min(Ts, Min),
+                           Sum + max(0, NextOffset - Offs)}
+                  end, {TailTs, TailTs, 0}, ReplicaState),
+    counters:put(Cnt, ?C_REPLICA_STALENESS, MaxTs - MinTs),
+    counters:put(Cnt, ?C_REPLICATION_BACKLOG, Backlog),
+    ok.
 
 put_writer(undefined, _ChId, _Corr, Trk) ->
     Trk;
