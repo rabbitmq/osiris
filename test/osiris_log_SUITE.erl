@@ -124,7 +124,9 @@ all_tests() ->
      samples_over_three_index_files,
      samples_over_more_than_five_segments,
      samples_over_boundaries,
-     samples_fail_with_io_error
+     samples_fail_with_io_error,
+     write_with_small_max_segment_size,
+     write_with_small_max_segment_size_and_tracking
     ].
 
 groups() ->
@@ -2504,6 +2506,43 @@ samples_fail_with_io_error_unix(Config) ->
     after
         application:unset_env(osiris, max_segment_size_chunks)
     end.
+
+write_with_small_max_segment_size(Config) ->
+    %% When max_segment_size_bytes is <= LOG_HEADER_SIZE (8 bytes),
+    %% the bytes-based segment roll is effectively disabled. The write
+    %% must still succeed (all data lands in one segment).
+    %% Previously this caused an infinite loop in write_chunk.
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf#{max_segment_size_bytes => 1}),
+    S1 = osiris_log:write([<<"hello">>], S0),
+    ?assertEqual(1, osiris_log:next_offset(S1)),
+    S2 = osiris_log:write([<<"world">>], S1),
+    ?assertEqual(2, osiris_log:next_offset(S2)),
+    osiris_log:close(S2),
+    ok.
+
+write_with_small_max_segment_size_and_tracking(Config) ->
+    %% A segment must be able to hold at least a tracking snapshot + 1 user
+    %% chunk.
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf#{max_segment_size_bytes => 100}),
+    S1 = osiris_log:write([<<"first">>], S0),
+    S2 = osiris_log:write([<<"second">>], S1),
+    Trk0 = osiris_tracking:init(undefined, #{}),
+    Trk1 = osiris_tracking:add(<<"consumer1">>, offset, 0, undefined, Trk0),
+
+    SegBefore = osiris_log:get_current_file(S2),
+    {S3, _Trk2} = osiris_log:evaluate_tracking_snapshot(S2, Trk1),
+    S4 = osiris_log:write([<<"third">>], S3),
+    SegAfter = osiris_log:get_current_file(S4),
+
+    %% The tracking snapshot and user chunk should be in the same segment.
+    ?assertNotEqual(SegBefore, osiris_log:get_current_file(S3),
+                    "snapshot should have triggered a new segment"),
+    ?assertEqual(osiris_log:get_current_file(S3), SegAfter,
+                 "user chunk should be in same segment as tracking snapshot"),
+    osiris_log:close(S4),
+    ok.
 
 assert_sendfile_pread(T, ExpectedSendfile, ExpectedPread) ->
     case os:type() of
