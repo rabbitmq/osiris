@@ -59,6 +59,7 @@ all_tests() ->
      replica_unknown_command,
      diverged_replica,
      retention,
+     retention_size_counters,
      retention_max_age_eventually,
      retention_max_age_update_retention,
      retention_max_age_noproc,
@@ -1218,6 +1219,31 @@ retention(Config) ->
     ct:pal("PRE WILD"),
     [_] = wildcard(Wc),
     ct:pal("POST WILD"),
+    osiris:stop_cluster(Conf1),
+    ok.
+
+retention_size_counters(Config) ->
+    Name = ?config(cluster_name, Config),
+    SegSize = 100 * 1000,
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          retention => [{max_bytes, SegSize * 100}],
+          max_segment_size_bytes => SegSize,
+          replica_nodes => []},
+    {ok, #{leader_pid := Leader} = Conf1} = osiris:start_cluster(Conf0),
+    write_n(Leader, 1000, 0, 500 * 8, #{}),
+    Key = {osiris_writer, Name},
+    #{segment_size_bytes := SegBefore} =
+        osiris_counters:counters(Key, [segment_size_bytes]),
+    ok = osiris:update_retention(Leader, [{max_bytes, SegSize}]),
+    await_condition(
+        fun() ->
+            #{segment_size_bytes := S} =
+                osiris_counters:counters(Key, [segment_size_bytes]),
+            S < SegBefore
+        end, 200, 50),
     osiris:stop_cluster(Conf1),
     ok.
 
