@@ -1025,9 +1025,26 @@ truncate_to(Name, RemoteRange, [{E, ChId} | NextEOs], IdxFiles) ->
     {ok, state()} |
     {error, {offset_out_of_range, empty | {offset(), offset()}}} |
     {error, {invalid_last_offset_epoch, epoch(), offset()}} |
+    {error, retries_exhausted} |
     {error, file:posix()}.
-init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir,
-                                            name := Name} = Config) ->
+init_data_reader(TailInfo, Config) ->
+    init_data_reader(TailInfo, Config, 3).
+
+init_data_reader(_TailInfo, _Config, 0) ->
+    {error, retries_exhausted};
+init_data_reader(TailInfo, Config, Attempt) ->
+    try
+        init_data_reader0(TailInfo, Config)
+    catch
+        missing_file ->
+            %% Retention policies are likely being applied and deleted an
+            %% index file between listing the segments and opening one. The
+            %% index files are read fresh on each attempt, so retry.
+            init_data_reader(TailInfo, Config, Attempt - 1)
+    end.
+
+init_data_reader0({StartChunkId, PrevEOT}, #{dir := Dir,
+                                             name := Name} = Config) ->
     IdxFiles = sorted_index_files(Dir),
     Range = offset_range_from_idx_files(IdxFiles),
     ?DEBUG_(Name, " at ~b prev ~w local range: ~w",
@@ -2071,23 +2088,26 @@ nth_last_idx_record(IdxFd, N) ->
 
 last_valid_idx_record(IdxFile) ->
     {ok, IdxFd} = open(IdxFile, [read, raw, binary]),
-    case position_at_idx_record_boundary(IdxFd, eof) of
-        {ok, Pos} ->
-            SegFile = segment_from_index_file(IdxFile),
-            SegSize = file_size(SegFile),
-            ok = skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
-            case file:position(IdxFd, {cur, -?INDEX_RECORD_SIZE_B}) of
-                {ok, _} ->
-                    IdxRecord = file:read(IdxFd, ?INDEX_RECORD_SIZE_B),
-                    _ = file:close(IdxFd),
-                    IdxRecord;
-                _ ->
-                    _ = file:close(IdxFd),
-                    undefined
-            end;
-        Err ->
-            _ = file:close(IdxFd),
-            Err
+    %% close IdxFd on every exit path, including a missing_file throw from
+    %% file_size/1 when retention deletes the segment mid-read; otherwise the
+    %% fd leaks whenever the caller catches the throw and survives.
+    try
+        case position_at_idx_record_boundary(IdxFd, eof) of
+            {ok, Pos} ->
+                SegFile = segment_from_index_file(IdxFile),
+                SegSize = file_size(SegFile),
+                ok = skip_invalid_idx_records(IdxFd, SegFile, SegSize, Pos),
+                case file:position(IdxFd, {cur, -?INDEX_RECORD_SIZE_B}) of
+                    {ok, _} ->
+                        file:read(IdxFd, ?INDEX_RECORD_SIZE_B);
+                    _ ->
+                        undefined
+                end;
+            Err ->
+                Err
+        end
+    after
+        _ = file:close(IdxFd)
     end.
 
 first_idx_record(IdxFd) ->
