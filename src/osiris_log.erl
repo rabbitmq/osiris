@@ -1312,6 +1312,16 @@ resolve_offset_location(OffsetSpec, #{} = Conf)
             case find_segment_for_offset(StartOffset, IdxFiles) of
                 {not_found, high} ->
                     throw({retry_with, next, Conf});
+                {not_found, low} ->
+                    %% The chunk-id range was empty (every surviving index file
+                    %% is header-only, e.g. during a resync-truncation), so the
+                    %% clamp forced StartOffset to 0 and no segment covers it.
+                    %% Retry with `first` rather than crashing: by the next
+                    %% attempt the acceptor will have written a real chunk and
+                    %% the range will be non-empty. `first` rather than `next`
+                    %% because the caller is resolving old data (a lagging
+                    %% reader); `next` would silently skip it to the live end.
+                    throw({retry_with, first, Conf});
                 {end_of_log, #seg_info{file = SegmentFile,
                                        last = LastChunk}} ->
                     {ChunkId, FilePos} = next_location(LastChunk),
@@ -3857,6 +3867,46 @@ skip_test() ->
     [<<"CDEF">>] = skip(2, [<<"AB">>, <<"CDEF">>]),
     [<<"DEF">>] = skip(3, [<<"AB">>, <<"CDEF">>]),
     [<<"AB">>, <<"CDEF">>] = skip(0, [<<"AB">>, <<"CDEF">>]),
+    ok.
+
+%% Regression test for https://github.com/rabbitmq/osiris/issues/238
+%% A resync-truncation leaves the directory with only a header-only index file.
+%% init_offset_reader/2 with an integer offset below that segment's name must
+%% not crash with {case_clause,{not_found,low}}; it should retry with `first`
+%% and either succeed or return {error, no_index_file} gracefully.
+init_offset_reader_not_found_low_test() ->
+    Dir = filename:join(["/tmp", "osiris_test_not_found_low_"
+                         ++ integer_to_list(erlang:unique_integer([positive]))]),
+    ok = filelib:ensure_dir(filename:join(Dir, "x")),
+    Conf0 = #{dir => Dir, name => <<"not_found_low_test">>,
+              epoch => 1, max_segment_size_bytes => 4096},
+    %% Build a real multi-segment log.
+    W0 = osiris_log:init(Conf0),
+    Entry = binary:copy(<<"x">>, 800),
+    Wn = lists:foldl(fun(_, W) -> osiris_log:write([Entry], W) end, W0,
+                     lists:seq(1, 200)),
+    osiris_log:close(Wn),
+    %% Simulate a replica resync-truncation: init_acceptor with a range entirely
+    %% above the local data, forcing truncate_to to delete everything and open
+    %% one fresh empty segment (the header-only window the bug needs).
+    Acc = osiris_log:init_acceptor({999000, 999100}, [{1, 999000}], Conf0),
+    osiris_log:close(Acc),
+    %% The request offset is below the surviving segment name but positive.
+    %% Before the fix this crashed with {case_clause,{not_found,low}}.
+    %% Use resolve_offset_spec/2 (exported, does not open a reader) to test the
+    %% fix in resolve_offset_location without needing a full reader Config.
+    RConf = #{dir => Dir, name => <<"not_found_low_test">>},
+    Result = osiris_log:resolve_offset_spec(500, RConf),
+    %% The retry with `first` resolves to the empty segment's first offset
+    %% (end_of_log -> next offset = 0), or returns no_index_file/retries_exhausted.
+    %% Any of these is acceptable; a {case_clause,{not_found,low}} crash is not.
+    case Result of
+        {ok, _Offset} -> ok;
+        {error, no_index_file} -> ok;
+        {error, retries_exhausted} -> ok;
+        Other -> ?assert(false == Other)
+    end,
+    os:cmd("rm -rf " ++ Dir),
     ok.
 
 -endif.
