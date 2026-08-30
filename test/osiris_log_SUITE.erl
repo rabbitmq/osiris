@@ -12,6 +12,11 @@
 
 -export([]).
 
+%% send_file_raises_are_returned_as_errors mocks file:sendfile with a fun that
+%% always raises, which -Werror_handling flags as "only terminates with
+%% explicit exception". That is intentional for this regression test.
+-dialyzer({nowarn_function, send_file_raises_are_returned_as_errors/1}).
+
 -include_lib("common_test/include/ct.hrl").
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("kernel/include/file.hrl").
@@ -99,6 +104,7 @@ all_tests() ->
      init_with_unexpected_file,
      overview_with_missing_segment,
      overview_with_missing_index_at_start,
+     send_file_raises_are_returned_as_errors,
      read_ahead_send_file,
      read_ahead_send_file_filter,
      read_ahead_send_file_on_off,
@@ -2514,6 +2520,43 @@ assert_sendfile_pread(T, ExpectedSendfile, ExpectedPread) ->
             ?assertEqual(ExpectedSendfile, osiris_tracer:call_count(T, file, sendfile)),
             ?assertEqual(ExpectedPread, osiris_tracer:call_count(T, file, pread))
     end.
+
+send_file_raises_are_returned_as_errors(Config) ->
+    %% Regression test for rabbitmq/osiris#230. file:sendfile/5 can raise
+    %% (rather than return {error, _}) when the peer closes the replication
+    %% socket in the window between prim_inet:sendfile/4's connected check and
+    %% getprotocol/1's port_info/2 call, which badmatches on the `undefined`
+    %% a closed port returns. osiris_log:sendfile/6 must map that raised
+    %% badmatch to the {error, _} send_file/3 already handles, so the replica
+    %% reader does not crash. file:sendfile is mocked to raise deterministically
+    %% because the real race is not reproducible on demand.
+    Conf0 = ?config(osiris_conf, Config),
+    Wr0 = osiris_log:init(Conf0),
+    Shared = osiris_log:get_shared(Wr0),
+    RConf = Conf0#{shared => Shared, transport => tcp},
+    {ok, Rd0} = osiris_log:init_offset_reader(first, RConf),
+
+    %% a chunk large enough to force the sendfile path rather than read-ahead
+    Entries = [binary:copy(<<"a">>, 8192)],
+    {_, Wr1} = write_committed(Entries, Wr0),
+
+    {CS, _SS, _} = CSC = client_server_connect(),
+
+    meck:new(file, [passthrough, unstick, no_link]),
+    try
+        meck:expect(file, sendfile,
+                    fun(_Fd, _Sock, _Pos, _ToSend, _Opts) ->
+                            error({badmatch, undefined})
+                    end),
+        ?assertEqual({error, {sendfile, {badmatch, undefined}}},
+                     osiris_log:send_file(CS, Rd0))
+    after
+        meck:unload(file),
+        client_server_close(CSC),
+        osiris_log:close(Rd0),
+        osiris_log:close(Wr1)
+    end,
+    ok.
 
 read_ahead_send_file(Config) ->
     RAL = 4096, %% read ahead limit
