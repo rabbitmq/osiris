@@ -28,6 +28,7 @@
          send_file/3,
          init_data_reader/2,
          init_offset_reader/2,
+         open_next_segment/1,
          resolve_offset_spec/2,
          read_header/1,
          chunk_iterator/1,
@@ -59,7 +60,8 @@
          counter_fields/0,
          samples/2,
          make_counter/1,
-         generate_log/4]).
+         generate_log/4,
+         parse_header/2]).
 
 -export([dump_init/1,
          dump_init_idx/1,
@@ -409,19 +411,19 @@
 -type offset_spec() :: osiris:offset_spec().
 -type retention_spec() :: osiris:retention_spec().
 -type header_map() ::
-    #{chunk_id => offset(),
-      epoch => epoch(),
-      type => chunk_type(),
-      crc => integer(),
-      num_records => non_neg_integer(),
-      num_entries => non_neg_integer(),
-      timestamp => osiris:timestamp(),
-      data_size => non_neg_integer(),
-      trailer_size => non_neg_integer(),
-      filter_size => 16..255,
-      header_data => binary(),
-      position => non_neg_integer(),
-      next_position => non_neg_integer()}.
+    #{chunk_id := offset(),
+      epoch := epoch(),
+      type := chunk_type(),
+      crc := integer(),
+      num_records := non_neg_integer(),
+      num_entries := non_neg_integer(),
+      timestamp := osiris:timestamp(),
+      data_size := non_neg_integer(),
+      trailer_size := non_neg_integer(),
+      filter_size := 16..255,
+      header_data := binary(),
+      position := non_neg_integer(),
+      next_position := non_neg_integer()}.
 -type transport() :: tcp | ssl.
 
 %% holds static or rarely changing fields
@@ -496,7 +498,8 @@
               range/0,
               config/0,
               counter_spec/0,
-              transport/0]).
+              transport/0,
+              header_map/0]).
 
 -spec directory(osiris:config() | list()) -> file:filename_all().
 directory(#{name := Name, dir := Dir}) ->
@@ -515,20 +518,11 @@ init(Config) ->
 -spec init(config(), writer | acceptor) -> state().
 init(#{dir := Dir,
        name := Name,
-       epoch := Epoch} = Config,
+       epoch := Epoch} = Config0,
      WriterType) ->
     %% scan directory for segments if in write mode
-    MaxSizeBytes = maps:get(max_segment_size_bytes, Config,
-                            ?DEFAULT_MAX_SEGMENT_SIZE_B),
-    MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks,
-                                        ?DEFAULT_MAX_SEGMENT_SIZE_C),
-    Retention = maps:get(retention, Config, []),
-    FilterSize = maps:get(filter_size, Config, ?DEFAULT_FILTER_SIZE),
     ?INFO("Stream: ~ts will use ~ts for osiris log data directory",
           [Name, Dir]),
-    ?DEBUG_(Name, "max_segment_size_bytes: ~b,
-           max_segment_size_chunks ~b, retention ~w, filter size ~b",
-            [MaxSizeBytes, MaxSizeChunks, Retention, FilterSize]),
     ok = filelib:ensure_dir(Dir),
     case file:make_dir(Dir) of
         ok ->
@@ -538,19 +532,36 @@ init(#{dir := Dir,
         Err ->
             throw(Err)
     end,
+    ok = maybe_fix_corrupted_files(Config0),
+    MaxSizeBytes = maps:get(max_segment_size_bytes, Config0,
+                            ?DEFAULT_MAX_SEGMENT_SIZE_B),
+    MaxSizeChunks = application:get_env(osiris, max_segment_size_chunks,
+                                        ?DEFAULT_MAX_SEGMENT_SIZE_C),
+    FilterSize = maps:get(filter_size, Config0, ?DEFAULT_FILTER_SIZE),
+    ?DEBUG_(Name, "max_segment_size_bytes: ~b,
+           max_segment_size_chunks ~b, retention ~w, filter size ~b",
+            [MaxSizeBytes, MaxSizeChunks,
+             maps:get(retention, Config0, []), FilterSize]),
 
-    Cnt = make_counter(Config),
+    Cnt = make_counter(Config0),
     %% initialise offset counter to -1 as 0 is the first offset in the log and
     %% it hasn't necessarily been written yet, for an empty log the first offset
     %% is initialised to 0 however and will be updated after each retention run.
     counters:put(Cnt, ?C_OFFSET, -1),
     counters:put(Cnt, ?C_SEGMENTS, 0),
-    Shared = case Config of
+    Shared = case Config0 of
                  #{shared := S} ->
                      S;
                  _ ->
                      osiris_log_shared:new()
              end,
+    Config = case maps:get(log_hooks, Config0, app_env_log_hooks()) of
+                 undefined ->
+                     Config0;
+                 HookMod ->
+                     HookMod:on_init(WriterType, self(), Config0#{counter => Cnt, shared => Shared})
+             end,
+    Retention = maps:get(retention, Config, []),
     Cfg = #cfg{directory = Dir,
                name = Name,
                max_segment_size_bytes = MaxSizeBytes,
@@ -561,7 +572,6 @@ init(#{dir := Dir,
                counter_id = counter_id(Config),
                shared = Shared,
                filter_size = FilterSize},
-    ok = maybe_fix_corrupted_files(Config),
     DefaultNextOffset = case Config of
                             #{initial_offset := IO}
                               when WriterType == acceptor ->
@@ -1492,6 +1502,13 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
                                             position = NextPos}}};
         {end_of_stream, _} = EOF ->
             EOF;
+        {offset_not_found, State1} ->
+            case open_next_segment(State1) of
+                {ok, State} ->
+                    read_header(State);
+                not_found ->
+                    {end_of_stream, State1}
+            end;
         {error, _} = Err ->
             Err
     end.
@@ -1523,6 +1540,7 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
 -spec chunk_iterator(state()) ->
     {ok, header_map(), chunk_iterator(), state()} |
     {end_of_stream, state()} |
+    {offset_not_found, state()} |
     {error, {invalid_chunk_header, term()}}.
 chunk_iterator(State) ->
     chunk_iterator(State, 1).
@@ -1530,6 +1548,7 @@ chunk_iterator(State) ->
 -spec chunk_iterator(state(), pos_integer() | all) ->
     {ok, header_map(), chunk_iterator(), state()} |
     {end_of_stream, state()} |
+    {offset_not_found, state()} |
     {error, {invalid_chunk_header, term()}}.
 chunk_iterator(State, Credit) ->
     chunk_iterator(State, Credit, undefined).
@@ -1539,6 +1558,7 @@ chunk_iterator(State, Credit) ->
                      chunk_iterator() | undefined) ->
     {ok, header_map(), chunk_iterator(), state()} |
     {end_of_stream, state()} |
+    {offset_not_found, state()} |
     {error, {invalid_chunk_header, term()}}.
 chunk_iterator(#?MODULE{cfg = #cfg{},
                         mode = #read{type = RType,
@@ -1723,6 +1743,9 @@ read_chunk_parsed(#?MODULE{mode = #read{}} = State0,
     case chunk_iterator(State0, all) of
         {end_of_stream, _} = Eos ->
             Eos;
+        {offset_not_found, State1} ->
+            {ok, State} = open_next_segment(State1),
+            read_chunk_parsed(State, HeaderOrNot);
         {ok, _H, I0, State1} when HeaderOrNot == no_header ->
             Records = iter_all_records(iterator_next(I0), []),
             {Records, State1};
@@ -1787,6 +1810,7 @@ is_valid_chunk_on_disk(SegFile, Pos) ->
 -spec send_file(gen_tcp:socket(), state()) ->
                    {ok, state()} |
                    {error, term()} |
+                   {offset_not_found, state()} |
                    {end_of_stream, state()}.
 send_file(Sock, State) ->
     send_file(Sock, State, fun(_, _) -> <<>> end).
@@ -1795,6 +1819,7 @@ send_file(Sock, State) ->
                 fun((header_map(), non_neg_integer()) -> binary())) ->
     {ok, state()} |
     {error, term()} |
+    {offset_not_found, state()} |
     {end_of_stream, state()}.
 send_file(Sock,
           #?MODULE{mode = #read{type = RType,
@@ -2252,12 +2277,31 @@ format_status(#?MODULE{cfg = #cfg{directory = Dir,
       filter_size => FilterSize,
       file => filename:basename(File)}.
 
--spec update_retention([retention_spec()], state()) -> state().
-update_retention(Retention,
+-spec update_retention(osiris:retention_update(), state()) -> state().
+update_retention(RetentionOrFun,
                  #?MODULE{cfg = #cfg{name = Name,
-                                     retention = Retention0} = Cfg} = State0)
-    when is_list(Retention) ->
-    ?DEBUG_(Name, " from: ~w to ~w", [Retention0, Retention]),
+                                     directory = Dir,
+                                     counter = Cnt,
+                                     shared = Shared,
+                                     retention = RetentionPrev} = Cfg} = State0)
+    when is_list(RetentionOrFun) orelse is_function(RetentionOrFun, 1) ->
+    Retention1 = case RetentionOrFun of
+                     Fun when is_function(Fun, 1) ->
+                         Fun(RetentionPrev);
+                     List ->
+                         List
+                 end,
+    Retention = case application:get_env(osiris, log_hooks) of
+                    {ok, HookMod} ->
+                        HookMod:on_retention_updated(Retention1,
+                                                     #{name => Name,
+                                                       dir => Dir,
+                                                       counter => Cnt,
+                                                       shared => Shared});
+                    undefined ->
+                        Retention1
+                end,
+    ?DEBUG_(Name, " from: ~w to ~w", [RetentionPrev, Retention]),
     State = State0#?MODULE{cfg = Cfg#cfg{retention = Retention}},
     trigger_retention_eval(State).
 
@@ -2281,14 +2325,15 @@ evaluate_retention(Dir, Specs) when is_binary(Dir) ->
     ?DEBUG_(<<>>," (~w) completed in ~fms", [Specs, Time/1_000]),
     Result.
 
-evaluate_retention0(IdxFiles, []) ->
-    IdxFiles;
-evaluate_retention0(IdxFiles, [{max_bytes, MaxSize} | Specs]) ->
-    RemIdxFiles = eval_max_bytes(IdxFiles, MaxSize),
-    evaluate_retention0(RemIdxFiles, Specs);
-evaluate_retention0(IdxFiles, [{max_age, Age} | Specs]) ->
-    RemIdxFiles = eval_age(IdxFiles, Age),
-    evaluate_retention0(RemIdxFiles, Specs).
+evaluate_retention0(IdxFiles, Specs) ->
+    lists:foldl(
+      fun ({max_bytes, MaxSize}, RemIdxFiles) ->
+              eval_max_bytes(RemIdxFiles, MaxSize);
+          ({max_age, Age}, RemIdxFiles) ->
+              eval_age(RemIdxFiles, Age);
+          ({'fun', Fun}, RemIdxFiles) ->
+              eval_retention_fun(RemIdxFiles, Fun)
+      end, IdxFiles, Specs).
 
 eval_age([_] = IdxFiles, _Age) ->
     IdxFiles;
@@ -2352,6 +2397,13 @@ file_size_or_zero(Path) ->
         {error, enoent} ->
             0
     end.
+
+eval_retention_fun([], _) ->
+    [];
+eval_retention_fun(IdxFiles, Fun) ->
+    {ToDelete, ToKeep} = Fun(IdxFiles),
+    _ = [ok = delete_segment_from_index(Idx) || Idx <- ToDelete],
+    ToKeep.
 
 last_epoch_chunk_ids(Name, IdxFiles) ->
     T1 = erlang:monotonic_time(),
@@ -2648,6 +2700,20 @@ maybe_set_first_offset(0, Timestamp, #cfg{shared = Ref, counter = CntRef}) ->
     osiris_log_shared:set_first_chunk_id(Ref, 0);
 maybe_set_first_offset(_, _Timestamp, _Cfg) ->
     ok.
+
+app_env_log_hooks() ->
+    case application:get_env(osiris, log_hooks) of
+        {ok, Mod} -> Mod;
+        undefined -> undefined
+    end.
+
+run_retention_evaluated_hook(undefined, _Cnt, _Ctx) ->
+    ok;
+run_retention_evaluated_hook(HookMod, Cnt, Ctx) ->
+    case erlang:function_exported(HookMod, on_retention_evaluated, 2) of
+        true -> HookMod:on_retention_evaluated(Cnt, Ctx);
+        false -> ok
+    end.
 
 max_segment_size_reached(
   #?MODULE{mode = #write{segment_size = {CurrentSizeBytes,
@@ -3096,8 +3162,32 @@ recover_tracking(Fd, Trk0, Pos0) ->
             Trk0
     end.
 
+-spec open_next_segment(state()) -> {ok, state()} | not_found.
+open_next_segment(#?MODULE{cfg = #cfg{shared = Shared,
+                                      directory = Dir},
+                           mode = #read{read_ahead = Ra0,
+                                        next_offset = NextChId0} = Read0,
+                           fd = Fd} = State0) ->
+    FirstChId = osiris_log_shared:first_chunk_id(Shared),
+    NextChId = max(FirstChId, NextChId0),
+    SegFile = make_file_name(NextChId, "segment"),
+    case file:open(filename:join(Dir, SegFile), [raw, binary, read]) of
+        {ok, Fd2} ->
+            ok = file:close(Fd),
+            Read = Read0#read{next_offset = NextChId,
+                              read_ahead = ra_clear(Ra0),
+                              position = ?LOG_HEADER_SIZE},
+            State = State0#?MODULE{current_file = SegFile,
+                                   fd = Fd2,
+                                   mode = Read},
+            {ok, State};
+        {error, enoent} ->
+            not_found
+    end.
+
 -spec read_header0(state()) ->
     {ok, map(), state()} |
+    {offset_not_found, state()} |
     {end_of_stream, state()}.
 read_header0(State) ->
     %% reads the next header if permitted
@@ -3108,107 +3198,61 @@ read_header0(State) ->
             {end_of_stream, State}
     end.
 
-read_header_with_ra(#?MODULE{cfg = #cfg{directory = Dir,
-                                        shared = Shared},
+read_header_with_ra(#?MODULE{cfg = #cfg{shared = Shared},
                              mode = #read{next_offset = NextChId0,
                                           position = Pos,
                                           read_ahead = Ra0} = Read0,
-                             current_file = CurFile,
                              fd = Fd} = State) ->
     case ra_read(Pos, ?HEADER_SIZE_B, Ra0) of
         Bin when is_binary(Bin) andalso
                  byte_size(Bin) == ?HEADER_SIZE_B ->
-            parse_header(Bin, State);
+            {ok, Header} = parse_header(Bin, Pos),
+            read_header_with_ra0(Header, State);
         undefined ->
             case ra_fill(Fd, Pos, Ra0) of
                 {ok, Ra} ->
                     ?FUNCTION_NAME(State#?MODULE{mode =
                                                  Read0#read{read_ahead = Ra}});
                 eof ->
-                    FirstOffset = osiris_log_shared:first_chunk_id(Shared),
-                    %% open next segment file and start there if it exists
-                    NextChId = max(FirstOffset, NextChId0),
-                    %% TODO: replace this check with a last chunk id counter
-                    %% updated by the writer and replicas
-                    SegFile = make_file_name(NextChId, "segment"),
-                    case SegFile == CurFile of
+                    case NextChId0 > osiris_log_shared:last_chunk_id(Shared) of
                         true ->
-                            %% the new filename is the same as the old one
-                            %% this should only really happen for an empty
-                            %% log but would cause an infinite loop if it does
                             {end_of_stream, State};
                         false ->
-                            case file:open(filename:join(Dir, SegFile),
-                                           [raw, binary, read]) of
-                                {ok, Fd2} ->
-                                    ok = file:close(Fd),
-                                    Read = Read0#read{next_offset = NextChId,
-                                                      read_ahead = ra_clear(Ra0),
-                                                      position = ?LOG_HEADER_SIZE},
-                                    read_header0(State#?MODULE{current_file = SegFile,
-                                                               fd = Fd2,
-                                                               mode = Read});
-                                {error, enoent} ->
-                                    {end_of_stream, State}
-                            end
+                            {offset_not_found, State}
                     end
             end
     end.
 
-parse_header(<<?MAGIC:4/unsigned,
-               ?VERSION:4/unsigned,
-               ChType:8/unsigned,
-               NumEntries:16/unsigned,
-               NumRecords:32/unsigned,
-               Timestamp:64/signed,
-               Epoch:64/unsigned,
-               NextChId0:64/unsigned,
-               Crc:32/integer,
-               DataSize:32/unsigned,
-               TrailerSize:32/unsigned,
-               FilterSize:8/unsigned,
-               _Reserved:24>> = HeaderData0,
-             #?MODULE{cfg = #cfg{counter = CntRef},
-                      fd = Fd,
-                      mode = #read{next_offset = NextChId0,
-                                   position = Pos,
-                                   filter = Filter,
-                                   read_ahead = Ra0} = Read0} = State0) ->
-
+read_header_with_ra0(#{chunk_id := NextChId0,
+                       num_records := NumRecords,
+                       data_size := DataSize,
+                       filter_size := FilterSize,
+                       next_position := NextPos} = Header,
+                     #?MODULE{cfg = #cfg{counter = CntRef},
+                              fd = Fd,
+                              mode = #read{next_offset = NextChId0,
+                                           position = Pos,
+                                           filter = Filter,
+                                           read_ahead = Ra0} = Read0} = State0) ->
     Ra1 = ra_update_size(Filter, FilterSize, DataSize, Ra0),
     case ra_read(Pos + ?HEADER_SIZE_B, FilterSize, Ra1) of
         undefined ->
             {ok, Ra} = ra_fill(Fd, Pos + ?HEADER_SIZE_B, Ra1),
-            parse_header(HeaderData0,
-                         State0#?MODULE{mode = Read0#read{read_ahead = Ra}});
+            State = State0#?MODULE{mode = Read0#read{read_ahead = Ra}},
+            read_header_with_ra0(Header, State);
         ChunkFilter ->
             counters:put(CntRef, ?C_OFFSET, NextChId0 + NumRecords),
             counters:add(CntRef, ?C_CHUNKS, 1),
-            NextPos = Pos + ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
 
             case osiris_bloom:is_match(ChunkFilter, Filter) of
                 true ->
-                    <<HeaderData:?HEADER_SIZE_B/binary, _/binary>> = HeaderData0,
                     State = case Ra1 of
                                 Ra0 ->
                                     State0;
                                 Ra ->
                                     State0#?MODULE{mode = Read0#read{read_ahead = Ra}}
                             end,
-                    {ok, #{chunk_id => NextChId0,
-                           epoch => Epoch,
-                           type => ChType,
-                           crc => Crc,
-                           num_records => NumRecords,
-                           num_entries => NumEntries,
-                           timestamp => Timestamp,
-                           data_size => DataSize,
-                           trailer_size => TrailerSize,
-                           header_data => HeaderData,
-                           filter_size => FilterSize,
-                           next_position => NextPos,
-                           position => Pos},
-                     State};
+                    {ok, Header, State};
                 false ->
                     Read = Read0#read{next_offset = NextChId0 + NumRecords,
                                       position = NextPos,
@@ -3225,6 +3269,40 @@ parse_header(<<?MAGIC:4/unsigned,
             end
     end.
 
+-spec parse_header(binary(), Pos :: pos_integer()) ->
+    {ok, header_map()} |
+    {error, invalid_chunk_header}.
+parse_header(<<?MAGIC:4/unsigned,
+               ?VERSION:4/unsigned,
+               ChType:8/unsigned,
+               NumEntries:16/unsigned,
+               NumRecords:32/unsigned,
+               Timestamp:64/signed,
+               Epoch:64/unsigned,
+               NextChId0:64/unsigned,
+               Crc:32/integer,
+               DataSize:32/unsigned,
+               TrailerSize:32/unsigned,
+               FilterSize:8/unsigned,
+               _Reserved:24>> = HeaderData,
+             Pos) ->
+    NextPos = Pos + ?HEADER_SIZE_B + FilterSize + DataSize + TrailerSize,
+    {ok, #{chunk_id => NextChId0,
+           epoch => Epoch,
+           type => ChType,
+           crc => Crc,
+           num_records => NumRecords,
+           num_entries => NumEntries,
+           timestamp => Timestamp,
+           data_size => DataSize,
+           trailer_size => TrailerSize,
+           header_data => HeaderData,
+           filter_size => FilterSize,
+           next_position => NextPos,
+           position => Pos}};
+parse_header(_, _) ->
+    {error, invalid_chunk_header}.
+
 %% keep the previous value if the current one is 0 (i.e. no filter in the chunk)
 read_ahead_fsize(Previous, 0) ->
     Previous;
@@ -3240,13 +3318,16 @@ trigger_retention_eval(#?MODULE{cfg =
 
     %% updates first offset and first timestamp
     %% after retention has been evaluated
+    HookMod = app_env_log_hooks(),
     EvalFun = fun ({{FstOff, _}, FstTs, NumSegLeft})
                     when is_integer(FstOff),
                          is_integer(FstTs) ->
                       osiris_log_shared:set_first_chunk_id(Shared, FstOff),
                       counters:put(Cnt, ?C_FIRST_OFFSET, FstOff),
                       counters:put(Cnt, ?C_FIRST_TIMESTAMP, FstTs),
-                      counters:put(Cnt, ?C_SEGMENTS, NumSegLeft);
+                      counters:put(Cnt, ?C_SEGMENTS, NumSegLeft),
+                      run_retention_evaluated_hook(HookMod, Cnt,
+                                                   #{name => Name});
                   (_) ->
                       ok
               end,

@@ -346,6 +346,14 @@ do_sendfile0(#state{name = Name,
             _ = setopts(Transport, Sock, [{nopush, false}]),
             ?DEBUG_(Name, "sendfile err ~w", [_Err]),
             State;
+        {offset_not_found, Log1} ->
+            case osiris_log:open_next_segment(Log1) of
+                {ok, Log} ->
+                    do_sendfile0(State#state{log = Log});
+                not_found ->
+                    ok = setopts(Transport, Sock, [{nopush, false}]),
+                    State#state{log = Log1}
+            end;
         {end_of_stream, Log} ->
             _ = setopts(Transport, Sock, [{nopush, false}]),
             State#state{log = Log}

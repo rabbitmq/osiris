@@ -90,6 +90,7 @@ all_tests() ->
      evaluate_retention_max_bytes,
      evaluate_retention_max_age,
      evaluate_retention_max_age_empty,
+     evaluate_retention_fun,
      offset_tracking,
      offset_tracking_snapshot,
      many_segment_overview,
@@ -697,6 +698,7 @@ write_multi_log(Config) ->
     OffRef = osiris_log:get_shared(S1),
     %% takes a single offset tracking data into account
     osiris_log_shared:set_committed_chunk_id(OffRef, NextOffset),
+    osiris_log_shared:set_last_chunk_id(OffRef, NextOffset - 10),
     %% ensure all records can be read
     {ok, R0} =
         osiris_log:init_offset_reader(first, Conf#{shared => OffRef}),
@@ -1727,6 +1729,37 @@ evaluate_retention_max_age(Config) ->
         filelib:wildcard(
             filename:join(LDir, "*.segment")),
     ?assertEqual(1, length(SegFiles)),
+    ?assertEqual([],
+                 lists:filter(fun(S) ->
+                                 lists:suffix("00000000000000000000.segment", S)
+                              end,
+                              SegFiles),
+                 "the retention process didn't delete the oldest segment"),
+    ok.
+
+evaluate_retention_fun(Config) ->
+    Data = crypto:strong_rand_bytes(1500),
+    EpochChunks =
+        [begin {1, [Data || _ <- lists:seq(1, 50)]} end
+         || _ <- lists:seq(1, 20)],
+    LDir = ?config(leader_dir, Config),
+    Log = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(Log),
+    %% delete only the first segment
+    Fun = fun(IdxFiles) ->
+                  lists:splitwith(fun(IdxFile) ->
+                                          filename:basename(IdxFile) =:=
+                                          <<"00000000000000000000.index">>
+                                  end, IdxFiles)
+          end,
+    Spec = {'fun', Fun},
+    Range = osiris_log:evaluate_retention(LDir, [Spec]),
+    %% idempotency check
+    Range = osiris_log:evaluate_retention(LDir, [Spec]),
+    SegFiles =
+        filelib:wildcard(
+            filename:join(LDir, "*.segment")),
+    ?assertMatch([_], SegFiles),
     ?assertEqual([],
                  lists:filter(fun(S) ->
                                  lists:suffix("00000000000000000000.segment", S)
