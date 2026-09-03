@@ -180,7 +180,7 @@ handle_continue(#{name := Name0,
             {stop, {shutdown, writer_unavailable}, undefined};
         {badrpc, Reason} ->
             {stop, {badrpc, Reason}, undefined};
-        {ok, {LeaderRange, LeaderEpochOffs}} ->
+        {ok, {LeaderRange, LeaderEpochOffs, LeaderStartOffset}} ->
             {Min, Max} = application:get_env(osiris, port_range,
                                              ?DEFAULT_PORT_RANGE),
             Transport = application:get_env(osiris, replication_transport, tcp),
@@ -189,8 +189,11 @@ handle_continue(#{name := Name0,
             CntSpec = {CntName, {persistent_term, ?FIELDSPEC_KEY}},
 
             Dir = osiris_log:directory(Config),
+            %% use the leader's own idea of where an empty log starts rather
+            %% than this replica's local config, which may be stale
             Log = osiris_log:init_acceptor(LeaderRange, LeaderEpochOffs,
                                            Config#{dir => Dir,
+                                                   initial_offset => LeaderStartOffset,
                                                    counter_spec => CntSpec}),
             CntRef = osiris_log:counters_ref(Log),
             {NextOffset, LastChunk} = TailInfo = osiris_log:tail_info(Log),

@@ -125,7 +125,10 @@ overview(Pid) when node(Pid) == node() ->
     case erlang:is_process_alive(Pid) of
         true ->
             #{dir := Dir} = osiris_util:get_reader_context(Pid),
-            {ok, osiris_log:overview(Dir)};
+            {Range, EpochOffsets} = osiris_log:overview(Dir),
+            %% an empty range does not carry the offset the log actually
+            %% starts at, so include it separately for init_acceptor/3
+            {ok, {Range, EpochOffsets, osiris_log:starting_offset(Dir)}};
         false ->
             {error, no_process}
     end.
@@ -555,8 +558,8 @@ handle_command({call, From, query_replication_state},
                        end, R),
     %% need to merge pending tracking entries before read
     Result1 = case osiris_log:tail_info(Log) of
-                  {0, empty} ->
-                      Result0#{node() => {-1, 0}};
+                  {Next, empty} ->
+                      Result0#{node() => {Next - 1, 0}};
                   ?TAIL_INFO(O, T) ->
                       Result0#{node() => {O, T}}
               end,
