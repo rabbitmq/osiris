@@ -237,6 +237,9 @@ handle_continue(#{name := Name,
                 %% recover the committed offset from the last
                 %% batch offset in the log
                 {TailChId, TailNextOffs};
+            {TailNextOffs, empty} ->
+                %% nothing written yet, so nothing is committed
+                {TailNextOffs - 1, TailNextOffs};
             _ ->
                 {-1, 0}
         end,

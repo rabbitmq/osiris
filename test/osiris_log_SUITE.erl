@@ -30,12 +30,15 @@ all() ->
 
 all_tests() ->
     [init_empty,
+     init_empty_with_initial_offset,
      init_twice,
      init_recover,
+     init_recover_with_initial_offset,
      init_recover_with_writers,
      init_with_lower_epoch,
      write_batch,
      write_first_chunk_updates_first_timestamp,
+     write_first_chunk_with_initial_offset,
      write_with_filter_attach_next,
      write_batch_with_filter,
      write_batch_with_filters_variable_size,
@@ -55,6 +58,8 @@ all_tests() ->
      tail_info,
      init_offset_reader_empty,
      init_offset_reader_empty_directory,
+     init_offset_reader_with_initial_offset_empty,
+     init_offset_reader_with_initial_offset,
      init_offset_reader,
      init_offset_reader_last_chunk_is_not_user_chunk,
      init_offset_reader_no_user_chunk_in_last_segment,
@@ -66,6 +71,7 @@ all_tests() ->
      init_offset_reader_truncated,
      init_data_reader_next,
      init_data_reader_empty_log,
+     init_data_reader_with_initial_offset_empty,
      init_data_reader_truncated,
      init_epoch_offsets_empty,
      init_epoch_offsets_empty_writer,
@@ -78,6 +84,8 @@ all_tests() ->
      % truncate_multi_segment,
      accept_chunk,
      accept_chunk_inital_offset,
+     accept_chunk_with_initial_offset_from_empty_writer,
+     init_acceptor_with_initial_offset_empty_writer,
      accept_chunk_iolist_header_in_first_element,
      init_acceptor_truncates_tail,
      accept_chunk_truncates_tail,
@@ -95,6 +103,7 @@ all_tests() ->
      many_segment_overview,
      small_chunk_overview,
      overview,
+     overview_with_initial_offset,
      init_partial_writes,
      init_with_unexpected_file,
      overview_with_missing_segment,
@@ -176,6 +185,18 @@ init_empty(Config) ->
     ?assertEqual(0, osiris_log:next_offset(S0)),
     ok.
 
+init_empty_with_initial_offset(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf#{initial_offset => 100}),
+    ?assertEqual({100, empty}, osiris_log:tail_info(S0)),
+    ?assertEqual(100, osiris_log:next_offset(S0)),
+    ?assertEqual(100, osiris_log:first_offset(S0)),
+    ?assertEqual(99, osiris_log_shared:first_chunk_id(
+                       osiris_log:get_shared(S0))),
+    ?assertMatch(#{file := "00000000000000000100.segment"},
+                 osiris_log:format_status(S0)),
+    ok = osiris_log:close(S0).
+
 init_twice(Config) ->
     _S0 = osiris_log:init(?config(osiris_conf, Config)),
     S1 = osiris_log:init(?config(osiris_conf, Config)),
@@ -193,6 +214,25 @@ init_recover(Config) ->
     ?assertMatch(#{file := <<"00000000000000000000.segment">>},
                  osiris_log:format_status(S2)),
     ok.
+
+init_recover_with_initial_offset(Config) ->
+    Conf = maps:put(initial_offset, 100, ?config(osiris_conf, Config)),
+    ok = osiris_log:close(
+           osiris_log:init(Conf)),
+    %% an empty log resumes from the offset it was created at
+    S0 = osiris_log:init(Conf),
+    ?assertEqual(100, osiris_log:next_offset(S0)),
+    ?assertEqual(100, osiris_log:first_offset(S0)),
+    S1 = osiris_log:write([<<"hi">>], S0),
+    ?assertEqual(101, osiris_log:next_offset(S1)),
+    ok = osiris_log:close(S1),
+    %% once the log has data the configured initial offset is irrelevant
+    S2 = osiris_log:init(Conf#{initial_offset => 500}),
+    ?assertEqual(101, osiris_log:next_offset(S2)),
+    ?assertEqual(100, osiris_log:first_offset(S2)),
+    ?assertMatch(#{file := <<"00000000000000000100.segment">>},
+                 osiris_log:format_status(S2)),
+    ok = osiris_log:close(S2).
 
 init_recover_with_writers(Config) ->
     S0 = osiris_log:init(?config(osiris_conf, Config)),
@@ -240,6 +280,23 @@ write_first_chunk_updates_first_timestamp(Config) ->
     S1 = osiris_log:write([<<"hi">>], ?CHNK_USER, Ts, <<>>, S0),
     ?assertEqual(Ts, osiris_log:first_timestamp(S1)),
     ok.
+
+write_first_chunk_with_initial_offset(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf#{initial_offset => 100}),
+    ?assertEqual(0, osiris_log:first_timestamp(S0)),
+    Ts = 424242,
+    S1 = osiris_log:write([<<"hi">>], ?CHNK_USER, Ts, <<>>, S0),
+    ?assertEqual(Ts, osiris_log:first_timestamp(S1)),
+    ?assertEqual(100, osiris_log:first_offset(S1)),
+    ?assertEqual(101, osiris_log:next_offset(S1)),
+    ?assertEqual(100, osiris_log_shared:first_chunk_id(
+                        osiris_log:get_shared(S1))),
+    %% the second chunk must not move the first offset or timestamp
+    S2 = osiris_log:write([<<"ho">>], ?CHNK_USER, Ts + 1, <<>>, S1),
+    ?assertEqual(Ts, osiris_log:first_timestamp(S2)),
+    ?assertEqual(100, osiris_log:first_offset(S2)),
+    ok = osiris_log:close(S2).
 
 write_with_filter_attach_next(Config) ->
     %% bug fix where the chunk_info size didn't include the filter size which
@@ -767,6 +824,60 @@ init_offset_reader_empty_directory(Config) ->
     ?assertEqual({error, no_index_file}, osiris_log:init_offset_reader({abs, 1}, RConf)),
     ok.
 
+init_offset_reader_with_initial_offset_empty(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    LDir = ?config(leader_dir, Config),
+    LLog0 = seed_log(leader_conf(LDir, 100, Config), [], Config),
+    ok = osiris_log:close(LLog0),
+    RConf = Conf#{dir => LDir},
+    %% with nothing to attach to, every spec resolves to the start offset
+    [begin
+         {ok, L} = osiris_log:init_offset_reader(Spec, RConf),
+         ?assertEqual(100, osiris_log:next_offset(L), {spec, Spec}),
+         ok = osiris_log:close(L)
+     end || Spec <- [first, last, next, 0, 99, 100, 1000,
+                     {timestamp, now_ms() - 8000},
+                     {timestamp, now_ms() + 8000}]],
+    %% an absolute offset has to exist
+    ?assertEqual({error, {offset_out_of_range, empty}},
+                 osiris_log:init_offset_reader({abs, 100}, RConf)),
+    ok.
+
+init_offset_reader_with_initial_offset(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    LDir = ?config(leader_dir, Config),
+    %% chunk ids 100, 101 and 102, offsets 100 to 103
+    EpochChunks = [{1, [<<"one">>]},
+                   {1, [<<"two">>]},
+                   {1, [<<"three">>, <<"four">>]}],
+    LLog0 = seed_log(leader_conf(LDir, 100, Config), EpochChunks, Config),
+    ok = osiris_log:close(LLog0),
+    set_shared(Conf, 102),
+    RConf = Conf#{dir => LDir},
+    [begin
+         {ok, L} = osiris_log:init_offset_reader(Spec, RConf),
+         ?assertEqual(Expected, osiris_log:next_offset(L), {spec, Spec}),
+         ok = osiris_log:close(L)
+     end || {Spec, Expected} <- [{first, 100},
+                                 {last, 102},
+                                 {next, 104},
+                                 %% below the first offset, clamps to it
+                                 {0, 100},
+                                 {99, 100},
+                                 {100, 100},
+                                 {101, 101},
+                                 %% offset 103 lives in chunk 102
+                                 {103, 102},
+                                 %% past the last offset, attaches next
+                                 {1000, 104},
+                                 {{abs, 100}, 100},
+                                 {{abs, 103}, 102}]],
+    ?assertEqual({error, {offset_out_of_range, {100, 103}}},
+                 osiris_log:init_offset_reader({abs, 99}, RConf)),
+    ?assertEqual({error, {offset_out_of_range, {100, 103}}},
+                 osiris_log:init_offset_reader({abs, 104}, RConf)),
+    ok.
+
 init_offset_reader(Config) ->
     init_offset_reader(Config, offset).
 
@@ -1135,6 +1246,28 @@ init_data_reader_empty_log(Config) ->
     ok = osiris_log:close(LLog),
     ok.
 
+init_data_reader_with_initial_offset_empty(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    LDir = ?config(leader_dir, Config),
+    LLog0 = seed_log(leader_conf(LDir, 100, Config), [], Config),
+    RRConf = Conf#{dir => LDir},
+    {ok, RLog0} = osiris_log:init_data_reader({100, empty}, RRConf),
+    ?assertEqual(100, osiris_log:next_offset(RLog0)),
+    ok = osiris_log:close(RLog0),
+    ?assertEqual({error, {offset_out_of_range, empty}},
+                 osiris_log:init_data_reader({0, empty}, RRConf)),
+    ?assertEqual({error, {offset_out_of_range, empty}},
+                 osiris_log:init_data_reader({99, empty}, RRConf)),
+    ?assertEqual({error, {offset_out_of_range, empty}},
+                 osiris_log:init_data_reader({101, empty}, RRConf)),
+
+    LLog = osiris_log:write([<<"hi">>], LLog0),
+    {ok, RLog1} = osiris_log:init_data_reader({100, empty}, RRConf),
+    ?assertEqual(100, osiris_log:next_offset(RLog1)),
+    ok = osiris_log:close(RLog1),
+    ok = osiris_log:close(LLog),
+    ok.
+
 init_data_reader_truncated(Config) ->
     Data = crypto:strong_rand_bytes(1500),
     EpochChunks =
@@ -1288,6 +1421,42 @@ accept_chunk_inital_offset(Config) ->
     X0 = osiris_log:init(Conf#{initial_offset => 200}, acceptor),
     ?assertEqual(200, osiris_log:next_offset(X0)),
 
+    ok.
+
+init_acceptor_with_initial_offset_empty_writer(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    %% the writer has no data yet, so the configured offset is used
+    Log = osiris_log:init_acceptor(empty, [], Conf#{initial_offset => 100}),
+    ?assertEqual({100, empty}, osiris_log:tail_info(Log)),
+    ?assertEqual(100, osiris_log:first_offset(Log)),
+    ok = osiris_log:close(Log).
+
+accept_chunk_with_initial_offset_from_empty_writer(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    LDir = ?config(leader_dir, Config),
+    LConf = Conf#{dir => LDir, initial_offset => 100},
+    FConf = Conf#{dir => ?config(follower1_dir, Config),
+                  initial_offset => 100,
+                  shared => osiris_log_shared:new()},
+    L0 = osiris_log:init(LConf),
+    %% a replica of a brand new stream attaches before anything is written
+    {Range, EOChIds} = osiris_log:overview(LDir),
+    ?assertEqual({empty, []}, {Range, EOChIds}),
+    F0 = osiris_log:init_acceptor(Range, EOChIds, FConf),
+    ?assertEqual({100, empty}, osiris_log:tail_info(F0)),
+
+    RConf = LConf#{shared => osiris_log:get_shared(L0)},
+    {ok, R0} = osiris_log:init_data_reader(
+                 osiris_log:tail_info(F0), RConf),
+    L1 = osiris_log:write([<<"hi">>], L0),
+    {ok, Chunk1, R1} = osiris_log:read_chunk(R0),
+    F1 = osiris_log:accept_chunk(Chunk1, F0),
+    ?assertEqual(101, osiris_log:next_offset(F1)),
+    ?assertEqual(100, osiris_log:first_offset(F1)),
+
+    ok = osiris_log:close(L1),
+    ok = osiris_log:close(R1),
+    ok = osiris_log:close(F1),
     ok.
 
 accept_chunk_iolist_header_in_first_element(Config) ->
@@ -1947,6 +2116,16 @@ many_segment_overview(Config) ->
                          osiris_log:evaluate_retention(maps:get(dir, Conf), Specs)
                  end),
     ct:pal("RetentionTaken ~p", [RetentionTaken]),
+    ok.
+
+overview_with_initial_offset(Config) ->
+    LDir = ?config(leader_dir, Config),
+    LConf = leader_conf(LDir, 100, Config),
+    LLog0 = seed_log(LConf, [], Config),
+    ?assertEqual({empty, []}, osiris_log:overview(LDir)),
+    LLog = osiris_log:write([<<"hi">>], LLog0),
+    ok = osiris_log:close(LLog),
+    ?assertEqual({{100, 100}, [{1, 100}]}, osiris_log:overview(LDir)),
     ok.
 
 init_partial_writes(Config) ->
@@ -3050,6 +3229,13 @@ write_chunk(Conf, Epoch, Now, Records, Trk0, Log0) ->
             Log = osiris_log:init(Conf#{epoch => Epoch}),
             {Trk1, osiris_log:write(lists:reverse(Records), Now, Log)}
     end.
+
+leader_conf(Dir, InitialOffset, Config) ->
+    #{dir => Dir,
+      epoch => 1,
+      max_segment_size_bytes => 1000 * 1000,
+      name => ?config(test_case, Config),
+      initial_offset => InitialOffset}.
 
 now_ms() ->
     erlang:system_time(millisecond).
