@@ -180,7 +180,7 @@ handle_continue(#{name := Name0,
             {stop, {shutdown, writer_unavailable}, undefined};
         {badrpc, Reason} ->
             {stop, {badrpc, Reason}, undefined};
-        {ok, {LeaderRange, LeaderEpochOffs, LeaderStartOffset}} ->
+        {ok, {LeaderRange, LeaderEpochOffs}} ->
             {Min, Max} = application:get_env(osiris, port_range,
                                              ?DEFAULT_PORT_RANGE),
             Transport = application:get_env(osiris, replication_transport, tcp),
@@ -188,9 +188,22 @@ handle_continue(#{name := Name0,
             CntName = {?MODULE, ExtRef},
             CntSpec = {CntName, {persistent_term, ?FIELDSPEC_KEY}},
 
-            Dir = osiris_log:directory(Config),
             %% use the leader's own idea of where an empty log starts rather
-            %% than this replica's local config, which may be stale
+            %% than this replica's local config, which may be stale. A
+            %% leader still running an older version won't have this
+            %% function, and can only ever have an empty log starting at 0.
+            LeaderStartOffset = case LeaderRange of
+                                    empty ->
+                                        case rpc:call(Node, osiris_writer,
+                                                      starting_offset,
+                                                      [LeaderPid], 30000) of
+                                            O when is_integer(O) -> O;
+                                            _ -> 0
+                                        end;
+                                    _ ->
+                                        0
+                                end,
+            Dir = osiris_log:directory(Config),
             Log = osiris_log:init_acceptor(LeaderRange, LeaderEpochOffs,
                                            Config#{dir => Dir,
                                                    initial_offset => LeaderStartOffset,
