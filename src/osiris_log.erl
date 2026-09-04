@@ -875,11 +875,21 @@ evaluate_tracking_snapshot(#?MODULE{mode = #write{type = writer}} = State0, Trk0
             FstOffs = first_offset(State1),
             FstTs = first_timestamp(State1),
             {SnapBin, Trk1} = osiris_tracking:snapshot(FstOffs, FstTs, Trk0),
-            {write([SnapBin],
-                   ?CHNK_TRK_SNAPSHOT,
-                   Now,
-                   <<>>,
-                   State1), Trk1};
+            case iolist_size(SnapBin) of
+                0 ->
+                    %% none of the tracking is in the log yet so there is
+                    %% nothing to snapshot. Writing an empty snapshot would be
+                    %% worse than writing none at all as recover_tracking/1
+                    %% treats a snapshot as the complete tracking state at that
+                    %% point in the log
+                    {State0, Trk0};
+                _ ->
+                    {write([SnapBin],
+                           ?CHNK_TRK_SNAPSHOT,
+                           Now,
+                           <<>>,
+                           State1), Trk1}
+            end;
         _ ->
             {State0, Trk0}
     end.
