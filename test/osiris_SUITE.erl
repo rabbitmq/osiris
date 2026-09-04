@@ -56,9 +56,7 @@ all_tests() ->
      cluster_delete,
      cluster_failure,
      restart_replica,
-     restart_replica_with_stale_local_initial_offset,
      query_replication_state_with_empty_initial_offset,
-     leader_starting_offset,
      replica_reader_failure_should_stop_replica,
      start_cluster_invalid_replicas,
      replica_unknown_command,
@@ -1170,59 +1168,6 @@ restart_replica(Config) ->
     [stop_peer(Ref) || {Ref, _} <- PeerStates],
     ok.
 
-
-restart_replica_with_stale_local_initial_offset(Config) ->
-    PrivDir = ?config(data_dir, Config),
-    Name = ?config(cluster_name, Config),
-    Prefixes = [s1, s2, s3],
-    PeerStates = [start_child_node(N, PrivDir) || N <- Prefixes],
-    [LeaderE1, Replica1, Replica2] = [NodeName || {_Ref, NodeName} <- PeerStates],
-    InitConf =
-        #{name => Name,
-          reference => Name,
-          epoch => 1,
-          initial_offset => 100,
-          leader_node => LeaderE1,
-          replica_nodes => [Replica1, Replica2]},
-    {ok,
-     #{leader_pid := LeaderE1Pid, replica_pids := [R1Pid, _]} = Conf} =
-        osiris:start_cluster(InitConf),
-    ok = osiris:stop_member(node(R1Pid), Conf),
-    %% the restarted replica's own config is stale (as if the writer had been
-    %% reconfigured, or the metadata store had not caught up yet); it must
-    %% still end up in sync with the leader's actual starting offset
-    StaleConf = Conf#{initial_offset => 999},
-    {ok, Replica1b} = osiris:start_replica(node(R1Pid), StaleConf),
-    ok = osiris:write(LeaderE1Pid, undefined, 42, <<"mah-data">>),
-    wait_for_written([42]),
-    timer:sleep(100),
-    ok = validate_log_offset_reader(Replica1b, [{100, <<"mah-data">>}]),
-    [stop_peer(Ref) || {Ref, _} <- PeerStates],
-    ok.
-
-leader_starting_offset(Config) ->
-    Name = ?config(cluster_name, Config),
-    Conf0 =
-        #{name => Name,
-          epoch => 1,
-          leader_node => node(),
-          replica_nodes => [],
-          initial_offset => 100,
-          dir => ?config(priv_dir, Config)},
-    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
-    %% the writer's empty log starts at the configured offset
-    ?assertEqual({ok, 100},
-                 osiris_replica:leader_starting_offset(node(), Leader, empty)),
-    %% a non-empty range carries the offset itself, so no query is made
-    ?assertEqual({ok, 0},
-                 osiris_replica:leader_starting_offset(node(), Leader,
-                                                       {100, 100})),
-    %% a failure must be propagated rather than silently read as offset 0,
-    %% which would initialise the replica below the writer's first offset
-    ?assertMatch({error, {badrpc, nodedown}},
-                 osiris_replica:leader_starting_offset('nonode@nohost',
-                                                       Leader, empty)),
-    ok.
 
 query_replication_state_with_empty_initial_offset(Config) ->
     Name = ?config(cluster_name, Config),

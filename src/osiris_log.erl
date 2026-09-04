@@ -51,7 +51,6 @@
          counters_ref/1,
          close/1,
          overview/1,
-         starting_offset/1,
          format_status/1,
          update_retention/2,
          evaluate_retention/2,
@@ -3273,10 +3272,6 @@ empty_log_start_offset([]) ->
     0;
 empty_log_start_offset([IdxFile | _]) ->
     index_file_first_offset(IdxFile).
-
--spec starting_offset(file:filename_all()) -> offset().
-starting_offset(Dir) ->
-    empty_log_start_offset(sorted_index_files(Dir)).
 
 index_file_first_offset(IdxFile) when is_list(IdxFile) ->
     list_to_integer(filename:basename(IdxFile, ".index"));

@@ -23,7 +23,7 @@
          start_link/1
         ]).
 %% Test
--export([get_port/1, combine_ips_hosts/4, leader_starting_offset/3]).
+-export([get_port/1, combine_ips_hosts/4]).
 %% gen_server callbacks
 -export([init/1,
          handle_continue/2,
@@ -151,9 +151,9 @@ init(Config) ->
     {ok, undefined, {continue, Config}}.
 
 handle_continue(#{name := Name0,
-                  epoch := _Epoch,
+                  epoch := Epoch,
                   leader_pid := LeaderPid,
-                  reference := _ExtRef} = Config, undefined)
+                  reference := ExtRef} = Config, undefined)
   when ?IS_STRING(Name0) ->
     Name = osiris_util:normalise_name(Name0),
     process_flag(trap_exit, true),
@@ -181,163 +181,131 @@ handle_continue(#{name := Name0,
         {badrpc, Reason} ->
             {stop, {badrpc, Reason}, undefined};
         {ok, {LeaderRange, LeaderEpochOffs}} ->
-            case leader_starting_offset(Node, LeaderPid, LeaderRange) of
-                {error, StartOffsetErr} ->
-                    ?INFO_(Name, "could not query the writer's starting "
-                           "offset: ~w, exiting...", [StartOffsetErr]),
-                    {stop, {shutdown, writer_unavailable}, undefined};
-                {ok, LeaderStartOffset} ->
-                    start_replica(LeaderRange, LeaderEpochOffs,
-                                  LeaderStartOffset, Name, Node, Config)
+            {Min, Max} = application:get_env(osiris, port_range,
+                                             ?DEFAULT_PORT_RANGE),
+            Transport = application:get_env(osiris, replication_transport, tcp),
+            Self = self(),
+            CntName = {?MODULE, ExtRef},
+            CntSpec = {CntName, {persistent_term, ?FIELDSPEC_KEY}},
+
+            Dir = osiris_log:directory(Config),
+            Log = osiris_log:init_acceptor(LeaderRange, LeaderEpochOffs,
+                                           Config#{dir => Dir,
+                                                   counter_spec => CntSpec}),
+            CntRef = osiris_log:counters_ref(Log),
+            {NextOffset, LastChunk} = TailInfo = osiris_log:tail_info(Log),
+
+            case LastChunk of
+                empty ->
+                    ok;
+                _ ->
+                    %% need to ack last chunk back to leader so that it can
+                    %% re-discover the committed offset
+                    osiris_writer:ack(LeaderPid, ack_msg(Config, TailInfo))
+            end,
+            ?INFO_(Name, "osiris replica starting in epoch ~b, next offset ~b, tail info ~w",
+                   [Epoch, NextOffset, TailInfo]),
+
+            %% HostName: append the HostName to the Ip(s) list: in some cases
+            %% like NAT or redirect the local ip addresses are not enough.
+            %% ex: In docker with host network configuration the `inet:getaddrs`
+            %% are only the IP(s) inside docker but the dns lookup happens
+            %% outside the docker image (host machine).
+            %% The host name is the last to leave the compatibility.
+            %% See: rabbitmq/rabbitmq-server#3510
+            {ok, HostName} = inet:gethostname(),
+
+            %% Ips: are the first values used to connect the
+            %% replicas
+            {ok, Ips} = inet:getaddrs(HostName, inet),
+
+            %% HostNameFromHost: The hostname value from RABBITMQ_NODENAME
+            %% can be different from the machine hostname.
+            %% In case of docker with bridge and extra_hosts the use case can be:
+            %% RABBITMQ_NODENAME=rabbit@my-domain
+            %% docker hostname = "114f4317c264"
+            %% the HostNameFromHost will be "my-domain".
+            %% btw 99% of the time the HostNameFromHost is equal to HostName.
+            %% see: rabbitmq/osiris/issues/53 for more details
+            HostNameFromHost = osiris_util:hostname_from_node(),
+
+            IpsHosts = combine_ips_hosts(Transport, Ips, HostName,
+                                         HostNameFromHost),
+
+            Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
+            ?DEBUG_(Name, "replica resolved host endpoints: ~0p", [IpsHosts]),
+            {Port, LSock} = open_listener(Transport, {Min, Max}, 0),
+            ?DEBUG_(Name, "replica listening on port '~b' using transport ~s",
+                    [Port, Transport]),
+            Acceptor = spawn_link(fun() -> accept(Name, Transport, LSock, Self) end),
+            ?DEBUG_(Name, "starting replica reader on node '~w'", [Node]),
+
+            CmttedOfstCalculate = committed_offset_calculate(Config),
+            Features0 = maps:get(features, Config, #{}),
+            Features1 = Features0#{committed_offset_calculate =>
+                                   committed_offset_calculate(Config)},
+            ReplicaReaderConf = #{hosts => IpsHosts,
+                                  port => Port,
+                                  transport => Transport,
+                                  name => Name,
+                                  replica_pid => self(),
+                                  leader_pid => LeaderPid,
+                                  start_offset => TailInfo,
+                                  reference => ExtRef,
+                                  connection_token => Token,
+                                  features => Features1},
+            case osiris_replica_reader:start(Node, ReplicaReaderConf) of
+                {ok, RRPid} ->
+                    true = link(RRPid),
+                    ?DEBUG_(Name, "started replica reader on node '~w'", [Node]),
+                    GcInterval0 = application:get_env(osiris,
+                                                      replica_forced_gc_default_interval,
+                                                      4999),
+
+                    GcInterval1 = case is_integer(GcInterval0) of
+                                      true ->
+                                          _ = erlang:send_after(GcInterval0, self(), force_gc),
+                                          GcInterval0;
+                                      false ->
+                                          infinity
+                                  end,
+                    counters:put(CntRef, ?C_COMMITTED_CHUNK_ID, -1),
+                    counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
+                    counters:put(CntRef, ?C_EPOCH, Epoch),
+                    Shared = osiris_log:get_shared(Log),
+                    osiris_util:cache_reader_context(self(), Dir, Name, Shared, ExtRef,
+                                                     fun(Inc) ->
+                                                             counters:add(CntRef, ?C_READERS, Inc)
+                                                     end),
+                    EvtFmt = maps:get(event_formatter, Config, undefined),
+                    {noreply,
+                     #?MODULE{cfg =
+                                  #cfg{name = Name,
+                                       leader_pid = LeaderPid,
+                                       acceptor_pid = Acceptor,
+                                       replica_reader_pid = RRPid,
+                                       directory = Dir,
+                                       port = Port,
+                                       gc_interval = GcInterval1,
+                                       reference = ExtRef,
+                                       event_formatter = EvtFmt,
+                                       counter = CntRef,
+                                       token = Token,
+                                       transport = Transport,
+                                       committed_offset_calculate = CmttedOfstCalculate},
+                              log = Log,
+                              parse_state = undefined}};
+                {error, {connection_refused = R, _}} ->
+                    %% we don't log details for connection_refused,
+                    %% they are already in the logs of the other node
+                    ?WARN_(Name, "failed to start replica reader on node '~w'. "
+                           "Reason ~0p.", [Node, R]),
+                    {stop, {shutdown, R}, undefined};
+                {error, Reason} ->
+                    ?WARN_(Name, "failed to start replica reader on node '~w'. "
+                           "Reason ~0p.", [Node, Reason]),
+                    {stop, {shutdown, Reason}, undefined}
             end
-    end.
-
-%% Use the writer's own idea of where an empty log starts rather than this
-%% replica's local config, which may be stale.
-leader_starting_offset(_Node, _LeaderPid, Range) when Range =/= empty ->
-    %% init_acceptor/3 derives the offset from the range in this case
-    {ok, 0};
-leader_starting_offset(Node, LeaderPid, empty) ->
-    case rpc:call(Node, osiris_writer, starting_offset, [LeaderPid], 30000) of
-        Offset when is_integer(Offset) ->
-            {ok, Offset};
-        {badrpc, {'EXIT', {undef, _}}} ->
-            %% a writer that predates starting_offset/1 can only ever have
-            %% an empty log starting at 0
-            {ok, 0};
-        Err ->
-            {error, Err}
-    end.
-
-start_replica(LeaderRange, LeaderEpochOffs, LeaderStartOffset, Name, Node,
-              #{epoch := Epoch,
-                leader_pid := LeaderPid,
-                reference := ExtRef} = Config) ->
-    {Min, Max} = application:get_env(osiris, port_range,
-                                     ?DEFAULT_PORT_RANGE),
-    Transport = application:get_env(osiris, replication_transport, tcp),
-    Self = self(),
-    CntName = {?MODULE, ExtRef},
-    CntSpec = {CntName, {persistent_term, ?FIELDSPEC_KEY}},
-
-    Dir = osiris_log:directory(Config),
-    Log = osiris_log:init_acceptor(LeaderRange, LeaderEpochOffs,
-                                   Config#{dir => Dir,
-                                           initial_offset => LeaderStartOffset,
-                                           counter_spec => CntSpec}),
-    CntRef = osiris_log:counters_ref(Log),
-    {NextOffset, LastChunk} = TailInfo = osiris_log:tail_info(Log),
-
-    case LastChunk of
-        empty ->
-            ok;
-        _ ->
-            %% need to ack last chunk back to leader so that it can
-            %% re-discover the committed offset
-            osiris_writer:ack(LeaderPid, ack_msg(Config, TailInfo))
-    end,
-    ?INFO_(Name, "osiris replica starting in epoch ~b, next offset ~b, tail info ~w",
-           [Epoch, NextOffset, TailInfo]),
-
-    %% HostName: append the HostName to the Ip(s) list: in some cases
-    %% like NAT or redirect the local ip addresses are not enough.
-    %% ex: In docker with host network configuration the `inet:getaddrs`
-    %% are only the IP(s) inside docker but the dns lookup happens
-    %% outside the docker image (host machine).
-    %% The host name is the last to leave the compatibility.
-    %% See: rabbitmq/rabbitmq-server#3510
-    {ok, HostName} = inet:gethostname(),
-
-    %% Ips: are the first values used to connect the
-    %% replicas
-    {ok, Ips} = inet:getaddrs(HostName, inet),
-
-    %% HostNameFromHost: The hostname value from RABBITMQ_NODENAME
-    %% can be different from the machine hostname.
-    %% In case of docker with bridge and extra_hosts the use case can be:
-    %% RABBITMQ_NODENAME=rabbit@my-domain
-    %% docker hostname = "114f4317c264"
-    %% the HostNameFromHost will be "my-domain".
-    %% btw 99% of the time the HostNameFromHost is equal to HostName.
-    %% see: rabbitmq/osiris/issues/53 for more details
-    HostNameFromHost = osiris_util:hostname_from_node(),
-
-    IpsHosts = combine_ips_hosts(Transport, Ips, HostName,
-                                 HostNameFromHost),
-
-    Token = crypto:strong_rand_bytes(?TOKEN_SIZE),
-    ?DEBUG_(Name, "replica resolved host endpoints: ~0p", [IpsHosts]),
-    {Port, LSock} = open_listener(Transport, {Min, Max}, 0),
-    ?DEBUG_(Name, "replica listening on port '~b' using transport ~s",
-            [Port, Transport]),
-    Acceptor = spawn_link(fun() -> accept(Name, Transport, LSock, Self) end),
-    ?DEBUG_(Name, "starting replica reader on node '~w'", [Node]),
-
-    CmttedOfstCalculate = committed_offset_calculate(Config),
-    Features0 = maps:get(features, Config, #{}),
-    Features1 = Features0#{committed_offset_calculate =>
-                           committed_offset_calculate(Config)},
-    ReplicaReaderConf = #{hosts => IpsHosts,
-                          port => Port,
-                          transport => Transport,
-                          name => Name,
-                          replica_pid => self(),
-                          leader_pid => LeaderPid,
-                          start_offset => TailInfo,
-                          reference => ExtRef,
-                          connection_token => Token,
-                          features => Features1},
-    case osiris_replica_reader:start(Node, ReplicaReaderConf) of
-        {ok, RRPid} ->
-            true = link(RRPid),
-            ?DEBUG_(Name, "started replica reader on node '~w'", [Node]),
-            GcInterval0 = application:get_env(osiris,
-                                              replica_forced_gc_default_interval,
-                                              4999),
-
-            GcInterval1 = case is_integer(GcInterval0) of
-                              true ->
-                                  _ = erlang:send_after(GcInterval0, self(), force_gc),
-                                  GcInterval0;
-                              false ->
-                                  infinity
-                          end,
-            counters:put(CntRef, ?C_COMMITTED_CHUNK_ID, -1),
-            counters:put(CntRef, ?C_COMMITTED_OFFSET, -1),
-            counters:put(CntRef, ?C_EPOCH, Epoch),
-            Shared = osiris_log:get_shared(Log),
-            osiris_util:cache_reader_context(self(), Dir, Name, Shared, ExtRef,
-                                             fun(Inc) ->
-                                                     counters:add(CntRef, ?C_READERS, Inc)
-                                             end),
-            EvtFmt = maps:get(event_formatter, Config, undefined),
-            {noreply,
-             #?MODULE{cfg =
-                          #cfg{name = Name,
-                               leader_pid = LeaderPid,
-                               acceptor_pid = Acceptor,
-                               replica_reader_pid = RRPid,
-                               directory = Dir,
-                               port = Port,
-                               gc_interval = GcInterval1,
-                               reference = ExtRef,
-                               event_formatter = EvtFmt,
-                               counter = CntRef,
-                               token = Token,
-                               transport = Transport,
-                               committed_offset_calculate = CmttedOfstCalculate},
-                      log = Log,
-                      parse_state = undefined}};
-        {error, {connection_refused = R, _}} ->
-            %% we don't log details for connection_refused,
-            %% they are already in the logs of the other node
-            ?WARN_(Name, "failed to start replica reader on node '~w'. "
-                   "Reason ~0p.", [Node, R]),
-            {stop, {shutdown, R}, undefined};
-        {error, Reason} ->
-            ?WARN_(Name, "failed to start replica reader on node '~w'. "
-                   "Reason ~0p.", [Node, Reason]),
-            {stop, {shutdown, Reason}, undefined}
     end.
 
 combine_ips_hosts(tcp, IPs, HostName, HostNameFromHost) when

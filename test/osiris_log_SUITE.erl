@@ -104,7 +104,6 @@ all_tests() ->
      small_chunk_overview,
      overview,
      overview_with_initial_offset,
-     starting_offset_with_initial_offset,
      init_partial_writes,
      init_with_unexpected_file,
      overview_with_missing_segment,
@@ -2128,19 +2127,6 @@ overview_with_initial_offset(Config) ->
     LLog = osiris_log:write([<<"hi">>], LLog0),
     ok = osiris_log:close(LLog),
     ?assertEqual({{100, 100}, [{1, 100}]}, osiris_log:overview(LDir)),
-    ok.
-
-starting_offset_with_initial_offset(Config) ->
-    LDir = ?config(leader_dir, Config),
-    %% a directory that has never been initialised has no segment to name
-    %% the offset after
-    ?assertEqual(0, osiris_log:starting_offset(LDir)),
-    LConf = leader_conf(LDir, 100, Config),
-    LLog0 = seed_log(LConf, [], Config),
-    ?assertEqual(100, osiris_log:starting_offset(LDir)),
-    LLog = osiris_log:write([<<"hi">>], LLog0),
-    ok = osiris_log:close(LLog),
-    ?assertEqual(100, osiris_log:starting_offset(LDir)),
     ok.
 
 init_partial_writes(Config) ->

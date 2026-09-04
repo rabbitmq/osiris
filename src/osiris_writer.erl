@@ -16,7 +16,6 @@
 -export([start_link/1,
          start/1,
          overview/1,
-         starting_offset/1,
          init_data_reader/3,
          register_data_listener/2,
          ack/2,
@@ -127,19 +126,6 @@ overview(Pid) when node(Pid) == node() ->
         true ->
             #{dir := Dir} = osiris_util:get_reader_context(Pid),
             {ok, osiris_log:overview(Dir)};
-        false ->
-            {error, no_process}
-    end.
-
-%% called separately from overview/1, whose result is part of the RPC wire
-%% contract with replicas that may still be running an older version during
-%% a rolling upgrade
--spec starting_offset(pid()) -> osiris:offset() | {error, no_process}.
-starting_offset(Pid) when node(Pid) == node() ->
-    case erlang:is_process_alive(Pid) of
-        true ->
-            #{dir := Dir} = osiris_util:get_reader_context(Pid),
-            osiris_log:starting_offset(Dir);
         false ->
             {error, no_process}
     end.
