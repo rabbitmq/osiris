@@ -41,6 +41,10 @@
       reference => term(),
       event_formatter => {module(), atom(), list()},
       retention => [osiris:retention_spec()],
+      %% the offset of the first entry written to a brand new stream. It has
+      %% to be the same for every member and cannot change for the life of
+      %% the stream
+      initial_offset => offset(),
       features => features(),
       atom() => term()}.
 

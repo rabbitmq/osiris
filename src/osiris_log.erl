@@ -396,7 +396,7 @@
       counter => counters:counters_ref(),
       %% spec for creating the counter
       counter_spec => counter_spec(),
-      %% used when initialising a log from an offset other than 0
+      %% the offset the log starts at when there is no data on disk yet
       initial_offset => osiris:offset(),
       %% a cached list of the index files for a given log
       %% avoids scanning disk for files multiple times if already know
@@ -540,9 +540,8 @@ init(#{dir := Dir,
     end,
 
     Cnt = make_counter(Config),
-    %% initialise offset counter to -1 as 0 is the first offset in the log and
-    %% it hasn't necessarily been written yet, for an empty log the first offset
-    %% is initialised to 0 however and will be updated after each retention run.
+    %% every branch below overwrites this with the last offset in the log,
+    %% which for an empty log is the offset before the one it starts at
     counters:put(Cnt, ?C_OFFSET, -1),
     counters:put(Cnt, ?C_SEGMENTS, 0),
     Shared = case Config of
@@ -562,22 +561,18 @@ init(#{dir := Dir,
                shared = Shared,
                filter_size = FilterSize},
     ok = maybe_fix_corrupted_files(Config),
-    DefaultNextOffset = case Config of
-                            #{initial_offset := IO}
-                              when WriterType == acceptor ->
-                                IO;
-                            _ ->
-                                0
-                        end,
+    %% for an acceptor this is derived from the writer's offset range, for a
+    %% writer it is the offset the stream was configured to start at
+    DefaultNextOffset = maps:get(initial_offset, Config, 0),
     case first_and_last_seginfos(Config) of
         none ->
             osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
             osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
-            %% When the log starts at a non-zero offset (e.g. after a
-            %% retry_accept_chunk reset), reflect that in the first_offset counter
-            %% so that message-count calculations (last_offset + 1 - first_offset)
-            %% remain correct.
+            %% both counters have to reflect a non-zero start so that
+            %% message-count calculations (last_offset + 1 - first_offset)
+            %% remain correct
             counters:put(Cnt, ?C_FIRST_OFFSET, DefaultNextOffset),
+            counters:put(Cnt, ?C_OFFSET, DefaultNextOffset - 1),
             open_new_segment(#?MODULE{cfg = Cfg,
                                       mode =
                                           #write{type = WriterType,
@@ -646,12 +641,17 @@ init(#{dir := Dir,
             %% earlier
             ok = file:truncate(SegFd),
             {ok, _} = file:position(IdxFd, ?IDX_HEADER_SIZE),
-            osiris_log_shared:set_first_chunk_id(Shared, DefaultNextOffset - 1),
-            osiris_log_shared:set_last_chunk_id(Shared, DefaultNextOffset - 1),
+            %% a segment is named after the offset of the first chunk it
+            %% can contain, which is what an empty log resumes from
+            NextOffset = index_file_first_offset(IdxFilename),
+            counters:put(Cnt, ?C_FIRST_OFFSET, NextOffset),
+            counters:put(Cnt, ?C_OFFSET, NextOffset - 1),
+            osiris_log_shared:set_first_chunk_id(Shared, NextOffset - 1),
+            osiris_log_shared:set_last_chunk_id(Shared, NextOffset - 1),
             #?MODULE{cfg = Cfg,
                      mode =
                          #write{type = WriterType,
-                                tail_info = {DefaultNextOffset, empty},
+                                tail_info = {NextOffset, empty},
                                 current_epoch = Epoch},
                      current_file = filename:basename(Filename),
                      fd = SegFd,
@@ -905,8 +905,9 @@ init_acceptor(Range, EpochOffsets0,
     ?DEBUG_(Name, "from epoch offsets: ~w range ~w", [EpochOffsets, Range]),
     RemIdxFiles = truncate_to(Name, Range, EpochOffsets, IdxFiles),
     %% after truncation we can do normal init
-    InitOffset = case Range  of
-                     empty -> 0;
+    InitOffset = case Range of
+                     %% the writer has no data yet
+                     empty -> maps:get(initial_offset, Conf, 0);
                      {O, _} -> O
                  end,
     init(Conf#{initial_offset => InitOffset,
@@ -1030,6 +1031,7 @@ init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir,
                                             name := Name} = Config) ->
     IdxFiles = sorted_index_files(Dir),
     Range = offset_range_from_idx_files(IdxFiles),
+    EmptyStartChId = empty_log_start_offset(IdxFiles),
     ?DEBUG_(Name, " at ~b prev ~w local range: ~w",
            [StartChunkId, PrevEOT, Range]),
     %% Invariant:  there is always at least one segment left on disk
@@ -1038,7 +1040,7 @@ init_data_reader({StartChunkId, PrevEOT}, #{dir := Dir,
           when StartChunkId < FstOffs
                orelse StartChunkId > LastOffs + 1 ->
             {error, {offset_out_of_range, Range}};
-        empty when StartChunkId > 0 ->
+        empty when StartChunkId =/= EmptyStartChId ->
             {error, {offset_out_of_range, Range}};
         _ when PrevEOT == empty ->
             %% this assumes the offset is in range
@@ -1119,10 +1121,9 @@ init_data_reader_at(ChunkId, FilePos, File,
     end.
 
 init_data_reader_from(ChunkId,
-                      {end_of_log, #seg_info{file = File,
-                                             last = LastChunk}},
+                      {end_of_log, #seg_info{file = File} = SegInfo},
                       Config) ->
-    {ChunkId, AttachPos} = next_location(LastChunk),
+    {ChunkId, AttachPos} = next_location(SegInfo),
     init_data_reader_at(ChunkId, AttachPos, File, Config);
 init_data_reader_from(ChunkId,
                       {found, #seg_info{file = File} = SegInfo},
@@ -1255,7 +1256,8 @@ resolve_offset_location(first, #{} = Conf) ->
             case build_seg_info(FstIdxFile) of
                 {ok, #seg_info{file = File,
                                first = undefined}} ->
-                    {ok, {0, ?LOG_HEADER_SIZE, File}};
+                    {ok, {index_file_first_offset(FstIdxFile),
+                          ?LOG_HEADER_SIZE, File}};
                 {ok, #seg_info{file = File,
                                first = #chunk_info{id = FirstChunkId,
                                                    pos = FilePos}}} ->
@@ -1270,9 +1272,8 @@ resolve_offset_location(next, #{} = Conf) ->
             {error, no_index_file};
         [LastIdxFile | _] ->
             case build_seg_info(LastIdxFile) of
-                {ok, #seg_info{file = File,
-                               last = LastChunk}} ->
-                    {NextChunkId, FilePos} = next_location(LastChunk),
+                {ok, #seg_info{file = File} = SegInfo} ->
+                    {NextChunkId, FilePos} = next_location(SegInfo),
                     {ok, {NextChunkId, FilePos, File}};
                 Err ->
                     exit(Err)
@@ -1305,16 +1306,15 @@ resolve_offset_location(OffsetSpec, #{} = Conf)
             %% clamp start offset
             StartOffset = case {OffsetSpec, Range} of
                               {_, empty} ->
-                                  0;
+                                  empty_log_start_offset(IdxFiles);
                               {Offset, {FirstChId, _LastChId}} ->
                                   max(FirstChId, Offset)
                           end,
             case find_segment_for_offset(StartOffset, IdxFiles) of
                 {not_found, high} ->
                     throw({retry_with, next, Conf});
-                {end_of_log, #seg_info{file = SegmentFile,
-                                       last = LastChunk}} ->
-                    {ChunkId, FilePos} = next_location(LastChunk),
+                {end_of_log, #seg_info{file = SegmentFile} = SegInfo} ->
+                    {ChunkId, FilePos} = next_location(SegInfo),
                     {ok, {ChunkId, FilePos, SegmentFile}};
                 {found, #seg_info{file = SegmentFile} = SegmentInfo} ->
                     {ChunkId, _Epoch, FilePos} =
@@ -2605,7 +2605,7 @@ write_chunk(Chunk,
                      index_fd = IdxFd,
                      mode =
                          #write{segment_size = {SegSizeBytes, SegSizeChunks},
-                                tail_info = {Next, _}} =
+                                tail_info = {Next, LastChunk}} =
                              Write} =
                 State) ->
     case max_segment_size_reached(State) of
@@ -2633,7 +2633,7 @@ write_chunk(Chunk,
             %% update counters
             counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
             counters:add(CntRef, ?C_CHUNKS, 1),
-            maybe_set_first_offset(Next, Timestamp, Cfg),
+            maybe_set_first_offset(LastChunk, Next, Timestamp, Cfg),
             State#?MODULE{mode =
                           Write#write{tail_info = {NextOffset,
                                                    {Epoch, Next, Timestamp}},
@@ -2642,11 +2642,14 @@ write_chunk(Chunk,
     end.
 
 
-maybe_set_first_offset(0, Timestamp, #cfg{shared = Ref, counter = CntRef}) ->
-    counters:put(CntRef, ?C_FIRST_OFFSET, 0),
+%% the first chunk written to a log sets its first offset and timestamp. It is
+%% at offset 0 only when the log starts at 0, so the empty tail identifies it
+maybe_set_first_offset(empty, ChunkId, Timestamp,
+                       #cfg{shared = Ref, counter = CntRef}) ->
+    counters:put(CntRef, ?C_FIRST_OFFSET, ChunkId),
     counters:put(CntRef, ?C_FIRST_TIMESTAMP, Timestamp),
-    osiris_log_shared:set_first_chunk_id(Ref, 0);
-maybe_set_first_offset(_, _Timestamp, _Cfg) ->
+    osiris_log_shared:set_first_chunk_id(Ref, ChunkId);
+maybe_set_first_offset(_LastChunk, _ChunkId, _Timestamp, _Cfg) ->
     ok.
 
 max_segment_size_reached(
@@ -3253,13 +3256,22 @@ trigger_retention_eval(#?MODULE{cfg =
     ok = osiris_retention:eval(Name, Dir, RetentionSpec, EvalFun),
     State.
 
-next_location(undefined) ->
-    {0, ?LOG_HEADER_SIZE};
-next_location(#chunk_info{id = Id,
-                          num = Num,
-                          pos = Pos,
-                          size = Size}) ->
+next_location(#seg_info{index = IdxFile,
+                        last = undefined}) ->
+    %% an empty segment: the next chunk goes to the offset it is named after
+    {index_file_first_offset(IdxFile), ?LOG_HEADER_SIZE};
+next_location(#seg_info{last = #chunk_info{id = Id,
+                                           num = Num,
+                                           pos = Pos,
+                                           size = Size}}) ->
     {Id + Num, Pos + Size + ?HEADER_SIZE_B}.
+
+%% the offset an empty log's first chunk will be written at, taken from the
+%% name of its only segment
+empty_log_start_offset([]) ->
+    0;
+empty_log_start_offset([IdxFile | _]) ->
+    index_file_first_offset(IdxFile).
 
 index_file_first_offset(IdxFile) when is_list(IdxFile) ->
     list_to_integer(filename:basename(IdxFile, ".index"));

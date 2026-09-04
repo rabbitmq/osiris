@@ -34,11 +34,13 @@ all() ->
 
 all_tests() ->
     [single_node_write,
+     single_node_write_initial_offset,
      single_node_write_sub_batch_restart,
      single_node_uncorrelated_write,
      cluster_write_replication_plain,
      cluster_write_replication_tls,
      cluster_write_replication_plain_with_filter,
+     cluster_write_replication_initial_offset,
      start_many_clusters,
      quorum_write,
      cluster_batch_write,
@@ -54,6 +56,7 @@ all_tests() ->
      cluster_delete,
      cluster_failure,
      restart_replica,
+     query_replication_state_with_empty_initial_offset,
      replica_reader_failure_should_stop_replica,
      start_cluster_invalid_replicas,
      replica_unknown_command,
@@ -224,6 +227,43 @@ single_node_write(Config) ->
     ?assertEqual(42, osiris:fetch_writer_seq(Leader, Wid)),
     ok.
 
+single_node_write_initial_offset(Config) ->
+    Name = ?config(cluster_name, Config),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          replica_nodes => [],
+          initial_offset => 100,
+          dir => ?config(priv_dir, Config)},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    %% an empty stream starts at the configured initial offset
+    {ok, R0} = osiris:init_reader(Leader, first, {'test', []}, #{}),
+    ?assertEqual(100, osiris_log:next_offset(R0)),
+    ok = osiris_log:close(R0),
+    ?assertEqual(0, message_count(Name)),
+    Wid = <<"wid1">>,
+    ok = osiris:write(Leader, Wid, 42, <<"mah-data">>),
+    receive
+        {osiris_written, _, Wid, [42]} ->
+            ok
+    after 2000 ->
+              flush(),
+              exit(osiris_written_timeout)
+    end,
+    ok = osiris:write(Leader, Wid, 43, <<"mah-data2">>),
+    receive
+        {osiris_written, _, Wid, [43]} ->
+            ok
+    after 2000 ->
+              flush(),
+              exit(osiris_written_timeout_2)
+    end,
+    ok = validate_log_offset_reader(Leader, [{100, <<"mah-data">>},
+                                             {101, <<"mah-data2">>}]),
+    ?assertEqual(2, message_count(Name)),
+    ok.
+
 single_node_write_sub_batch_restart(Config) ->
     Name = ?config(cluster_name, Config),
     Dir = ?config(priv_dir, Config),
@@ -343,6 +383,38 @@ cluster_write_replication_tls_ipv6(Config) ->
 
 cluster_write_replication_plain_with_filter(Config) ->
     cluster_write(Config, <<"banana">>).
+
+cluster_write_replication_initial_offset(Config) ->
+    ok = logger:set_primary_config(level, all),
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    PeerStates = [start_child_node(N, PrivDir, application:get_all_env(osiris))
+                  || N <- [s1, s2, s3]],
+    [LeaderNode | Replicas] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          initial_offset => 100,
+          leader_node => LeaderNode,
+          replica_nodes => Replicas},
+    %% the replicas attach whilst the writer log is still empty, the only
+    %% point at which they can learn the configured offset
+    {ok, #{leader_pid := Leader, replica_pids := ReplicaPids}} =
+        osiris:start_cluster(Conf0),
+    ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
+    receive
+        {osiris_written, _, undefined, [42]} ->
+            ok
+    after 2000 ->
+              flush(),
+              exit(osiris_written_timeout)
+    end,
+    %% give time for all members to receive data
+    timer:sleep(500),
+    [ok = validate_log_offset_reader(P, [{100, <<"mah-data">>}])
+     || P <- [Leader | ReplicaPids]],
+    [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    ok.
 
 cluster_write(Config, Filter) ->
     ok = logger:set_primary_config(level, all),
@@ -1096,6 +1168,21 @@ restart_replica(Config) ->
     [stop_peer(Ref) || {Ref, _} <- PeerStates],
     ok.
 
+
+query_replication_state_with_empty_initial_offset(Config) ->
+    Name = ?config(cluster_name, Config),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => node(),
+          replica_nodes => [],
+          initial_offset => 100,
+          dir => ?config(priv_dir, Config)},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    %% used to crash with a case_clause because the empty tail was assumed
+    %% to always be {0, empty}
+    ?assertMatch(#{}, osiris_writer:query_replication_state(Leader)),
+    ok.
 
 replica_unknown_command(Config) ->
     PrivDir = ?config(data_dir, Config),
@@ -2282,6 +2369,13 @@ validate_log(Log0, Expected) ->
             ct:pal("got entries ~p", [Entries]),
             validate_log(Log, Expected -- Entries)
     end.
+
+%% the number of messages in a stream, as RabbitMQ calculates it
+message_count(Name) ->
+    #{{osiris_writer, Name} := #{offset := Offset,
+                                 first_offset := FirstOffset}} =
+        osiris_counters:overview(),
+    Offset + 1 - FirstOffset.
 
 validate_log_offset_reader(Leader, Exp) when is_pid(Leader) ->
     validate_log_offset_reader(Leader, Exp, undefined).

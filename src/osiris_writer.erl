@@ -237,6 +237,9 @@ handle_continue(#{name := Name,
                 %% recover the committed offset from the last
                 %% batch offset in the log
                 {TailChId, TailNextOffs};
+            {TailNextOffs, empty} ->
+                %% nothing written yet, so nothing is committed
+                {TailNextOffs - 1, TailNextOffs};
             _ ->
                 {-1, 0}
         end,
@@ -552,8 +555,8 @@ handle_command({call, From, query_replication_state},
                        end, R),
     %% need to merge pending tracking entries before read
     Result1 = case osiris_log:tail_info(Log) of
-                  {0, empty} ->
-                      Result0#{node() => {-1, 0}};
+                  {Next, empty} ->
+                      Result0#{node() => {Next - 1, 0}};
                   ?TAIL_INFO(O, T) ->
                       Result0#{node() => {O, T}}
               end,
