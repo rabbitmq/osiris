@@ -65,11 +65,9 @@ jobs:
       - name: Build
         run: make
 
-      # Only the tests that don't send funs defined in the test suite itself to
-      # the peers: those would fail with badfun by construction here.
       - name: Run tests
         run: |
           peer=$(realpath ../osiris-peer)
           export OSIRIS_PEER_ERL="$PEER_OTP_DIR/otp/bin/erl"
           export OSIRIS_PEER_PA="$peer/ebin:$peer/test:$(echo $peer/deps/*/ebin | tr ' ' ':')"
-          make ct-osiris t=tests:fetch_writer_seq_remote
+          make ct-osiris
