@@ -16,9 +16,9 @@ jobs:
       fail-fast: false
       matrix:
         erlang_version:
-        - "26"
         - "27"
         - "28"
+        - "29"
     steps:
     - name: Clone the repository
       uses: actions/checkout@v2
