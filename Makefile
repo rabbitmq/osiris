@@ -21,6 +21,7 @@ DEPS = gen_batch_server seshat
 
 # TEST_DEPS=eunit_formatters looking_glass
 dep_tls_gen = git https://github.com/rabbitmq/tls-gen.git main
+dep_eunit_formatters = git https://github.com/seancribbs/eunit_formatters main
 dep_proper = hex 1.4.0
 TEST_DEPS=eunit_formatters tls_gen proper
 
