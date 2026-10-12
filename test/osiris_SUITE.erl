@@ -2261,7 +2261,7 @@ start_child_node(NodeName, PrivDir, ExtraAppConfig0) ->
     ExtraAppConfig = [{data_dir, Dir} | ExtraAppConfig1],
 
     Host = get_current_host(),
-    Args = ["-pa" | search_paths()] ++
+    Args = ["-pa" | peer_search_paths()] ++
            ["-kernel", "prevent_overlapping_partitions", "false"],
     %% ct:pal("starting child node ~p with ~p~n", [NodeName, Args]),
     {_Ref, FinalNodeName} = Result =
@@ -2330,7 +2330,7 @@ start_peer_node_25(_Host, NodeName, Args) ->
         args      => Args,
         longnames => false
     },
-    ?PEER_MODULE:start_link(Opts).
+    ?PEER_MODULE:start_link(maybe_peer_exec(Opts)).
 
 start_peer_node_pre_25(Host, NodeName, Args) ->
     ArgString = string:join(Args, " "),
@@ -2363,6 +2363,27 @@ make_node_name(N) ->
     {ok, H} = inet:gethostname(),
     list_to_atom(lists:flatten(
                      io_lib:format("~s@~s", [N, H]))).
+
+%% Mixed OTP version testing: OSIRIS_PEER_ERL points to the erl executable
+%% of a different OTP version and OSIRIS_PEER_PA is a (path separator
+%% delimited) list of code paths holding osiris and the test modules compiled
+%% with that version. This way peers run beam files built by a different
+%% compiler, as they would in a cluster with mixed OTP versions.
+maybe_peer_exec(Opts) ->
+    case os:getenv("OSIRIS_PEER_ERL") of
+        false ->
+            Opts;
+        Erl ->
+            Opts#{exec => {Erl, []}}
+    end.
+
+peer_search_paths() ->
+    case os:getenv("OSIRIS_PEER_PA") of
+        false ->
+            search_paths();
+        Paths ->
+            string:lexemes(Paths, ":")
+    end.
 
 search_paths() ->
     Ld = code:lib_dir(),
