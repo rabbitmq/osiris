@@ -709,6 +709,28 @@ cluster_offset_listener(Config) ->
     end,
     ok.
 
+%% Anonymous funs must not be sent to peers: they may run a different OTP
+%% version (see mixed OTP CI), where the same module has a different fun
+%% identity. Hence the exported functions spawned via MFA below.
+offset_listener_on_replica(Self, R) ->
+    {ok, Log0} = osiris:init_reader(R, 0, {test, []}),
+    osiris:register_offset_listener(R, 0),
+    %% gh 172 - ensure a higher offset listener does not block
+    %% a lower one
+    osiris:register_offset_listener(R, 1),
+    receive
+        {osiris_offset, _Name, O} when O > -1 ->
+            ct:pal("got offset ~w", [O]),
+            {[{0, <<"mah-data">>}], Log} =
+                osiris_log:read_chunk_parsed(Log0),
+            osiris_log:close(Log),
+            Self ! test_passed,
+            ok
+    after 2000 ->
+        flush(),
+        exit(osiris_offset_timeout)
+    end.
+
 replica_offset_listener(Config) ->
     PrivDir = ?config(data_dir, Config),
     Name = ?config(cluster_name, Config),
@@ -723,26 +745,7 @@ replica_offset_listener(Config) ->
         osiris:start_cluster(Conf0),
     Self = self(),
     R = hd(ReplicaPids),
-    _ = spawn(node(R),
-              fun() ->
-                 {ok, Log0} = osiris:init_reader(R, 0, {test, []}),
-                 osiris:register_offset_listener(R, 0),
-                 %% gh 172 - ensure a higher offset listener does not block
-                 %% a lower one
-                 osiris:register_offset_listener(R, 1),
-                 receive
-                     {osiris_offset, _Name, O} when O > -1 ->
-                         ct:pal("got offset ~w", [O]),
-                         {[{0, <<"mah-data">>}], Log} =
-                             osiris_log:read_chunk_parsed(Log0),
-                         osiris_log:close(Log),
-                         Self ! test_passed,
-                         ok
-                 after 2000 ->
-                     flush(),
-                     exit(osiris_offset_timeout)
-                 end
-              end),
+    _ = spawn(node(R), ?MODULE, offset_listener_on_replica, [Self, R]),
     timer:sleep(100),
     ok = osiris:write(Leader, undefined, 42, <<"mah-data">>),
 
@@ -756,6 +759,12 @@ replica_offset_listener(Config) ->
     end,
     [stop_peer(Ref) || {Ref, _} <- PeerStates],
     ok.
+
+validate_read_on_replica(Self, R, Num) ->
+    {ok, RLog0} = osiris_writer:init_data_reader(R, {0, empty},
+                                                 #{counter_spec => {'test', []}}),
+    {_, _} = timer:tc(fun() -> validate_read(Num, RLog0) end),
+    Self ! validate_read_done.
 
 read_validate_single_node(Config) ->
     _PrivDir = ?config(data_dir, Config),
@@ -841,12 +850,7 @@ read_validate(Config) ->
     %% test reading on a secondary
     R = hd(ReplicaPids),
     Self = self(),
-    _ = spawn(node(R),
-              fun() ->
-                 {ok, RLog0} = osiris_writer:init_data_reader(R, {0, empty}, #{counter_spec => {'test', []}}),
-                 {_, _} = timer:tc(fun() -> validate_read(Num, RLog0) end),
-                 Self ! validate_read_done
-              end),
+    _ = spawn(node(R), ?MODULE, validate_read_on_replica, [Self, R, Num]),
     receive
         validate_read_done ->
             ct:pal("all reads validated", []),
@@ -1453,16 +1457,16 @@ retention_add_replica_after(Config) ->
     [stop_peer(Ref) || {Ref, _} <- PeerStates],
     ok.
 
+read_last_entry(Self, Pid, Entry) ->
+    {ok, Log0} = osiris:init_reader(Pid, last, {test, []}),
+    [{_, Entry}] = read_til_end(Log0, undefined),
+    Self ! {self(), done},
+    ok.
+
 check_last_entry(Pid, Entry) when is_pid(Pid) ->
     Self = self(),
     ct:pal("checking last entry for node ~ts ~w", [node(Pid), Pid]),
-    X = spawn(node(Pid),
-               fun () ->
-                       {ok, Log0} = osiris:init_reader(Pid, last, {test, []}),
-                       [{_, Entry}] = read_til_end(Log0, undefined),
-                       Self ! {self(), done},
-                       ok
-               end),
+    X = spawn(node(Pid), ?MODULE, read_last_entry, [Self, Pid, Entry]),
     receive
         {X, done} ->
             ct:pal("checking last entry done ~w", [node(Pid)]),
@@ -1471,6 +1475,16 @@ check_last_entry(Pid, Entry) when is_pid(Pid) ->
               exit({done_timeout, node(X)})
     end,
     ok.
+
+validate_reader(Self, P) ->
+    {ok, Log0} = osiris:init_reader(P, first, {test, []}),
+    {[{0, <<"first">>}], Log} = osiris_log:read_chunk_parsed(Log0),
+    receive
+        validate ->
+            [{_, <<"last">>}] = read_til_end(Log, undefined),
+            Self ! {done, self()},
+            ok
+    end.
 
 retention_overtakes_offset_reader(Config) ->
     DataDir = ?config(data_dir, Config),
@@ -1492,24 +1506,11 @@ retention_overtakes_offset_reader(Config) ->
     ok = osiris:write(Leader, undefined, 0, <<"first">>),
     timer:sleep(500),
     Self = self(),
-    ReaderFun =
-        fun (P) ->
-                fun () ->
-                        {ok, Log0} = osiris:init_reader(P, first, {test, []}),
-                        {[{0, <<"first">>}], Log} = osiris_log:read_chunk_parsed(Log0),
-                        receive
-                            validate ->
-                                [{_, <<"last">>}] = read_til_end(Log, undefined),
-                                Self ! {done, self()},
-                                ok
-                        end
-                end
-        end,
 
 
-    Pid1 = spawn_link(node(Leader), ReaderFun(Leader)),
-    Pid2 = spawn_link(node(ReplicaPid1), ReaderFun(ReplicaPid1)),
-    Pid3 = spawn_link(node(ReplicaPid2), ReaderFun(ReplicaPid2)),
+    Pid1 = spawn_link(node(Leader), ?MODULE, validate_reader, [Self, Leader]),
+    Pid2 = spawn_link(node(ReplicaPid1), ?MODULE, validate_reader, [Self, ReplicaPid1]),
+    Pid3 = spawn_link(node(ReplicaPid2), ?MODULE, validate_reader, [Self, ReplicaPid2]),
 
     write_n(Leader, Num, 0, 1000 * 8, #{}),
     ok = osiris:write(Leader, undefined, 0, <<"last">>),
@@ -1558,6 +1559,11 @@ update_retention(Config) ->
     %% assert on num segs
     ok.
 
+count_segments(DataDir, TestCase, Pid) ->
+    Node = hd(string:split(atom_to_list(node(Pid)), "@")),
+    Wc = filename:join([DataDir, Node, TestCase, "*.segment"]),
+    length(wildcard(Wc)).
+
 update_retention_replica(Config) ->
     DataDir = ?config(data_dir, Config),
     Num = 150000,
@@ -1584,16 +1590,13 @@ update_retention_replica(Config) ->
     ok = osiris:update_retention(R2, Retention),
     timer:sleep(1000),
     %% validate
-    Fun = fun(Pid) ->
-             Node = hd(string:split(atom_to_list(node(Pid)), "@")),
-             Wc = filename:join([DataDir, Node, ?FUNCTION_NAME, "*.segment"]),
-             Files = wildcard(Wc),
-             length(Files)
-          end,
-    ?assertEqual(1, erpc:call(node(R1), erlang, apply, [Fun, [R1]])),
-    ?assertEqual(1, erpc:call(node(R2), erlang, apply, [Fun, [R2]])),
+    ?assertEqual(1, erpc:call(node(R1), ?MODULE, count_segments,
+                           [DataDir, ?FUNCTION_NAME, R1])),
+    ?assertEqual(1, erpc:call(node(R2), ?MODULE, count_segments,
+                           [DataDir, ?FUNCTION_NAME, R2])),
     ?assertEqual(1,
-                 erpc:call(node(Leader), erlang, apply, [Fun, [Leader]])),
+                 erpc:call(node(Leader), ?MODULE, count_segments,
+                           [DataDir, ?FUNCTION_NAME, Leader])),
     [stop_peer(Ref) || {Ref, _} <- PeerStates],
     ok.
 
