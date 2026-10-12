@@ -1491,9 +1491,7 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
              State#?MODULE{mode = Read#read{next_offset = ChId + NumRecords,
                                             position = NextPos}}};
         {end_of_stream, _} = EOF ->
-            EOF;
-        {error, _} = Err ->
-            Err
+            EOF
     end.
 
 -record(iterator, {fd :: file:io_device(),
