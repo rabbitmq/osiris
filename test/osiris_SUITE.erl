@@ -34,6 +34,7 @@ all() ->
 
 all_tests() ->
     [single_node_write,
+     fetch_writer_seq_remote,
      single_node_write_initial_offset,
      single_node_write_sub_batch_restart,
      single_node_uncorrelated_write,
@@ -225,6 +226,25 @@ single_node_write(Config) ->
         exit(osiris_written_timeout)
     end,
     ?assertEqual(42, osiris:fetch_writer_seq(Leader, Wid)),
+    ok.
+
+fetch_writer_seq_remote(Config) ->
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    {Ref, LeaderNode} = start_child_node(s1, PrivDir),
+    Conf0 =
+        #{name => Name,
+          epoch => 1,
+          leader_node => LeaderNode,
+          replica_nodes => []},
+    {ok, #{leader_pid := Leader}} = osiris:start_cluster(Conf0),
+    ?assertNotEqual(node(), node(Leader)),
+    Wid = <<"wid1">>,
+    ?assertEqual(undefined, osiris:fetch_writer_seq(Leader, Wid)),
+    ok = osiris:write(Leader, Wid, 42, <<"mah-data">>),
+    wait_for_written([42]),
+    ?assertEqual(42, osiris:fetch_writer_seq(Leader, Wid)),
+    stop_peer(Ref),
     ok.
 
 single_node_write_initial_offset(Config) ->
