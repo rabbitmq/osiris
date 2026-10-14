@@ -73,7 +73,9 @@
     offset() |
     {timestamp, timestamp()}.
 -type retention_spec() ::
-    {max_bytes, non_neg_integer()} | {max_age, milliseconds()}.
+    {max_bytes, non_neg_integer()} | {max_age, milliseconds()} |
+    %% the first chunk of an open transaction, which retention keeps
+    {txn_pin, offset()}.
 -type writer_id() :: binary().
 -type batch() :: {batch, NumRecords :: non_neg_integer(),
                   compression_type(),

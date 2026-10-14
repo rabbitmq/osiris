@@ -16,6 +16,9 @@
          write/2,
          write/3,
          write/5,
+         write_txn/3,
+         commit_txn/2,
+         abort_txn/2,
          recover_tracking/1,
          accept_chunk/2,
          next_offset/1,
@@ -382,7 +385,10 @@
 -type chunk_type() ::
     ?CHNK_USER |
     ?CHNK_TRK_DELTA |
-    ?CHNK_TRK_SNAPSHOT.
+    ?CHNK_TRK_SNAPSHOT |
+    ?CHNK_TXN_DATA |
+    ?CHNK_TXN_COMMIT |
+    ?CHNK_TXN_ABORT.
 -type config() ::
     osiris:config() |
     #{dir := file:filename_all(),
@@ -461,7 +467,12 @@
         {type = writer :: writer | acceptor,
          segment_size = {?LOG_HEADER_SIZE, 0} :: {non_neg_integer(), non_neg_integer()},
          current_epoch :: non_neg_integer(),
-         tail_info = {0, empty} :: osiris:tail_info()
+         tail_info = {0, empty} :: osiris:tail_info(),
+         %% the data chunks of open transactions, newest first: chunk id,
+         %% number of records, first offset of the segment, file position
+         txns = #{} :: #{binary() => [{offset(), non_neg_integer(), offset(),
+                                       non_neg_integer()}]},
+         txn_fd :: undefined | file:io_device()
         }).
 -record(?MODULE,
         {cfg :: #cfg{},
@@ -624,7 +635,8 @@ init(#{dir := Dir,
                          #write{type = WriterType,
                                 tail_info = TailInfo,
                                 segment_size = {Size, NumChunks},
-                                current_epoch = Epoch},
+                                current_epoch = Epoch,
+                                txns = recover_txns(sorted_index_files(Dir))},
                      current_file = filename:basename(Filename),
                      fd = SegFd,
                      index_fd = IdxFd};
@@ -652,7 +664,8 @@ init(#{dir := Dir,
                      mode =
                          #write{type = WriterType,
                                 tail_info = {NextOffset, empty},
-                                current_epoch = Epoch},
+                                current_epoch = Epoch,
+                                txns = recover_txns(sorted_index_files(Dir))},
                      current_file = filename:basename(Filename),
                      fd = SegFd,
                      index_fd = IdxFd}
@@ -703,6 +716,7 @@ maybe_fix_corrupted_files(IdxFiles) ->
             ?WARNING("deleting an empty segment file: ~0p", [LastSegFile]),
             ok = prim_file:delete(LastIdxFile),
             ok = prim_file:delete(LastSegFile),
+            ok = delete_txn_file(LastIdxFile),
             maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile]);
         LastSegFileSize ->
             ok = truncate_invalid_idx_records(LastIdxFile, LastSegFileSize)
@@ -711,6 +725,7 @@ maybe_fix_corrupted_files(IdxFiles) ->
             ?WARNING("deleting index of the missing last segment file: ~0p",
                      [LastSegFile]),
             ok = prim_file:delete(LastIdxFile),
+            ok = delete_txn_file(LastIdxFile),
             maybe_fix_corrupted_files(IdxFiles -- [LastIdxFile])
     end.
 
@@ -801,6 +816,315 @@ write([_ | _] = Entries,
 write([], _ChType, _Now, _Trailer, #?MODULE{} = State) ->
     State.
 
+%% Writes records of a transaction, in reverse order as for write/2. Readers
+%% do not see them until commit_txn/2.
+-spec write_txn(binary(), [osiris:data()], state()) -> state().
+write_txn(TxnId, [_ | _] = Entries,
+          #?MODULE{cfg = #cfg{filter_size = FilterSize},
+                   mode = #write{current_epoch = Epoch,
+                                 tail_info = {Next, _}}} = State)
+  when byte_size(TxnId) =< 255 ->
+    Now = erlang:system_time(millisecond),
+    NumRecords = num_records(Entries),
+    {[Header0 | Rest], NumRecords} =
+        make_chunk(Entries, txn_trailer(TxnId, NumRecords), ?CHNK_TXN_DATA,
+                   Now, Epoch, Next, FilterSize),
+    %% The chunk takes a single offset. Its records get theirs from the
+    %% commit chunk.
+    Header = set_num_records(1, Header0),
+    write_chunk([Header | Rest], ?CHNK_TXN_DATA, Now, Epoch, 1,
+                {data, TxnId, NumRecords}, State).
+
+%% Makes the records of a transaction visible to readers, at the offsets
+%% of the commit chunk, in the order they were written.
+-spec commit_txn(binary(), state()) -> {ok, state()} | {error, unknown_txn}.
+commit_txn(TxnId, #?MODULE{mode = #write{txns = Txns}} = State) ->
+    case Txns of
+        #{TxnId := Refs0} ->
+            Refs = lists:reverse(Refs0),
+            NumRecords = lists:sum([N || {_, N, _, _} <- Refs]),
+            MinRef = lists:min([ChId || {ChId, _, _, _} <- Refs]),
+            RefsBin = << <<ChId:64/unsigned, N:32/unsigned,
+                           SegOffs:64/unsigned, Pos:32/unsigned>>
+                         || {ChId, N, SegOffs, Pos} <- Refs >>,
+            Body = <<(byte_size(TxnId)):8/unsigned, TxnId/binary,
+                     (length(Refs)):32/unsigned, RefsBin/binary>>,
+            {ok, write_txn_marker(?CHNK_TXN_COMMIT, Body, NumRecords,
+                                  {commit, TxnId, MinRef}, State)};
+        _ ->
+            {error, unknown_txn}
+    end.
+
+%% Readers skip the abort chunk. It lets recovery tell an aborted
+%% transaction from an open one.
+-spec abort_txn(binary(), state()) -> state().
+abort_txn(TxnId, #?MODULE{mode = #write{txns = Txns}} = State) ->
+    case is_map_key(TxnId, Txns) of
+        true ->
+            Body = <<(byte_size(TxnId)):8/unsigned, TxnId/binary>>,
+            write_txn_marker(?CHNK_TXN_ABORT, Body, 1, {abort, TxnId}, State);
+        false ->
+            State
+    end.
+
+write_txn_marker(ChType, Body, NumRecords, Txn,
+                 #?MODULE{mode = #write{current_epoch = Epoch,
+                                        tail_info = {Next, _}}} = State) ->
+    Entry = [<<0:1, (byte_size(Body)):31/unsigned>>, Body],
+    Now = erlang:system_time(millisecond),
+    Chunk = [chunk_header(ChType, 1, NumRecords, Now, Epoch, Next,
+                          erlang:crc32(Entry), iolist_size(Entry), 0, 0),
+             Entry],
+    write_chunk(Chunk, ChType, Now, Epoch, NumRecords, Txn, State).
+
+num_records(Entries) ->
+    lists:foldl(fun({batch, N, _, _, _}, Acc) -> Acc + N;
+                   (_, Acc) -> Acc + 1
+                end, 0, Entries).
+
+txn_trailer(TxnId, NumRecords) ->
+    <<(byte_size(TxnId)):8/unsigned, TxnId/binary, NumRecords:32/unsigned>>.
+
+set_num_records(NumRecords, <<Pre:4/binary, _:32/unsigned, Post/binary>>) ->
+    <<Pre/binary, NumRecords:32/unsigned, Post/binary>>.
+
+chunk_header(ChType, NumEntries, NumRecords, Timestamp, Epoch, ChId, Crc,
+             DataSize, TrailerSize, FilterSize) ->
+    <<?MAGIC:4/unsigned,
+      ?VERSION:4/unsigned,
+      ChType:8/unsigned,
+      NumEntries:16/unsigned,
+      NumRecords:32/unsigned,
+      Timestamp:64/signed,
+      Epoch:64/unsigned,
+      ChId:64/unsigned,
+      Crc:32/integer,
+      DataSize:32/unsigned,
+      TrailerSize:32/unsigned,
+      FilterSize:8/unsigned,
+      0:24/unsigned>>.
+
+%% The transaction record of a chunk, from its data and trailer.
+accepted_txn(?CHNK_TXN_DATA, DataSize, TrailerSize, DataAndTrailer) ->
+    <<Len:8/unsigned, TxnId:Len/binary, NumRecords:32/unsigned>> =
+        iolist_to_binary(part(TrailerSize, skip(DataSize, DataAndTrailer))),
+    {data, TxnId, NumRecords};
+accepted_txn(ChType, DataSize, _TrailerSize, DataAndTrailer)
+  when ChType == ?CHNK_TXN_COMMIT orelse
+       ChType == ?CHNK_TXN_ABORT ->
+    <<0:1, _:31/unsigned, Body/binary>> =
+        iolist_to_binary(part(DataSize, DataAndTrailer)),
+    txn_marker(ChType, Body);
+accepted_txn(_ChType, _DataSize, _TrailerSize, _DataAndTrailer) ->
+    undefined.
+
+txn_marker(?CHNK_TXN_COMMIT, Body) ->
+    <<Len:8/unsigned, TxnId:Len/binary, _/binary>> = Body,
+    MinRef = lists:min([ChId || {ChId, _, _, _} <- txn_commit_refs(Body)]),
+    {commit, TxnId, MinRef};
+txn_marker(?CHNK_TXN_ABORT, <<Len:8/unsigned, TxnId:Len/binary>>) ->
+    {abort, TxnId}.
+
+%% Each segment with transaction chunks has a `.txn' file with one record
+%% per chunk. Recovery finds open transactions in them, and retention
+%% finds the data chunks that commit chunks refer to.
+track_txn(undefined, _ChId, _Pos, State) ->
+    State;
+track_txn(Txn, ChId, Pos, #?MODULE{cfg = #cfg{directory = Dir},
+                                   current_file = SegFile,
+                                   mode = #write{txns = Txns0,
+                                                 txn_fd = TxnFd0} = Write} = State) ->
+    TxnFd = case TxnFd0 of
+                undefined ->
+                    {ok, Fd} = open(filename:join(Dir, txn_file(SegFile)),
+                                    ?FILE_OPTS_WRITE),
+                    {ok, _} = file:position(Fd, eof),
+                    Fd;
+                _ ->
+                    TxnFd0
+            end,
+    ok = file:write(TxnFd, txn_record(Txn, ChId, Pos)),
+    SegOffs = segment_first_offset(SegFile),
+    Txns = apply_txn_record(Txn, ChId, SegOffs, Pos, Txns0),
+    State#?MODULE{mode = Write#write{txns = Txns, txn_fd = TxnFd}}.
+
+txn_record({data, TxnId, NumRecords}, ChId, Pos) ->
+    txn_record(?CHNK_TXN_DATA, ChId, Pos, NumRecords, TxnId);
+txn_record({commit, TxnId, MinRef}, ChId, Pos) ->
+    txn_record(?CHNK_TXN_COMMIT, ChId, Pos, MinRef, TxnId);
+txn_record({abort, TxnId}, ChId, Pos) ->
+    txn_record(?CHNK_TXN_ABORT, ChId, Pos, 0, TxnId).
+
+%% For a data chunk, Arg is its number of records. For a commit chunk, it
+%% is the first data chunk that it refers to.
+txn_record(ChType, ChId, Pos, Arg, TxnId) ->
+    <<ChType:8/unsigned, ChId:64/unsigned, Pos:32/unsigned, Arg:64/unsigned,
+      (byte_size(TxnId)):8/unsigned, TxnId/binary>>.
+
+parse_txn_records(<<ChType:8/unsigned, ChId:64/unsigned, Pos:32/unsigned,
+                    Arg:64/unsigned, Len:8/unsigned, TxnId:Len/binary,
+                    Rem/binary>>) ->
+    Txn = case ChType of
+              ?CHNK_TXN_DATA -> {data, TxnId, Arg};
+              ?CHNK_TXN_COMMIT -> {commit, TxnId, Arg};
+              ?CHNK_TXN_ABORT -> {abort, TxnId}
+          end,
+    [{Txn, ChId, Pos} | parse_txn_records(Rem)];
+parse_txn_records(_) ->
+    [].
+
+apply_txn_record({data, TxnId, NumRecords}, ChId, SegOffs, Pos, Txns) ->
+    Refs = maps:get(TxnId, Txns, []),
+    Txns#{TxnId => [{ChId, NumRecords, SegOffs, Pos} | Refs]};
+apply_txn_record({commit, TxnId, _}, _ChId, _SegOffs, _Pos, Txns) ->
+    maps:remove(TxnId, Txns);
+apply_txn_record({abort, TxnId}, _ChId, _SegOffs, _Pos, Txns) ->
+    maps:remove(TxnId, Txns).
+
+txn_file(SegOrIdxFile) ->
+    Base = filename:rootname(filename:basename(SegOrIdxFile)),
+    case is_binary(Base) of
+        true -> <<Base/binary, ".txn">>;
+        false -> Base ++ ".txn"
+    end.
+
+segment_first_offset(File) ->
+    Base = filename:rootname(filename:basename(File)),
+    case is_binary(Base) of
+        true -> binary_to_integer(Base);
+        false -> list_to_integer(Base)
+    end.
+
+read_txn_records(IdxFile) ->
+    TxnFile = filename:join(filename:dirname(IdxFile), txn_file(IdxFile)),
+    case prim_file:read_file(TxnFile) of
+        {ok, Bin} ->
+            parse_txn_records(Bin);
+        {error, enoent} ->
+            []
+    end.
+
+%% The open transactions of the log. The `.txn' file of the last segment is
+%% rebuilt first, as it may have lost records, or have records of chunks
+%% that a truncation removed.
+recover_txns([]) ->
+    #{};
+recover_txns(IdxFiles) ->
+    ok = rebuild_txn_file(lists:last(IdxFiles)),
+    lists:foldl(
+      fun(IdxFile, Txns0) ->
+              SegOffs = index_file_first_offset(IdxFile),
+              lists:foldl(fun({Txn, ChId, Pos}, Txns) ->
+                                  apply_txn_record(Txn, ChId, SegOffs, Pos, Txns)
+                          end, Txns0, read_txn_records(IdxFile))
+      end, #{}, IdxFiles).
+
+rebuild_txn_file(IdxFile) ->
+    TxnFile = filename:join(filename:dirname(IdxFile), txn_file(IdxFile)),
+    {ok, <<_:?IDX_HEADER_SIZE/binary, Records/binary>>} =
+        prim_file:read_file(IdxFile),
+    case [{ChId, Pos, ChType}
+          || <<ChId:64/unsigned, _:64/signed, _:64/unsigned, Pos:32/unsigned,
+               ChType:8/unsigned>> <= Records,
+             ChType == ?CHNK_TXN_DATA orelse
+             ChType == ?CHNK_TXN_COMMIT orelse
+             ChType == ?CHNK_TXN_ABORT] of
+        [] ->
+            case prim_file:delete(TxnFile) of
+                ok -> ok;
+                {error, enoent} -> ok
+            end;
+        TxnChunks ->
+            {ok, Fd} = open(segment_from_index_file(IdxFile), [read, raw, binary]),
+            try
+                TxnRecords = [txn_record(read_txn(Fd, ChType, Pos), ChId, Pos)
+                              || {ChId, Pos, ChType} <- TxnChunks],
+                prim_file:write_file(TxnFile, TxnRecords)
+            after
+                _ = file:close(Fd)
+            end
+    end.
+
+read_txn(Fd, ChType, Pos) ->
+    {ok, <<_:36/binary, DataSize:32/unsigned, TrailerSize:32/unsigned,
+           FilterSize:8/unsigned, _:24>>} = file:pread(Fd, Pos, ?HEADER_SIZE_B),
+    DataPos = Pos + ?HEADER_SIZE_B + FilterSize,
+    case ChType of
+        ?CHNK_TXN_DATA ->
+            {ok, Trailer} = file:pread(Fd, DataPos + DataSize, TrailerSize),
+            accepted_txn(ChType, 0, TrailerSize, [Trailer]);
+        _ ->
+            {ok, Data} = file:pread(Fd, DataPos, DataSize),
+            accepted_txn(ChType, DataSize, 0, [Data])
+    end.
+
+%% The data chunks that a commit chunk refers to, read back to back as a
+%% single data section, and the number of entries in it.
+txn_committed_data(#?MODULE{cfg = #cfg{directory = Dir},
+                            current_file = CurFile,
+                            fd = Fd},
+                   Pos, FilterSize, DataSize) ->
+    {ok, <<0:1, _:31/unsigned, Body/binary>>} =
+        file:pread(Fd, Pos + ?HEADER_SIZE_B + FilterSize, DataSize),
+    CurSegOffs = segment_first_offset(CurFile),
+    lists:foldl(
+      fun(_, {error, _} = Err) ->
+              Err;
+         ({ChId, _NumRecords, SegOffs, ChPos}, {ok, NumEntries, Acc}) ->
+              Res = case SegOffs of
+                        CurSegOffs ->
+                            txn_data_chunk(Fd, ChId, ChPos);
+                        _ ->
+                            SegFile = filename:join(
+                                        Dir, make_file_name(SegOffs, "segment")),
+                            case open(SegFile, [read, raw, binary]) of
+                                {ok, SegFd} ->
+                                    try
+                                        txn_data_chunk(SegFd, ChId, ChPos)
+                                    after
+                                        _ = file:close(SegFd)
+                                    end;
+                                {error, _} ->
+                                    {error, {txn_data_not_found, ChId}}
+                            end
+                    end,
+              case Res of
+                  {ok, N, Data} ->
+                      {ok, NumEntries + N, <<Acc/binary, Data/binary>>};
+                  {error, _} = Err ->
+                      Err
+              end
+      end, {ok, 0, <<>>}, txn_commit_refs(Body)).
+
+txn_commit_refs(<<TxnIdSize:8/unsigned, _TxnId:TxnIdSize/binary,
+                  _Count:32/unsigned, Refs/binary>>) ->
+    [{ChId, N, SegOffs, Pos}
+     || <<ChId:64/unsigned, N:32/unsigned, SegOffs:64/unsigned,
+          Pos:32/unsigned>> <= Refs].
+
+txn_data_chunk(Fd, ChId, Pos) ->
+    case file:pread(Fd, Pos, ?HEADER_SIZE_B) of
+        {ok, <<?MAGIC:4/unsigned,
+               ?VERSION:4/unsigned,
+               ?CHNK_TXN_DATA:8/unsigned,
+               NumEntries:16/unsigned,
+               _NumRecords:32/unsigned,
+               _Timestamp:64/signed,
+               _Epoch:64/unsigned,
+               ChId:64/unsigned,
+               Crc:32/integer,
+               DataSize:32/unsigned,
+               _TrailerSize:32/unsigned,
+               FilterSize:8/unsigned,
+               _Reserved:24>>} ->
+            {ok, Data} = file:pread(Fd, Pos + ?HEADER_SIZE_B + FilterSize,
+                                    DataSize),
+            validate_crc(ChId, Crc, Data),
+            {ok, NumEntries, Data};
+        _ ->
+            {error, {txn_data_not_found, ChId}}
+    end.
+
 -spec accept_chunk(iodata(), state()) -> state().
 accept_chunk([<<?MAGIC:4/unsigned,
                 ?VERSION:4/unsigned,
@@ -812,7 +1136,7 @@ accept_chunk([<<?MAGIC:4/unsigned,
                 Next:64/unsigned,
                 Crc:32/integer,
                 DataSize:32/unsigned,
-                _TrailerSize:32/unsigned,
+                TrailerSize:32/unsigned,
                 FilterSize:8/unsigned,
                 _Reserved:24,
                 Data/binary>>
@@ -824,7 +1148,8 @@ accept_chunk([<<?MAGIC:4/unsigned,
     validate_crc(Next, Crc, part(DataSize, DataAndTrailer)),
     %% assertion
     % true = iolist_size(DataAndTrailer) == (DataSize + TrailerSize),
-    write_chunk(Chunk, ChType, Timestamp, Epoch, NumRecords, State0);
+    Txn = accepted_txn(ChType, DataSize, TrailerSize, DataAndTrailer),
+    write_chunk(Chunk, ChType, Timestamp, Epoch, NumRecords, Txn, State0);
 accept_chunk(Binary, State) when is_binary(Binary) ->
     accept_chunk([Binary], State);
 accept_chunk([<<?MAGIC:4/unsigned,
@@ -936,7 +1261,14 @@ delete_segment_from_index(Index) ->
     ?DEBUG("osiris_log: deleting segment ~ts", [File]),
     ok = prim_file:delete(Index),
     ok = prim_file:delete(File),
-    ok.
+    delete_txn_file(Index).
+
+delete_txn_file(IdxFile) ->
+    case prim_file:delete(filename:join(filename:dirname(IdxFile),
+                                        txn_file(IdxFile))) of
+        ok -> ok;
+        {error, enoent} -> ok
+    end.
 
 truncate_to(_Name, _Range, _EpochOffsets, []) ->
     %% the target log is empty
@@ -1413,7 +1745,9 @@ last_user_chunk_id_in_index(NextPos, IdxFd) ->
                _Timestamp:64/signed,
                _Epoch:64/unsigned,
                FilePos:32/unsigned,
-               ?CHNK_USER:8/unsigned>>} ->
+               ChType:8/unsigned>>}
+          when ChType == ?CHNK_USER orelse
+               ChType == ?CHNK_TXN_COMMIT ->
             {ok, ChunkId, FilePos};
         {ok, ?IDX_MATCH(_, _, _)} ->
             last_user_chunk_id_in_index(NextPos - ?INDEX_RECORD_SIZE_B, IdxFd);
@@ -1567,6 +1901,27 @@ chunk_iterator(#?MODULE{cfg = #cfg{},
          #?MODULE{fd = Fd, mode = #read{next_offset = ChId,
                                         read_ahead = Ra} = Read1} = State1} ->
             case needs_handling(RType, Selector, ChType) of
+                true when ChType == ?CHNK_TXN_COMMIT andalso RType == offset ->
+                    case txn_committed_data(State1, Pos, FilterSize, DataSize) of
+                        {ok, TxnNumEntries, TxnData} ->
+                            Read = Read1#read{next_offset = ChId + NumRecords,
+                                              position = NextPos},
+                            Iterator = #iterator{fd = Fd,
+                                                 data_cache = TxnData,
+                                                 next_offset = ChId,
+                                                 num_left = TxnNumEntries,
+                                                 data_left = byte_size(TxnData),
+                                                 next_record_pos = 0,
+                                                 ra = Ra},
+                            {ok, Header#{type => ?CHNK_USER,
+                                         num_entries => TxnNumEntries,
+                                         data_size => byte_size(TxnData),
+                                         trailer_size => 0,
+                                         filter_size => 0},
+                             Iterator, State1#?MODULE{mode = Read}};
+                        {error, _} = Err ->
+                            Err
+                    end;
                 true ->
                     DataPos = Pos + ?HEADER_SIZE_B + FilterSize,
                     {Data, Ra1} = iter_read_ahead(Fd, DataPos, 4,
@@ -1818,6 +2173,36 @@ send_file(Sock,
             %% only sendfile if either the reader is a data reader
             %% or the chunk is a user type (for offset readers)
             case needs_handling(RType, Selector, ChType) of
+                true when ChType == ?CHNK_TXN_COMMIT andalso RType == offset ->
+                    %% Readers get the transaction as a single user chunk.
+                    case txn_committed_data(State1, Pos, FilterSize, DataSize) of
+                        {ok, TxnNumEntries, TxnData} ->
+                            #{epoch := Epoch, timestamp := Ts} = Header,
+                            TxnSize = byte_size(TxnData),
+                            TxnHeaderData = chunk_header(?CHNK_USER, TxnNumEntries,
+                                                         NumRecords, Ts, Epoch, ChId,
+                                                         erlang:crc32(TxnData),
+                                                         TxnSize, 0, 0),
+                            TxnHeader = Header#{type => ?CHNK_USER,
+                                                num_entries => TxnNumEntries,
+                                                data_size => TxnSize,
+                                                trailer_size => 0,
+                                                filter_size => 0,
+                                                header_data => TxnHeaderData},
+                            FrameHeader = Callback(TxnHeader,
+                                                   TxnSize + ?HEADER_SIZE_B),
+                            case send(Transport, Sock,
+                                      [FrameHeader, TxnHeaderData, TxnData]) of
+                                ok ->
+                                    Read = Read1#read{next_offset = ChId + NumRecords,
+                                                      position = NextPos},
+                                    {ok, State1#?MODULE{mode = Read}};
+                                Err ->
+                                    Err
+                            end;
+                        {error, _} = Err ->
+                            Err
+                    end;
                 true ->
                     Read = Read1#read{next_offset = ChId + NumRecords,
                                       position = NextPos,
@@ -1885,6 +2270,12 @@ select_amount_to_send(_, _, FilterSize, DataSize, TrailerSize) ->
 
 needs_handling(data, _, _) ->
     true;
+needs_handling(offset, _, ?CHNK_TXN_DATA) ->
+    false;
+needs_handling(offset, _, ?CHNK_TXN_ABORT) ->
+    false;
+needs_handling(offset, _, ?CHNK_TXN_COMMIT) ->
+    true;
 needs_handling(offset, all, _ChType) ->
     true;
 needs_handling(offset, user_data, ?CHNK_USER) ->
@@ -1895,8 +2286,15 @@ needs_handling(_, _, _) ->
 -spec close(state()) -> ok.
 close(#?MODULE{cfg = #cfg{counter_id = CntId,
                           readers_counter_fun = Fun},
+               mode = Mode,
                fd = SegFd,
                index_fd = IdxFd}) ->
+    case Mode of
+        #write{txn_fd = TxnFd} ->
+            close_fd(TxnFd);
+        _ ->
+            ok
+    end,
     close_fd(IdxFd),
     close_fd(SegFd),
     Fun(-1),
@@ -2271,7 +2669,9 @@ evaluate_retention(Dir, Specs) when is_binary(Dir) ->
     {Time, Result} = timer:tc(
                        fun() ->
                                IdxFiles0 = sorted_index_files(Dir),
-                               IdxFiles = evaluate_retention0(IdxFiles0, Specs),
+                               CanDelete = can_delete_fun(IdxFiles0, Specs),
+                               IdxFiles = evaluate_retention0(IdxFiles0, Specs,
+                                                              CanDelete),
                                OffsetRange = offset_range_from_idx_files(IdxFiles),
                                FirstTs = first_timestamp_from_index_files(IdxFiles),
                                {OffsetRange, FirstTs, length(IdxFiles)}
@@ -2279,61 +2679,97 @@ evaluate_retention(Dir, Specs) when is_binary(Dir) ->
     ?DEBUG_(<<>>," (~w) completed in ~fms", [Specs, Time/1_000]),
     Result.
 
-evaluate_retention0(IdxFiles, []) ->
+evaluate_retention0(IdxFiles, [], _CanDelete) ->
     IdxFiles;
-evaluate_retention0(IdxFiles, [{max_bytes, MaxSize} | Specs]) ->
-    RemIdxFiles = eval_max_bytes(IdxFiles, MaxSize),
-    evaluate_retention0(RemIdxFiles, Specs);
-evaluate_retention0(IdxFiles, [{max_age, Age} | Specs]) ->
-    RemIdxFiles = eval_age(IdxFiles, Age),
-    evaluate_retention0(RemIdxFiles, Specs).
+evaluate_retention0(IdxFiles, [{max_bytes, MaxSize} | Specs], CanDelete) ->
+    RemIdxFiles = eval_max_bytes(IdxFiles, MaxSize, CanDelete),
+    evaluate_retention0(RemIdxFiles, Specs, CanDelete);
+evaluate_retention0(IdxFiles, [{max_age, Age} | Specs], CanDelete) ->
+    RemIdxFiles = eval_age(IdxFiles, Age, CanDelete),
+    evaluate_retention0(RemIdxFiles, Specs, CanDelete);
+evaluate_retention0(IdxFiles, [{txn_pin, _} | Specs], CanDelete) ->
+    evaluate_retention0(IdxFiles, Specs, CanDelete).
 
-eval_age([_] = IdxFiles, _Age) ->
-    IdxFiles;
-eval_age([IdxFile | IdxFiles] = AllIdxFiles, Age) ->
+eval_age(IdxFiles, Age, CanDelete) ->
+    Now = erlang:system_time(millisecond),
+    delete_oldest(num_expired(IdxFiles, Now - Age, 0), IdxFiles, CanDelete).
+
+%% The last segment is never expired.
+num_expired([_], _Limit, N) ->
+    N;
+num_expired([IdxFile | IdxFiles], Limit, N) ->
     case last_timestamp_in_index_file(IdxFile) of
-        {ok, Ts} ->
-            Now = erlang:system_time(millisecond),
-            case Ts < Now - Age of
-                true ->
-                    %% the oldest timestamp is older than retention
-                    %% and there are other segments available
-                    %% we can delete
-                    ok = delete_segment_from_index(IdxFile),
-                    eval_age(IdxFiles, Age);
-                false ->
-                    AllIdxFiles
-            end;
-        _Err ->
-            AllIdxFiles
+        {ok, Ts} when Ts < Limit ->
+            num_expired(IdxFiles, Limit, N + 1);
+        _ ->
+            N
     end;
-eval_age([], _Age) ->
+num_expired([], _Limit, N) ->
     %% this could happen if retention is evaluated whilst
     %% a stream is being deleted
-    [].
+    N.
 
-eval_max_bytes([], _) -> [];
-eval_max_bytes(IdxFiles, MaxSize) ->
+eval_max_bytes([], _, _CanDelete) -> [];
+eval_max_bytes(IdxFiles, MaxSize, CanDelete) ->
     [Latest|Older] = lists:reverse(IdxFiles),
-    eval_max_bytes(Older,
-                   %% for retention eval it is ok to use a file size function
-                   %% that implicitly return 0 when file is not found
-                   MaxSize - file_size_or_zero(
-                               segment_from_index_file(Latest)),
-                   [Latest]).
+    Keep = keep_max_bytes(Older,
+                          %% for retention eval it is ok to use a file size function
+                          %% that implicitly return 0 when file is not found
+                          MaxSize - file_size_or_zero(
+                                      segment_from_index_file(Latest)),
+                          [Latest]),
+    delete_oldest(length(IdxFiles) - length(Keep), IdxFiles, CanDelete).
 
-eval_max_bytes([], _, Acc) ->
+keep_max_bytes([], _, Acc) ->
     Acc;
-eval_max_bytes([IdxFile | Rest], Limit, Acc) ->
+keep_max_bytes([IdxFile | Rest], Limit, Acc) ->
     SegFile = segment_from_index_file(IdxFile),
     Size = file_size(SegFile),
     case Size =< Limit of
         true ->
-            eval_max_bytes(Rest, Limit - Size, [IdxFile | Acc]);
+            keep_max_bytes(Rest, Limit - Size, [IdxFile | Acc]);
         false ->
-            [ok = delete_segment_from_index(Seg) || Seg <- [IdxFile | Rest]],
             Acc
     end.
+
+%% Deletes the longest run of the N oldest segments that no transaction
+%% needs.
+delete_oldest(N, IdxFiles, CanDelete) ->
+    Cut = deletable_prefix(1, N, IdxFiles, CanDelete, 0),
+    {Delete, Keep} = lists:split(Cut, IdxFiles),
+    [ok = delete_segment_from_index(IdxFile) || IdxFile <- Delete],
+    Keep.
+
+deletable_prefix(I, N, [IdxFile | Rest], CanDelete, Cut) when I =< N ->
+    case CanDelete(IdxFile, Rest) of
+        true ->
+            deletable_prefix(I + 1, N, Rest, CanDelete, I);
+        false ->
+            deletable_prefix(I + 1, N, Rest, CanDelete, Cut)
+    end;
+deletable_prefix(_I, _N, _IdxFiles, _CanDelete, Cut) ->
+    Cut.
+
+%% The segments up to and including a segment can only be deleted if no
+%% transaction needs one of their data chunks: an open one, or a committed
+%% one whose commit chunk is in a later segment.
+can_delete_fun(IdxFiles, Specs) ->
+    OpenPin = proplists:get_value(txn_pin, Specs, infinity),
+    {Pins, _} = lists:foldr(
+                  fun(IdxFile, {Acc, PinAfter}) ->
+                          {Acc#{IdxFile => PinAfter},
+                           min(PinAfter, txn_min_ref(IdxFile))}
+                  end, {#{}, OpenPin}, IdxFiles),
+    fun(IdxFile, [Next | _]) ->
+            index_file_first_offset(Next) =< maps:get(IdxFile, Pins);
+       (_IdxFile, []) ->
+            false
+    end.
+
+%% The first data chunk that a commit chunk of the segment refers to.
+txn_min_ref(IdxFile) ->
+    lists:min([infinity | [MinRef || {{commit, _, MinRef}, _, _}
+                                         <- read_txn_records(IdxFile)]]).
 
 file_size(Path) ->
     case prim_file:read_file_info(Path) of
@@ -2592,11 +3028,15 @@ make_chunk(Blobs, TData, ChType, Timestamp, Epoch, Next, FilterSize) ->
       TData],
      NumRecords}.
 
+write_chunk(Chunk, ChType, Timestamp, Epoch, NumRecords, State) ->
+    write_chunk(Chunk, ChType, Timestamp, Epoch, NumRecords, undefined, State).
+
 write_chunk(Chunk,
             ChType,
             Timestamp,
             Epoch,
             NumRecords,
+            Txn,
             #?MODULE{cfg = #cfg{counter = CntRef,
                                 shared = Shared} = Cfg,
                      fd = Fd,
@@ -2614,6 +3054,7 @@ write_chunk(Chunk,
                           Timestamp,
                           Epoch,
                           NumRecords,
+                          Txn,
                           open_new_segment(State)));
         false ->
             NextOffset = Next + NumRecords,
@@ -2632,11 +3073,12 @@ write_chunk(Chunk,
             counters:put(CntRef, ?C_OFFSET, NextOffset - 1),
             counters:add(CntRef, ?C_CHUNKS, 1),
             maybe_set_first_offset(LastChunk, Next, Timestamp, Cfg),
-            State#?MODULE{mode =
-                          Write#write{tail_info = {NextOffset,
-                                                   {Epoch, Next, Timestamp}},
-                                      segment_size = {SegSizeBytes + Size,
-                                                      SegSizeChunks + 1}}}
+            track_txn(Txn, Next, Cur,
+                      State#?MODULE{mode =
+                                    Write#write{tail_info = {NextOffset,
+                                                             {Epoch, Next, Timestamp}},
+                                                segment_size = {SegSizeBytes + Size,
+                                                                SegSizeChunks + 1}}})
     end.
 
 
@@ -2852,10 +3294,12 @@ open_new_segment(#?MODULE{cfg = #cfg{name = Name,
                           fd = OldFd,
                           index_fd = OldIdxFd,
                           mode = #write{type = _WriterType,
-                                        tail_info = {NextOffset, _}} = Write} =
+                                        tail_info = {NextOffset, _},
+                                        txn_fd = OldTxnFd} = Write} =
                  State0) ->
     _ = close_fd(OldFd),
     _ = close_fd(OldIdxFd),
+    _ = close_fd(OldTxnFd),
     Filename = make_file_name(NextOffset, "segment"),
     IdxFilename = make_file_name(NextOffset, "index"),
     ?DEBUG_(Name, "~ts", [Filename]),
@@ -2876,7 +3320,8 @@ open_new_segment(#?MODULE{cfg = #cfg{name = Name,
                    fd = Fd,
                    %% reset segment_size counter
                    index_fd = IdxFd,
-                   mode = Write#write{segment_size = {?LOG_HEADER_SIZE, 0}}}.
+                   mode = Write#write{segment_size = {?LOG_HEADER_SIZE, 0},
+                                      txn_fd = undefined}}.
 
 open_index_read(File) ->
     {ok, Fd} = open(File, [read, raw, binary, read_ahead]),
@@ -3091,6 +3536,9 @@ recover_tracking(Fd, Trk0, Pos0) ->
                     Trk = osiris_tracking:append_trailer(ChunkId, TData, Trk0),
                     recover_tracking(Fd, Trk, NextPos);
                 ?CHNK_USER ->
+                    recover_tracking(Fd, Trk0, NextPos);
+                _ ->
+                    %% the trailer of a transaction data chunk is not tracking
                     recover_tracking(Fd, Trk0, NextPos)
             end;
         eof ->
@@ -3235,9 +3683,18 @@ read_ahead_fsize(_, Current) ->
 trigger_retention_eval(#?MODULE{cfg =
                                     #cfg{name = Name,
                                          directory = Dir,
-                                         retention = RetentionSpec,
+                                         retention = RetentionSpec0,
                                          counter = Cnt,
-                                         shared = Shared}} = State) ->
+                                         shared = Shared},
+                                mode = Mode} = State) ->
+    RetentionSpec = case Mode of
+                        #write{txns = Txns} when map_size(Txns) > 0 ->
+                            Pin = lists:min([ChId || Refs <- maps:values(Txns),
+                                                     {ChId, _, _, _} <- Refs]),
+                            RetentionSpec0 ++ [{txn_pin, Pin}];
+                        _ ->
+                            RetentionSpec0
+                    end,
 
     %% updates first offset and first timestamp
     %% after retention has been evaluated
