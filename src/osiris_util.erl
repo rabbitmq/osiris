@@ -37,18 +37,9 @@
 
 -spec validate_base64uri(string() | binary()) -> boolean().
 validate_base64uri(Str) when ?IS_STRING(Str) ->
-    catch begin
-              [begin
-                   case lists:member(C, ?BASE64_URI_CHARS) of
-                       true ->
-                           ok;
-                       false ->
-                           throw(false)
-                   end
-               end
-               || C <- string:to_graphemes(Str)],
-              string:is_empty(Str) == false
-          end.
+    lists:all(fun(C) -> lists:member(C, ?BASE64_URI_CHARS) end,
+              string:to_graphemes(Str))
+    andalso string:is_empty(Str) == false.
 
 -spec to_base64uri(string() | binary()) -> string().
 to_base64uri(Str) when ?IS_STRING(Str) ->

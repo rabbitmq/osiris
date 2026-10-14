@@ -404,7 +404,7 @@
       index_files => [file:filename_all()],
       filter_size => osiris_bloom:filter_size()
      }.
--type record() :: {offset(), osiris:entry()}.
+-type log_record() :: {offset(), osiris:entry()}.
 -type offset_entry() :: {offset(), osiris:entry()}.
 -type offset_spec() :: osiris:offset_spec().
 -type retention_spec() :: osiris:retention_spec().
@@ -1480,7 +1480,7 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
     %% NB: this may return records before the requested index,
     %% that is fine - the reading process can do the appropriate filtering
     %% TODO: skip non user chunks for offset readers
-    case catch read_header0(State0) of
+    case read_header0(State0) of
         {ok,
          #{num_records := NumRecords,
            next_position := NextPos} =
@@ -1491,9 +1491,7 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
              State#?MODULE{mode = Read#read{next_offset = ChId + NumRecords,
                                             position = NextPos}}};
         {end_of_stream, _} = EOF ->
-            EOF;
-        {error, _} = Err ->
-            Err
+            EOF
     end.
 
 -record(iterator, {fd :: file:io_device(),
@@ -1556,7 +1554,7 @@ chunk_iterator(#?MODULE{cfg = #cfg{},
                      State00
              end,
     %% reads the next chunk of unparsed chunk data
-    case catch read_header0(State0) of
+    case read_header0(State0) of
         {ok,
          #{type := ChType,
            chunk_id := ChId,
@@ -1677,7 +1675,7 @@ iterator_next(#iterator{fd = Fd,
     {error, {invalid_chunk_header, term()}}.
 read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
     %% reads the next chunk of unparsed chunk data
-    case catch read_header0(State0) of
+    case read_header0(State0) of
         {ok,
          #{type := _ChType,
            chunk_id := ChId,
@@ -1706,15 +1704,15 @@ read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
     end.
 
 -spec read_chunk_parsed(state()) ->
-                           {[record()], state()} |
+                           {[log_record()], state()} |
                            {end_of_stream, state()} |
                            {error, {invalid_chunk_header, term()}}.
 read_chunk_parsed(State) ->
     read_chunk_parsed(State, no_header).
 
 -spec read_chunk_parsed(state(), no_header | with_header) ->
-    {[record()], state()} |
-    {ok, header_map(), [record()], state()} |
+    {[log_record()], state()} |
+    {ok, header_map(), [log_record()], state()} |
     {end_of_stream, state()} |
     {error, {invalid_chunk_header, term()}}.
 read_chunk_parsed(#?MODULE{mode = #read{}} = State0,
@@ -1803,7 +1801,7 @@ send_file(Sock,
                                 filter_size = RaFs,
                                 use_sendfile = UseSendfile}} = State0,
           Callback) ->
-    case catch read_header0(State0) of
+    case read_header0(State0) of
         {ok, #{type := ChType,
                chunk_id := ChId,
                num_records := NumRecords,

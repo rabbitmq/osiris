@@ -21,14 +21,19 @@
 
 -define(DISPATCH_LOG(Level, Fmt, Args),
         %% same as OTP logger does when using the macro
-        catch (persistent_term:get('$osiris_logger')):log(Level, Fmt, Args,
-                                                          #{mfa => {?MODULE,
-                                                                    ?FUNCTION_NAME,
-                                                                    ?FUNCTION_ARITY},
-                                                            file => ?FILE,
-                                                            line => ?LINE,
-                                                            domain => [osiris]}),
-       ok).
+        try
+            (persistent_term:get('$osiris_logger')):log(Level, Fmt, Args,
+                                                        #{mfa => {?MODULE,
+                                                                  ?FUNCTION_NAME,
+                                                                  ?FUNCTION_ARITY},
+                                                          file => ?FILE,
+                                                          line => ?LINE,
+                                                          domain => [osiris]})
+        catch
+            _:_ ->
+                ok
+        end,
+        ok).
 
 %% tail info pattern matching
 -define(TAIL_INFO(ChunkId, Ts), {_, {_, ChunkId, Ts}}).

@@ -276,8 +276,13 @@ handle_batch(Commands,
                  State0) ->
 
     %% process commands in reverse order
-    case catch lists:foldr(fun handle_command/2,
-                           {State0, [], [], #{}, Trk0, []}, Commands) of
+    case try
+             lists:foldr(fun handle_command/2,
+                         {State0, [], [], #{}, Trk0, []}, Commands)
+         catch
+             throw:{stop, normal} = Stop ->
+                 Stop
+         end of
         {#?MODULE{log = Log0} = State1, Entries, Replies, Corrs, Trk1, Dupes} ->
             {Log1, Trk2} = osiris_log:evaluate_tracking_snapshot(Log0, Trk1),
             Now = erlang:system_time(millisecond),

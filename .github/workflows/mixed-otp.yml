@@ -1,0 +1,73 @@
+name: Mixed OTP versions CI
+
+# Runs the test suite on one OTP version with the peer (cluster member) nodes
+# running a different OTP version and the osiris/test beam files compiled by
+# that version. This catches issues that only show up when the same module is
+# compiled by different compilers, e.g. funs sent between nodes (badfun).
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+env:
+  PEER_OTP_DIR: /home/runner/work/_temp/.setup-beam-peer
+
+jobs:
+  test:
+    name: "Erlang/OTP ${{ matrix.otp_version }} with peers on ${{ matrix.peer_otp_version }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        otp_version:      ['27', '28', '29']
+        peer_otp_version: ['27', '28', '29']
+        exclude:
+          - { otp_version: '27', peer_otp_version: '27' }
+          - { otp_version: '28', peer_otp_version: '28' }
+          - { otp_version: '29', peer_otp_version: '29' }
+    steps:
+      - name: Clone the repository
+        uses: actions/checkout@v4
+
+      - name: Install Erlang/OTP ${{ matrix.peer_otp_version }} (peers)
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.peer_otp_version }}
+
+      - name: Relocate the peer Erlang/OTP install
+        run: |
+          mv /home/runner/work/_temp/.setup-beam "$PEER_OTP_DIR"
+          sed -E -i'' -e "s|/home/runner/work/_temp/.setup-beam/otp|$PEER_OTP_DIR/otp|" "$PEER_OTP_DIR/otp/bin/erl"
+
+      - name: Install Erlang/OTP ${{ matrix.otp_version }}
+        uses: erlef/setup-beam@v1
+        with:
+          otp-version: ${{ matrix.otp_version }}
+
+      - name: Ensure the two Erlang/OTP versions differ
+        run: |
+          main=$(erl -noshell -eval 'io:format("~s", [erlang:system_info(otp_release)]), halt().')
+          peer=$("$PEER_OTP_DIR/otp/bin/erl" -noshell -eval 'io:format("~s", [erlang:system_info(otp_release)]), halt().')
+          echo "main: $main, peer: $peer"
+          test "$main" = "${{ matrix.otp_version }}"
+          test "$peer" = "${{ matrix.peer_otp_version }}"
+
+      - name: Build a copy of the repository with the peer Erlang/OTP
+        run: |
+          rsync -a --exclude .git ./ ../osiris-peer/
+          cd ../osiris-peer
+          PATH="$PEER_OTP_DIR/otp/bin:$PATH" make deps app test-build
+
+      - name: Build
+        run: make
+
+      - name: Run tests
+        run: |
+          peer=$(realpath ../osiris-peer)
+          export OSIRIS_PEER_ERL="$PEER_OTP_DIR/otp/bin/erl"
+          export OSIRIS_PEER_PA="$peer/ebin:$peer/test:$(echo $peer/deps/*/ebin | tr ' ' ':')"
+          make ct-osiris

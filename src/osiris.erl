@@ -198,14 +198,21 @@ read_tracking(Pid, TrackingType, TrackingId) ->
 -spec fetch_writer_seq(pid(), binary()) ->
                           non_neg_integer() | undefined.
 fetch_writer_seq(Pid, WriterId)
-    when is_pid(Pid) andalso is_binary(WriterId) ->
+    when is_pid(Pid) andalso is_binary(WriterId) andalso
+         node(Pid) =:= node() ->
     osiris_writer:query_writers(Pid,
                                 fun(W) ->
                                         case maps:get(WriterId, W, undefined) of
                                             undefined -> undefined;
                                             {_, Seq} -> Seq
                                         end
-                                end).
+                                end);
+%% The query fun must not cross nodes: its identity depends on the compiled
+%% `osiris' module, which can differ between nodes (e.g. built with a
+%% different OTP version), resulting in `badfun' on the writer.
+fetch_writer_seq(Pid, WriterId)
+    when is_pid(Pid) andalso is_binary(WriterId) ->
+    erpc:call(node(Pid), ?MODULE, ?FUNCTION_NAME, [Pid, WriterId]).
 
 %% @doc Initialise a new offset reader
 %% @param Pid the pid of a writer or replica process
