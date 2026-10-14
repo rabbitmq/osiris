@@ -98,6 +98,13 @@ all_tests() ->
      evaluate_retention_max_bytes,
      evaluate_retention_max_age,
      evaluate_retention_max_age_empty,
+     txn_commit_read,
+     txn_commit_iterator_with_filter,
+     txn_commit_send_file,
+     txn_commit_last,
+     txn_commit_recover,
+     txn_retention_commit_pins_data,
+     txn_retention_open_pin,
      offset_tracking,
      offset_tracking_snapshot,
      many_segment_overview,
@@ -3123,6 +3130,167 @@ resolve_offset_spec(Config) ->
                  osiris_log:resolve_offset_spec({abs, 100}, RConf)),
     ok.
 
+txn_commit_read(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf),
+    RConf = Conf#{shared => osiris_log:get_shared(S0)},
+    S1 = osiris_log:write_txn(<<"t1">>, [<<"a2">>, <<"a1">>], S0),
+    S2 = osiris_log:write([<<"u1">>], S1),
+    S3 = osiris_log:write_txn(<<"t2">>, [<<"b1">>], S2),
+    S4 = osiris_log:write_txn(<<"t1">>, [<<"a3">>], S3),
+    {ok, S5} = osiris_log:commit_txn(<<"t1">>, S4),
+    S6 = osiris_log:abort_txn(<<"t2">>, S5),
+    ?assertEqual({error, unknown_txn}, osiris_log:commit_txn(<<"t2">>, S6)),
+    S7 = osiris_log:write([<<"u2">>], S6),
+    ?assertEqual(8, osiris_log:next_offset(S7)),
+    set_committed(S7),
+    {ok, R0} = osiris_log:init_offset_reader(first, RConf),
+    {[{1, <<"u1">>}], R1} = osiris_log:read_chunk_parsed(R0),
+    {ok, #{chunk_id := 4, type := ?CHNK_USER, num_records := 3},
+     [{4, <<"a1">>}, {5, <<"a2">>}, {6, <<"a3">>}], R2} =
+        osiris_log:read_chunk_parsed(R1, with_header),
+    {[{7, <<"u2">>}], R3} = osiris_log:read_chunk_parsed(R2),
+    {end_of_stream, R4} = osiris_log:read_chunk_parsed(R3),
+    osiris_log:close(R4),
+    {ok, R5} = osiris_log:init_offset_reader({abs, 5}, RConf),
+    {ok, #{chunk_id := 4}, _, R6} = osiris_log:read_chunk_parsed(R5, with_header),
+    osiris_log:close(R6),
+    osiris_log:close(S7),
+    ok.
+
+txn_commit_iterator_with_filter(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf),
+    RConf = Conf#{shared => osiris_log:get_shared(S0)},
+    IOData = <<0:1, 2:31/unsigned, "s1", 0:1, 2:31/unsigned, "s2">>,
+    Batch = {batch, 2, 0, byte_size(IOData), IOData},
+    S1 = osiris_log:write_txn(<<"t1">>, [Batch, {<<"f">>, <<"a1">>}], S0),
+    S2 = osiris_log:write_txn(<<"t1">>, [<<"a2">>], S1),
+    {ok, S3} = osiris_log:commit_txn(<<"t1">>, S2),
+    set_committed(S3),
+    {ok, R0} = osiris_log:init_offset_reader(first, RConf),
+    {ok, #{chunk_id := 2, num_entries := 3, num_records := 4}, I0, R1} =
+        osiris_log:chunk_iterator(R0),
+    {{2, <<"a1">>}, I1} = osiris_log:iterator_next(I0),
+    {{3, Batch}, I2} = osiris_log:iterator_next(I1),
+    {{5, <<"a2">>}, I3} = osiris_log:iterator_next(I2),
+    end_of_chunk = osiris_log:iterator_next(I3),
+    {end_of_stream, R2} = osiris_log:chunk_iterator(R1),
+    osiris_log:close(R2),
+    osiris_log:close(S3),
+    ok.
+
+txn_commit_send_file(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf),
+    RConf = Conf#{shared => osiris_log:get_shared(S0)},
+    S1 = osiris_log:write_txn(<<"t1">>, [<<"a2">>, <<"a1">>], S0),
+    S2 = osiris_log:write([<<"u1">>], S1),
+    S3 = osiris_log:write_txn(<<"t1">>, [<<"a3">>], S2),
+    {ok, S4} = osiris_log:commit_txn(<<"t1">>, S3),
+    set_committed(S4),
+    {ok, R0} = osiris_log:init_offset_reader(first, RConf),
+    {CS, SS, _} = Sockets = client_server_connect(),
+    {ok, R1} = osiris_log:send_file(CS, R0),
+    {ok, H1} = recv(SS, ?HEADER_SIZE_B),
+    #{chunk_id := 1, data_size := D1} = parse_header(H1),
+    {ok, <<0:1, 2:31/unsigned, "u1">>} = recv(SS, D1),
+    {ok, R2} = osiris_log:send_file(CS, R1),
+    {ok, H2} = recv(SS, ?HEADER_SIZE_B),
+    #{chunk_id := 3, type := ?CHNK_USER, num_entries := 3, num_records := 3,
+      data_size := D2, trailer_size := 0, filter_size := 0, crc := Crc} =
+        parse_header(H2),
+    {ok, Data} = recv(SS, D2),
+    ?assertEqual(<<0:1, 2:31/unsigned, "a1", 0:1, 2:31/unsigned, "a2",
+                   0:1, 2:31/unsigned, "a3">>, Data),
+    ?assertEqual(Crc, erlang:crc32(Data)),
+    {end_of_stream, R3} = osiris_log:send_file(CS, R2),
+    client_server_close(Sockets),
+    osiris_log:close(R3),
+    osiris_log:close(S4),
+    ok.
+
+txn_commit_last(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf),
+    RConf = Conf#{shared => osiris_log:get_shared(S0)},
+    S1 = osiris_log:write([<<"u1">>], S0),
+    S2 = osiris_log:write_txn(<<"t1">>, [<<"a2">>, <<"a1">>], S1),
+    {ok, S3} = osiris_log:commit_txn(<<"t1">>, S2),
+    S4 = osiris_log:write_txn(<<"t2">>, [<<"b1">>], S3),
+    set_committed(S4),
+    {ok, R0} = osiris_log:init_offset_reader(last, RConf),
+    {[{2, <<"a1">>}, {3, <<"a2">>}], R1} = osiris_log:read_chunk_parsed(R0),
+    {end_of_stream, R2} = osiris_log:read_chunk_parsed(R1),
+    osiris_log:close(R2),
+    osiris_log:close(S4),
+    ok.
+
+txn_commit_recover(Config) ->
+    Conf = ?config(osiris_conf, Config),
+    S0 = osiris_log:init(Conf),
+    S1 = osiris_log:write_txn(<<"t1">>, [<<"a2">>, <<"a1">>], S0),
+    S2 = osiris_log:write_txn(<<"t2">>, [<<"b1">>], S1),
+    {ok, S3} = osiris_log:commit_txn(<<"t1">>, S2),
+    ?assertEqual(4, osiris_log:next_offset(S3)),
+    osiris_log:close(S3),
+    S4 = osiris_log:init(Conf),
+    ?assertEqual(4, osiris_log:next_offset(S4)),
+    ?assertMatch({4, {1, 2, _}}, osiris_log:tail_info(S4)),
+    set_committed(S4),
+    RConf = Conf#{shared => osiris_log:get_shared(S4)},
+    {ok, R0} = osiris_log:init_offset_reader(first, RConf),
+    {[{2, <<"a1">>}, {3, <<"a2">>}], R1} = osiris_log:read_chunk_parsed(R0),
+    osiris_log:close(R1),
+    osiris_log:close(S4),
+    ok.
+
+txn_retention_commit_pins_data(Config) ->
+    #{dir := Dir} = Conf0 = ?config(osiris_conf, Config),
+    Conf = Conf0#{max_segment_size_bytes => 2000},
+    Data = crypto:strong_rand_bytes(1500),
+    S0 = osiris_log:init(Conf),
+    S1 = osiris_log:write_txn(<<"t1">>, [<<"a1">>], S0),
+    S2 = write_user_chunks(4, Data, S1),
+    {ok, S3} = osiris_log:commit_txn(<<"t1">>, S2),
+    S4 = write_user_chunks(4, Data, S3),
+    set_committed(S4),
+    Segments = segments(Dir),
+    ?assert(length(Segments) > 3),
+    MaxBytes = lists:sum([Size || {Offs, Size} <- Segments, Offs >= 5]),
+    {{0, _}, _, _} = osiris_log:evaluate_retention(Dir, [{max_bytes, MaxBytes}]),
+    ?assertEqual(Segments, segments(Dir)),
+    RConf = Conf#{shared => osiris_log:get_shared(S4)},
+    {ok, R0} = osiris_log:init_offset_reader(first, RConf),
+    R1 = lists:foldl(fun(Offs, R) ->
+                             {[{Offs, Data}], R1} = osiris_log:read_chunk_parsed(R),
+                             R1
+                     end, R0, [1, 2, 3, 4]),
+    {[{5, <<"a1">>}], R2} = osiris_log:read_chunk_parsed(R1),
+    osiris_log:close(R2),
+    %% The data chunk goes with the segment of its commit chunk.
+    {LastSegOffs, _} = lists:last(Segments),
+    {{LastSegOffs, _}, _, 1} = osiris_log:evaluate_retention(Dir, [{max_bytes, 1}]),
+    osiris_log:close(S4),
+    ok.
+
+txn_retention_open_pin(Config) ->
+    #{dir := Dir} = Conf0 = ?config(osiris_conf, Config),
+    Conf = Conf0#{max_segment_size_bytes => 2000},
+    Data = crypto:strong_rand_bytes(1500),
+    S0 = osiris_log:init(Conf),
+    S1 = write_user_chunks(2, Data, S0),
+    S2 = osiris_log:write_txn(<<"t1">>, [<<"a1">>], S1),
+    S3 = write_user_chunks(4, Data, S2),
+    {{FstOffs, _}, _, _} = osiris_log:evaluate_retention(Dir, [{max_bytes, 1},
+                                                               {txn_pin, 2}]),
+    ?assert(FstOffs > 0 andalso FstOffs =< 2),
+    S4 = osiris_log:abort_txn(<<"t1">>, S3),
+    {LastSegOffs, _} = lists:last(segments(Dir)),
+    {{LastSegOffs, _}, _, 1} = osiris_log:evaluate_retention(Dir, [{max_bytes, 1}]),
+    osiris_log:close(S4),
+    ok.
+
 %% Utility
 
 init_reader(offset, Conf) ->
@@ -3255,6 +3423,30 @@ set_shared(#{shared := Ref}, Value) ->
     osiris_log_shared:set_committed_chunk_id(Ref, Value).
 
 %% writes and commits the chunk
+set_committed(S) ->
+    {_, {_, LastChId, _}} = osiris_log:tail_info(S),
+    Shared = osiris_log:get_shared(S),
+    osiris_log_shared:set_committed_chunk_id(Shared, LastChId),
+    osiris_log_shared:set_last_chunk_id(Shared, LastChId).
+
+write_user_chunks(N, Data, S0) ->
+    lists:foldl(fun(_, S) -> osiris_log:write([Data], S) end, S0,
+                lists:seq(1, N)).
+
+segments(Dir) ->
+    lists:sort([{list_to_integer(filename:basename(F, ".segment")),
+                 filelib:file_size(F)}
+                || F <- filelib:wildcard(filename:join(Dir, "*.segment"))]).
+
+parse_header(<<?MAGIC:4/unsigned, ?VERSION:4/unsigned, ChType:8/unsigned,
+               NumEntries:16/unsigned, NumRecords:32/unsigned, _Ts:64/signed,
+               _Epoch:64/unsigned, ChId:64/unsigned, Crc:32/integer,
+               DataSize:32/unsigned, TrailerSize:32/unsigned,
+               FilterSize:8/unsigned, _:24>>) ->
+    #{type => ChType, num_entries => NumEntries, num_records => NumRecords,
+      chunk_id => ChId, crc => Crc, data_size => DataSize,
+      trailer_size => TrailerSize, filter_size => FilterSize}.
+
 write_committed(Entries, S0) ->
     ChId = osiris_log:next_offset(S0),
     S = osiris_log:write(Entries, S0),

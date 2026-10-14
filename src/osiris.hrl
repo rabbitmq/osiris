@@ -62,6 +62,12 @@
 -define(CHNK_USER, 0).
 -define(CHNK_TRK_DELTA, 1).
 -define(CHNK_TRK_SNAPSHOT, 2).
+%% Records of an open transaction. Readers skip them until a commit chunk
+%% refers to them.
+-define(CHNK_TXN_DATA, 3).
+%% Lists the data chunks of a committed transaction, and takes the offsets
+%% that readers see their records at.
+-define(CHNK_TXN_COMMIT, 4).
 
 -define(SUP, osiris_server_sup).
 
