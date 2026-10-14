@@ -68,6 +68,8 @@
 %% Lists the data chunks of a committed transaction, and takes the offsets
 %% that readers see their records at.
 -define(CHNK_TXN_COMMIT, 4).
+%% Marks an aborted transaction. Readers skip it.
+-define(CHNK_TXN_ABORT, 5).
 
 -define(SUP, osiris_server_sup).
 
