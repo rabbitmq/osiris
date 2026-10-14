@@ -27,6 +27,7 @@ all() ->
 
 all_tests() -> [basics,
                 max_writers,
+                snapshot_excludes_unwritten,
                 recover].
 
 groups() ->
@@ -142,6 +143,74 @@ max_writers(_Config) ->
     [?assertEqual({ok, {I, I}}, osiris_tracking:query(integer_to_binary(I), sequence, Trk))
     || I <- lists:seq(5, 8)],
     ok.
+
+snapshot_excludes_unwritten(_Config) ->
+    %% A snapshot is written to the log before the chunk that carries the
+    %% pending tracking deltas, so it must only ever contain tracking that is
+    %% already in the log - otherwise a crash in between the two chunks would
+    %% recover tracking that is ahead of the log data.
+    T0 = osiris_tracking:init(undefined, #{}),
+    ChId1 = 1,
+    T1 = osiris_tracking:add(<<"w1">>, sequence, 55, ChId1, T0),
+    T2 = osiris_tracking:add(<<"t1">>, offset, 99, ChId1, T1),
+    T3 = osiris_tracking:add(<<"t2">>, timestamp, 12345, ChId1, T2),
+    %% queries must still see the pending values, deduplication relies on it
+    ?assertEqual({ok, {ChId1, 55}}, osiris_tracking:query(<<"w1">>, sequence, T3)),
+    ?assertEqual({ok, 99}, osiris_tracking:query(<<"t1">>, offset, T3)),
+    ?assertEqual({ok, 12345}, osiris_tracking:query(<<"t2">>, timestamp, T3)),
+    %% nothing is in the log yet, so there is nothing to snapshot
+    {Snap0, T4} = osiris_tracking:snapshot(0, 0, T3),
+    ?assertEqual(<<>>, iolist_to_binary(Snap0)),
+    %% taking a snapshot must not swallow the pending deltas, they still have to
+    %% be written into the chunk that follows the snapshot
+    ?assert(osiris_tracking:needs_flush(T4)),
+    {Trailer0, T5} = osiris_tracking:flush(T4),
+    ?assertEqual(#{sequences => #{<<"w1">> => {ChId1, 55}},
+                   offsets => #{<<"t1">> => 99},
+                   timestamps => #{<<"t2">> => 12345}},
+                 trailer_overview(ChId1, Trailer0)),
+
+    %% now that they are in the log they have to appear in a snapshot
+    {Snap1, T6} = osiris_tracking:snapshot(0, 0, T5),
+    ?assertEqual(#{sequences => #{<<"w1">> => {ChId1, 55}},
+                   offsets => #{<<"t1">> => 99},
+                   timestamps => #{<<"t2">> => 12345}},
+                 snapshot_overview(Snap1)),
+
+    %% an unflushed update on top of a written value falls back to the written
+    %% value rather than being left out
+    ChId2 = 2,
+    T7 = osiris_tracking:add(<<"w1">>, sequence, 56, ChId2, T6),
+    T8 = osiris_tracking:add(<<"t1">>, offset, 100, ChId2, T7),
+    ?assertEqual({ok, {ChId2, 56}}, osiris_tracking:query(<<"w1">>, sequence, T8)),
+    {Snap2, T9} = osiris_tracking:snapshot(0, 0, T8),
+    ?assertEqual(#{sequences => #{<<"w1">> => {ChId1, 55}},
+                   offsets => #{<<"t1">> => 99},
+                   timestamps => #{<<"t2">> => 12345}},
+                 snapshot_overview(Snap2)),
+    %% and the pending update is still flushed into its own chunk
+    {Trailer1, T10} = osiris_tracking:flush(T9),
+    ?assertEqual(#{sequences => #{<<"w1">> => {ChId2, 56}},
+                   offsets => #{<<"t1">> => 100},
+                   timestamps => #{}},
+                 trailer_overview(ChId2, Trailer1)),
+    {Snap3, _} = osiris_tracking:snapshot(0, 0, T10),
+    ?assertEqual(#{sequences => #{<<"w1">> => {ChId2, 56}},
+                   offsets => #{<<"t1">> => 100},
+                   timestamps => #{<<"t2">> => 12345}},
+                 snapshot_overview(Snap3)),
+    ok.
+
+%% round trip through the module's own parsers rather than asserting on the
+%% binaries, which are not written in a defined order
+snapshot_overview(Snap) ->
+    osiris_tracking:overview(
+      osiris_tracking:init(iolist_to_binary(Snap), #{})).
+
+trailer_overview(ChId, Trailer) ->
+    osiris_tracking:overview(
+      osiris_tracking:append_trailer(ChId, iolist_to_binary(Trailer),
+                                     osiris_tracking:init(undefined, #{}))).
 
 recover(_Config) ->
     ChId1 = ?LINE,
