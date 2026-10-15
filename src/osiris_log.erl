@@ -1153,7 +1153,6 @@ init_data_reader_from(ChunkId,
                             {error,
                              {offset_out_of_range,
                               empty | {From :: offset(), To :: offset()}}} |
-                            {error, {invalid_chunk_header, term()}} |
                             {error, no_index_file} |
                             {error, retries_exhausted}.
 init_offset_reader(OffsetSpec, Conf) ->
@@ -1473,8 +1472,7 @@ counters_ref(#?MODULE{cfg = #cfg{counter = C}}) ->
     C.
 
 -spec read_header(state()) ->
-    {ok, header_map(), state()} | {end_of_stream, state()} |
-    {error, {invalid_chunk_header, term()}}.
+    {ok, header_map(), state()} | {end_of_stream, state()}.
 read_header(#?MODULE{cfg = #cfg{}} = State0) ->
     %% reads the next chunk of entries, parsed
     %% NB: this may return records before the requested index,
@@ -1520,15 +1518,13 @@ read_header(#?MODULE{cfg = #cfg{}} = State0) ->
 
 -spec chunk_iterator(state()) ->
     {ok, header_map(), chunk_iterator(), state()} |
-    {end_of_stream, state()} |
-    {error, {invalid_chunk_header, term()}}.
+    {end_of_stream, state()}.
 chunk_iterator(State) ->
     chunk_iterator(State, 1).
 
 -spec chunk_iterator(state(), pos_integer() | all) ->
     {ok, header_map(), chunk_iterator(), state()} |
-    {end_of_stream, state()} |
-    {error, {invalid_chunk_header, term()}}.
+    {end_of_stream, state()}.
 chunk_iterator(State, Credit) ->
     chunk_iterator(State, Credit, undefined).
 
@@ -1536,8 +1532,7 @@ chunk_iterator(State, Credit) ->
 -spec chunk_iterator(state(), pos_integer() | all,
                      chunk_iterator() | undefined) ->
     {ok, header_map(), chunk_iterator(), state()} |
-    {end_of_stream, state()} |
-    {error, {invalid_chunk_header, term()}}.
+    {end_of_stream, state()}.
 chunk_iterator(#?MODULE{cfg = #cfg{},
                         mode = #read{type = RType,
                                      chunk_selector = Selector,
@@ -1671,8 +1666,7 @@ iterator_next(#iterator{fd = Fd,
 
 -spec read_chunk(state()) ->
     {ok, binary(), state()} |
-    {end_of_stream, state()} |
-    {error, {invalid_chunk_header, term()}}.
+    {end_of_stream, state()}.
 read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
     %% reads the next chunk of unparsed chunk data
     case read_header0(State0) of
@@ -1705,16 +1699,14 @@ read_chunk(#?MODULE{cfg = #cfg{}} = State0) ->
 
 -spec read_chunk_parsed(state()) ->
                            {[log_record()], state()} |
-                           {end_of_stream, state()} |
-                           {error, {invalid_chunk_header, term()}}.
+                           {end_of_stream, state()}.
 read_chunk_parsed(State) ->
     read_chunk_parsed(State, no_header).
 
 -spec read_chunk_parsed(state(), no_header | with_header) ->
     {[log_record()], state()} |
     {ok, header_map(), [log_record()], state()} |
-    {end_of_stream, state()} |
-    {error, {invalid_chunk_header, term()}}.
+    {end_of_stream, state()}.
 read_chunk_parsed(#?MODULE{mode = #read{}} = State0,
                   HeaderOrNot) ->
     %% the Header parameter isn't used anywhere in RabbitMQ so is ignored
@@ -1726,9 +1718,7 @@ read_chunk_parsed(#?MODULE{mode = #read{}} = State0,
             {Records, State1};
         {ok, Header, I0, State1} when HeaderOrNot == with_header ->
             Records = iter_all_records(iterator_next(I0), []),
-            {ok, Header, Records, State1};
-        Err ->
-            Err
+            {ok, Header, Records, State1}
     end.
 
 iter_all_records(end_of_chunk, Acc) ->
