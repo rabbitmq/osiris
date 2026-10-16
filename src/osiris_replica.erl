@@ -599,14 +599,8 @@ handle_incoming_data(Socket, Bin,
     _ = setopts(Transport, Socket, [{active, 1}]),
     %% validate chunk
     {ParseState, OffsetChunks} = parse_chunk(Bin, ParseState0, []),
-    try
-        lists:foldl(fun({OffsetTs, B}, {_OffsTs, Acc0}) ->
-                        Acc = osiris_log:accept_chunk(B, Acc0),
-                        {OffsetTs, Acc}
-                     end,
-                     {undefined, Log0}, OffsetChunks)
-    of
-        {OffsetTimestamp, Log} ->
+    case accept_chunks(OffsetChunks, undefined, Log0) of
+        {ok, OffsetTimestamp, Log} ->
             State1 = State0#?MODULE{log = Log, parse_state = ParseState},
             case OffsetTimestamp of
                 undefined ->
@@ -616,14 +610,25 @@ handle_incoming_data(Socket, Bin,
                     ok = osiris_writer:ack(LeaderPid, ack_msg(Cfg, TailInfo)),
                     State = notify_offset_listeners(State1),
                     {noreply, State}
-            end
-    catch
-        exit:{accept_chunk_out_of_order, Next, ExpectedNext} = Reason
+            end;
+        {error, {accept_chunk_out_of_order, Next, ExpectedNext} = Reason}
           when Next > ExpectedNext ->
             %% Stop and restart fresh rather than crash when the leader has
             %% moved past what this replica can accept, e.g. after retention.
             ?WARN_(Name, "stopping to resync: ~w", [Reason]),
-            {stop, {shutdown, Reason}, State0}
+            {stop, {shutdown, Reason}, State0};
+        {error, Reason} ->
+            exit(Reason)
+    end.
+
+accept_chunks([], OffsetTs, Log) ->
+    {ok, OffsetTs, Log};
+accept_chunks([{OffsetTs, B} | Rem], _OffsetTs0, Log0) ->
+    case osiris_log:accept_chunk(B, Log0) of
+        {ok, Log} ->
+            accept_chunks(Rem, OffsetTs, Log);
+        {error, _} = Err ->
+            Err
     end.
 
 %%--------------------------------------------------------------------

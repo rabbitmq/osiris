@@ -1411,7 +1411,7 @@ accept_chunk_inital_offset(Config) ->
     Ch1 = fake_chunk_bin([<<"blob1">>], ?LINE, 1, 100),
 
     F0 = osiris_log:init(Conf#{initial_offset => 100}, acceptor),
-    F1 = osiris_log:accept_chunk(Ch1, F0),
+    {ok, F1} = osiris_log:accept_chunk(Ch1, F0),
     ?assertEqual(101, osiris_log:next_offset(F1)),
 
     Dir = maps:get(dir, Conf),
@@ -1451,7 +1451,7 @@ accept_chunk_with_initial_offset_from_empty_writer(Config) ->
                  osiris_log:tail_info(F0), RConf),
     L1 = osiris_log:write([<<"hi">>], L0),
     {ok, Chunk1, R1} = osiris_log:read_chunk(R0),
-    F1 = osiris_log:accept_chunk(Chunk1, F0),
+    {ok, F1} = osiris_log:accept_chunk(Chunk1, F0),
     ?assertEqual(101, osiris_log:next_offset(F1)),
     ?assertEqual(100, osiris_log:first_offset(F1)),
 
@@ -1470,7 +1470,7 @@ accept_chunk_iolist_header_in_first_element(Config) ->
     Ch1 = [Head, Res],
     F0 = osiris_log:init(Conf#{initial_offset => 100}, acceptor),
     %% this should not crash
-    _F1 = osiris_log:accept_chunk(Ch1, F0),
+    {ok, _F1} = osiris_log:accept_chunk(Ch1, F0),
     ok.
 
 accept_chunk(Config) ->
@@ -1495,9 +1495,9 @@ accept_chunk(Config) ->
     {ok, R0} = osiris_log:init_data_reader(
                  osiris_log:tail_info(F0), RConf),
     {ok, Chunk1, R1} = osiris_log:read_chunk(R0),
-    F1 = osiris_log:accept_chunk(Chunk1, F0),
+    {ok, F1} = osiris_log:accept_chunk(Chunk1, F0),
     {ok, Chunk2, R2} = osiris_log:read_chunk(R1),
-    F2 = osiris_log:accept_chunk(Chunk2, F1),
+    {ok, F2} = osiris_log:accept_chunk(Chunk2, F1),
 
     osiris_log:close(L2),
     osiris_log:close(R2),
@@ -1566,9 +1566,9 @@ accept_chunk_truncates_tail(Config) ->
     {ok, RLog0} =
         osiris_log:init_data_reader(osiris_log:tail_info(ALog0), RConf),
     {ok, Ch1, RLog1} = osiris_log:read_chunk(RLog0),
-    ALog1 = osiris_log:accept_chunk([Ch1], ALog0),
+    {ok, ALog1} = osiris_log:accept_chunk([Ch1], ALog0),
     {ok, Ch2, _RLog} = osiris_log:read_chunk(RLog1),
-    ALog = osiris_log:accept_chunk([Ch2], ALog1),
+    {ok, ALog} = osiris_log:accept_chunk([Ch2], ALog1),
 
     osiris_log:close(ALog),
     % validate equal

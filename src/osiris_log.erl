@@ -801,7 +801,9 @@ write([_ | _] = Entries,
 write([], _ChType, _Now, _Trailer, #?MODULE{} = State) ->
     State.
 
--spec accept_chunk(iodata(), state()) -> state().
+-spec accept_chunk(iodata(), state()) ->
+    {ok, state()} |
+    {error, {accept_chunk_out_of_order, Next :: offset(), Expected :: offset()}}.
 accept_chunk([<<?MAGIC:4/unsigned,
                 ?VERSION:4/unsigned,
                 ChType:8/unsigned,
@@ -824,7 +826,7 @@ accept_chunk([<<?MAGIC:4/unsigned,
     validate_crc(Next, Crc, part(DataSize, DataAndTrailer)),
     %% assertion
     % true = iolist_size(DataAndTrailer) == (DataSize + TrailerSize),
-    write_chunk(Chunk, ChType, Timestamp, Epoch, NumRecords, State0);
+    {ok, write_chunk(Chunk, ChType, Timestamp, Epoch, NumRecords, State0)};
 accept_chunk(Binary, State) when is_binary(Binary) ->
     accept_chunk([Binary], State);
 accept_chunk([<<?MAGIC:4/unsigned,
@@ -841,7 +843,7 @@ accept_chunk([<<?MAGIC:4/unsigned,
                  _Chunk,
              #?MODULE{cfg = #cfg{},
                       mode = #write{tail_info = {ExpectedNext, _}}}) ->
-    exit({accept_chunk_out_of_order, Next, ExpectedNext}).
+    {error, {accept_chunk_out_of_order, Next, ExpectedNext}}.
 
 -spec next_offset(state()) -> offset().
 next_offset(#?MODULE{mode = #write{tail_info = {Next, _}}}) ->
