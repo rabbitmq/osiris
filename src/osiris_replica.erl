@@ -584,7 +584,8 @@ handle_info({'EXIT', Ref, Info},
 
 handle_incoming_data(Socket, Bin,
                      #?MODULE{cfg =
-                              #cfg{socket = Socket,
+                              #cfg{name = Name,
+                                   socket = Socket,
                                    leader_pid = LeaderPid,
                                    transport = Transport,
                                    counter = Cnt} = Cfg,
@@ -598,21 +599,31 @@ handle_incoming_data(Socket, Bin,
     _ = setopts(Transport, Socket, [{active, 1}]),
     %% validate chunk
     {ParseState, OffsetChunks} = parse_chunk(Bin, ParseState0, []),
-    {OffsetTimestamp, Log} =
+    try
         lists:foldl(fun({OffsetTs, B}, {_OffsTs, Acc0}) ->
-                       Acc = osiris_log:accept_chunk(B, Acc0),
-                       {OffsetTs, Acc}
-                    end,
-                    {undefined, Log0}, OffsetChunks),
-    State1 = State0#?MODULE{log = Log, parse_state = ParseState},
-    case OffsetTimestamp of
-        undefined ->
-            {noreply, State1};
-        _ ->
-            TailInfo = osiris_log:tail_info(Log),
-            ok = osiris_writer:ack(LeaderPid, ack_msg(Cfg, TailInfo)),
-            State = notify_offset_listeners(State1),
-            {noreply, State}
+                        Acc = osiris_log:accept_chunk(B, Acc0),
+                        {OffsetTs, Acc}
+                     end,
+                     {undefined, Log0}, OffsetChunks)
+    of
+        {OffsetTimestamp, Log} ->
+            State1 = State0#?MODULE{log = Log, parse_state = ParseState},
+            case OffsetTimestamp of
+                undefined ->
+                    {noreply, State1};
+                _ ->
+                    TailInfo = osiris_log:tail_info(Log),
+                    ok = osiris_writer:ack(LeaderPid, ack_msg(Cfg, TailInfo)),
+                    State = notify_offset_listeners(State1),
+                    {noreply, State}
+            end
+    catch
+        exit:{accept_chunk_out_of_order, Next, ExpectedNext} = Reason
+          when Next > ExpectedNext ->
+            %% Stop and restart fresh rather than crash when the leader has
+            %% moved past what this replica can accept, e.g. after retention.
+            ?WARN_(Name, "stopping to resync: ~w", [Reason]),
+            {stop, {shutdown, Reason}, State0}
     end.
 
 %%--------------------------------------------------------------------
