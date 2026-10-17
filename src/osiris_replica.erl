@@ -89,7 +89,8 @@
 
 -define(DEFAULT_ONE_TIME_TOKEN_TIMEOUT, 30000).
 -define(TOKEN_SIZE, 32).
--define(DEF_REC_BUF, 408300 * 5).
+%% Size of the Erlang inet driver's read buffer (userspace).
+-define(DEF_BUFFER, 408300 * 10).
 
 %%%===================================================================
 %%% API functions
@@ -779,8 +780,7 @@ setopts(ssl, Socket, Options) ->
     ssl:setopts(Socket, Options).
 
 listener_opts(tcp) ->
-    RcvBuf = application:get_env(osiris, replica_recbuf, ?DEF_REC_BUF),
-    Buffer = application:get_env(osiris, replica_buffer, RcvBuf * 2),
+    Buffer = application:get_env(osiris, replica_buffer, ?DEF_BUFFER),
     KeepAlive = application:get_env(osiris, replica_keepalive, false),
     ReuseAddr = application:get_env(osiris, replica_reuseaddr, true),
     Linger = application:get_env(osiris, replica_linger, true),
@@ -795,10 +795,13 @@ listener_opts(tcp) ->
      {backlog, 0},
      {packet, raw},
      {active, false},
-     {buffer, Buffer},
-     {recbuf, RcvBuf},
      {keepalive, KeepAlive}
-    ];
+    ]
+    %% `recbuf' is applied before `buffer': on older OTP releases setting
+    %% recbuf raises the driver buffer to match, so `buffer' must come last
+    %% to stay authoritative.
+    ++ osiris_util:optional_socket_opt(recbuf, replica_recbuf)
+    ++ [{buffer, Buffer}];
 listener_opts(ssl) ->
     Opts = listener_opts(tcp),
     SslOptions = application:get_env(osiris, replication_server_ssl_options, []),
