@@ -176,6 +176,13 @@ init(#{hosts := Hosts,
                            "data reader found an invalid last offset epoch:
                            epoch ~0p offset ~0p, replica reader will not start",
                            [Epoch, Offset]),
+                    {stop, normal};
+                {error, retries_exhausted} ->
+                    ?WARN_(Name,
+                           "data reader for ~0p could not open an index file, "
+                           "likely deleted by retention, replica reader will "
+                           "not start",
+                          [ExtRef]),
                     {stop, normal}
             end;
         {error, Reason} ->
