@@ -59,6 +59,8 @@ all_tests() ->
      restart_replica,
      query_replication_state_with_empty_initial_offset,
      replica_reader_failure_should_stop_replica,
+     replica_chunk_ahead_of_tail_stops_for_resync,
+     replica_chunk_behind_tail_crashes,
      start_cluster_invalid_replicas,
      replica_unknown_command,
      diverged_replica,
@@ -1150,6 +1152,69 @@ replica_reader_failure_should_stop_replica(Config) ->
     [] = supervisor:which_children({osiris_replica_reader_sup, node(Leader)}),
 
     [stop_peer(Ref) || {Ref, _} <- PeerStates],
+    ok.
+
+replica_chunk_ahead_of_tail_stops_for_resync(Config) ->
+    {PeerStates, Conf, LeaderPid, ReplicaPid} = replica_ordering_init(Config),
+    Ref = monitor(process, ReplicaPid),
+    %% the replica has accepted offset 0 so it expects offset 1 next
+    inject_chunk(ReplicaPid, 100),
+    receive
+        {'DOWN', Ref, _, _, Reason} ->
+            ?assertEqual({shutdown, {accept_chunk_out_of_order, 100, 1}},
+                         Reason)
+    after 5000 ->
+        flush(),
+        exit(down_timeout)
+    end,
+    %% restarting the replica resyncs it with the leader
+    {ok, _} = osiris:start_replica(node(ReplicaPid), Conf),
+    ok = osiris:write(LeaderPid, undefined, 2, [<<2:64/integer>>]),
+    wait_for_written([2]),
+    [stop_peer(P) || {P, _} <- PeerStates],
+    ok.
+
+replica_chunk_behind_tail_crashes(Config) ->
+    {PeerStates, _Conf, _LeaderPid, ReplicaPid} = replica_ordering_init(Config),
+    Ref = monitor(process, ReplicaPid),
+    inject_chunk(ReplicaPid, 0),
+    receive
+        {'DOWN', Ref, _, _, Reason} ->
+            %% not wrapped in shutdown
+            ?assertEqual({accept_chunk_out_of_order, 0, 1}, Reason)
+    after 5000 ->
+        flush(),
+        exit(down_timeout)
+    end,
+    [stop_peer(P) || {P, _} <- PeerStates],
+    ok.
+
+replica_ordering_init(Config) ->
+    PrivDir = ?config(data_dir, Config),
+    Name = ?config(cluster_name, Config),
+    PeerStates = [start_child_node(N, PrivDir) || N <- [s1, s2]],
+    [LeaderNode, ReplicaNode] = [NodeName || {_Ref, NodeName} <- PeerStates],
+    Conf0 = #{name => Name,
+              reference => Name,
+              epoch => 1,
+              leader_node => LeaderNode,
+              replica_nodes => [ReplicaNode]},
+    {ok, #{leader_pid := LeaderPid, replica_pids := [ReplicaPid]} = Conf} =
+        osiris:start_cluster(Conf0),
+    ok = osiris:write(LeaderPid, undefined, 1, [<<1:64/integer>>]),
+    wait_for_written([1]),
+    {PeerStates, Conf, LeaderPid, ReplicaPid}.
+
+%% sends the replica a header only chunk with the given first offset as if
+%% it had been received from the replica reader
+inject_chunk(ReplicaPid, FirstOffset) ->
+    %% the replication socket is a port linked to the replica process
+    {links, Links} = erpc:call(node(ReplicaPid), erlang, process_info,
+                               [ReplicaPid, links]),
+    [Socket] = [P || P <- Links, is_port(P)],
+    Chunk = <<5:4, 0:4, 0:8, 0:16, 0:32, 0:64/signed, 1:64, FirstOffset:64,
+              0:32, 0:32, 0:32, 0:8, 0:24>>,
+    ReplicaPid ! {tcp, Socket, Chunk},
     ok.
 
 start_cluster_invalid_replicas(Config) ->
