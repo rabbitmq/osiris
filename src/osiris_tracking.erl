@@ -26,10 +26,23 @@
 -type tracking_id() :: binary().
 -type tracking_type() :: sequence | offset | timestamp.
 -type tracking() :: non_neg_integer() | osiris:offset() | osiris:timestamp().
+%% a tracking value in the shape it is held in the sequences, offsets and
+%% timestamps maps
+-type stored() :: {osiris:offset(), non_neg_integer()} |
+                  osiris:offset() |
+                  osiris:timestamp().
 
 -record(?MODULE, {cfg = #cfg{} :: #cfg{},
                   pending = init_pending() :: #{sequences | offsets | timestamps =>
                                                 #{tracking_id() => tracking()}},
+                  %% For every tracking id with a pending (i.e. not yet written
+                  %% to the log) update: the value that was last written to the
+                  %% log, or `undefined' if it never has been. Snapshots are
+                  %% taken from this view of the world so that a snapshot can
+                  %% never record tracking that is ahead of the log data.
+                  %% See snapshot/3.
+                  prev = init_pending() :: #{sequences | offsets | timestamps =>
+                                             #{tracking_id() => stored() | undefined}},
                   sequences = #{} :: #{tracking_id() => {osiris:offset(), non_neg_integer()}},
                   offsets = #{} :: #{tracking_id() => osiris:offset()},
                   timestamps = #{} :: #{tracking_id() => osiris:timestamp()}
@@ -62,12 +75,14 @@ init(Bin, #?MODULE{cfg = Cfg}) when is_binary(Bin) ->
 -spec add(tracking_id(), tracking_type(), tracking(), osiris:offset() | undefined,
           state()) -> state().
 add(TrkId, TrkType, TrkData, ChunkId,
-    #?MODULE{pending = Pend0} = State) when is_integer(TrkData) andalso
-                                            byte_size(TrkId) =< 256 ->
+    #?MODULE{pending = Pend0} = State0) when is_integer(TrkData) andalso
+                                             byte_size(TrkId) =< 256 ->
     Type = plural(TrkType),
     Trackings0 = maps:get(Type, Pend0),
     Trackings1 = Trackings0#{TrkId => TrkData},
     Pend = Pend0#{Type := Trackings1},
+    %% has to happen before update_tracking/5 overwrites the current value
+    State = remember_prev(TrkId, Type, State0),
     update_tracking(TrkId, TrkType, TrkData,
                     ChunkId, State#?MODULE{pending = Pend}).
 
@@ -89,12 +104,18 @@ flush(#?MODULE{pending = Pending} = State) ->
                                                    TrkData:64/integer>> | Acc0]
                                         end, Acc, TrackingMap)
                       end, [], Pending),
-    {TData, State#?MODULE{pending = init_pending()}}.
+    %% the caller writes TData into the log, so from here on the current values
+    %% are the written ones and there is nothing to revert a snapshot to
+    {TData, State#?MODULE{pending = init_pending(),
+                          prev = init_pending()}}.
 
 -spec snapshot(osiris:offset(), osiris:timestamp(), state()) ->
     {iodata(), state()}.
 snapshot(FirstOffset, FirstTimestamp,
          #?MODULE{cfg = #cfg{max_sequences = MaxSeqs},
+                  prev = #{sequences := PrevSeqs,
+                           offsets := PrevOffsets,
+                           timestamps := PrevTimestamps},
                   sequences = Seqs0,
                   offsets = Offsets0,
                   timestamps = Timestamps0} = State) ->
@@ -106,6 +127,15 @@ snapshot(FirstOffset, FirstTimestamp,
     Timestamps = maps:filter(fun(_, Ts) -> Ts >= FirstTimestamp end, Timestamps0),
     Seqs = trim_sequences(MaxSeqs, Seqs0),
 
+    %% A snapshot chunk is written to the log _before_ the chunk that carries
+    %% the tracking deltas of the batch that is currently being processed, so it
+    %% must only contain tracking that is already in the log: any tracking id
+    %% with a pending update is reverted to the value last written for it, and
+    %% omitted entirely when it has never been written. Otherwise a crash in
+    %% between the two chunks would recover tracking that is ahead of the log
+    %% data, e.g. a writer sequence for a message that was never persisted -
+    %% which would make that message undeliverable as any attempt to write it
+    %% again would be detected as a duplicate.
     Data0 = maps:fold(fun(TrkId, {ChId, Seq} , Acc) ->
                                 [<<?TRK_TYPE_SEQUENCE:8/unsigned,
                                    (byte_size(TrkId)):8/unsigned,
@@ -113,23 +143,24 @@ snapshot(FirstOffset, FirstTimestamp,
                                    ChId:64/unsigned,
                                    Seq:64/unsigned>>
                                  | Acc]
-                        end, [], Seqs),
+                        end, [], revert(Seqs, PrevSeqs)),
     Data1 = maps:fold(fun(TrkId, Offs, Acc) ->
                              [<<?TRK_TYPE_OFFSET:8/unsigned,
                                 (byte_size(TrkId)):8/unsigned,
                                 TrkId/binary,
                                 Offs:64/unsigned>>
                               | Acc]
-                     end, Data0, Offsets),
+                     end, Data0, revert(Offsets, PrevOffsets)),
     Data2 = maps:fold(fun(TrkId, Ts, Acc) ->
                              [<<?TRK_TYPE_TIMESTAMP:8/unsigned,
                                 (byte_size(TrkId)):8/unsigned,
                                 TrkId/binary,
                                 Ts:64/signed>>
                               | Acc]
-                     end, Data1, Timestamps),
-    {Data2, State#?MODULE{pending = init_pending(),
-                          sequences = Seqs,
+                     end, Data1, revert(Timestamps, PrevTimestamps)),
+    %% `pending' (and thus `prev') is deliberately kept: those deltas still have
+    %% to be written into the chunk that follows this snapshot
+    {Data2, State#?MODULE{sequences = Seqs,
                           offsets = Offsets,
                           timestamps = Timestamps}}.
 
@@ -191,6 +222,41 @@ max_sequences(#?MODULE{cfg = #cfg{max_sequences = MaxSequences}}) ->
 plural(sequence) -> sequences;
 plural(offset) -> offsets;
 plural(timestamp) -> timestamps.
+
+%% remembers the value that is currently in the log for this tracking id, but
+%% only the first time it is updated within the current (not yet flushed) window
+remember_prev(TrkId, Type, #?MODULE{prev = Prev0} = State) ->
+    Prevs = maps:get(Type, Prev0),
+    case is_map_key(TrkId, Prevs) of
+        true ->
+            State;
+        false ->
+            Written = written_value(TrkId, Type, State),
+            State#?MODULE{prev = Prev0#{Type := Prevs#{TrkId => Written}}}
+    end.
+
+written_value(TrkId, sequences, #?MODULE{sequences = Seqs}) ->
+    maps:get(TrkId, Seqs, undefined);
+written_value(TrkId, offsets, #?MODULE{offsets = Offsets}) ->
+    maps:get(TrkId, Offsets, undefined);
+written_value(TrkId, timestamps, #?MODULE{timestamps = Timestamps}) ->
+    maps:get(TrkId, Timestamps, undefined).
+
+%% replaces the value of every tracking id that has a pending (i.e. not yet
+%% written) update with the value last written for it, dropping those that have
+%% never been written
+revert(Trackings, Prev) ->
+    maps:fold(fun (TrkId, undefined, Acc) ->
+                      maps:remove(TrkId, Acc);
+                  (TrkId, Value, Acc) ->
+                      case is_map_key(TrkId, Acc) of
+                          true ->
+                              Acc#{TrkId => Value};
+                          false ->
+                              %% trimmed or filtered out, leave it out
+                              Acc
+                      end
+              end, Trackings, Prev).
 
 update_tracking(TrkId, sequence, Tracking, ChId,
                 #?MODULE{sequences = Seqs0} = State) when is_integer(ChId) ->
