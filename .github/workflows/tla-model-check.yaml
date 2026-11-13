@@ -1,0 +1,33 @@
+name: TLA+ Model Check
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'tla/**'
+  pull_request:
+    paths:
+      - 'tla/**'
+  schedule:
+    - cron: '0 6 * * 1'  # Every Monday at 06:00 UTC
+
+jobs:
+  model-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Download tla2tools
+        run: |
+          curl -fsSL -o tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar
+
+      - name: Run TLC simulation
+        run: |
+          cd tla
+          timeout 300 java -jar ../tla2tools.jar -simulate -depth 500 -workers auto -deadlock MC.tla || [ $? -eq 124 ]

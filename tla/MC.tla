@@ -12,17 +12,17 @@ a, b, c
 ----
 
 \* MV CONSTANT definitions R
-const_1589378301396272000 == 
+const_1589378301396272000 ==
 {r1, r2, r3}
 ----
 
 \* MV CONSTANT definitions V
-const_1589378301396273000 == 
+const_1589378301396273000 ==
 {a, b, c}
 ----
 
 \* SYMMETRY definition
-symm_1589378301396274000 == 
+symm_1589378301396274000 ==
 Permutations(const_1589378301396272000) \union Permutations(const_1589378301396273000)
 ----
 
