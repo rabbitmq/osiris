@@ -2472,6 +2472,10 @@ idx_lin_scan(<<>>, _Fun, Acc) ->
     {continue, Acc};
 idx_lin_scan(?ZERO_IDX_MATCH(_), _Fun, Acc0) ->
     {continue, Acc0};
+idx_lin_scan(Partial, _Fun, Acc0) when byte_size(Partial) < ?INDEX_RECORD_SIZE_B ->
+    %% torn trailing index record (e.g. after power loss), ignore it.
+    %% init/1 will truncate it
+    {continue, Acc0};
 idx_lin_scan(<<IdxRecordBin:?INDEX_RECORD_SIZE_B/binary, Rem/binary>>, Fun, Acc0) ->
     case Fun(scan, IdxRecordBin, Acc0) of
         {continue, Acc} ->

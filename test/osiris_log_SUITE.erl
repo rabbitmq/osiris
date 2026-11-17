@@ -105,6 +105,7 @@ all_tests() ->
      overview,
      overview_with_initial_offset,
      init_partial_writes,
+     overview_torn_index_tail,
      init_with_unexpected_file,
      overview_with_missing_segment,
      overview_with_missing_index_at_start,
@@ -1669,6 +1670,22 @@ overview(Config) ->
     {{0, 4}, [{1, 1}, {2, 4}]} = osiris_log:overview(LDir),
     %% non existant dir should return empty
     {empty, []} = osiris_log:overview("/tmp/blahblah"),
+    ok.
+
+overview_torn_index_tail(Config) ->
+    %% a partial, non-zero trailing index record (power loss) must not
+    %% crash overview/1 which can be called before init/1
+    EpochChunks = [{1, [<<"one">>]}, {1, [<<"two">>]}, {2, [<<"three">>]}],
+    LDir = ?config(leader_dir, Config),
+    Log = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(Log),
+    Expected = osiris_log:overview(LDir),
+    IdxPath = filename:join(LDir, "00000000000000000000.index"),
+    {ok, IdxFd} = file:open(IdxPath, [raw, binary, read, write]),
+    {ok, _} = file:position(IdxFd, eof),
+    ok = file:write(IdxFd, <<0, 0, 0, 0, 0, 0, 77, 61, 0, 0, 1, 161, 229, 144, 148>>),
+    ok = file:close(IdxFd),
+    ?assertEqual(Expected, osiris_log:overview(LDir)),
     ok.
 
 init_corrupted_log(Config) ->

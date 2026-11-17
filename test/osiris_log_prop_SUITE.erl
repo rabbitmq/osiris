@@ -155,5 +155,8 @@ write_index_file_with_timestamps(N, Timestamps) ->
     File.
 
 tmp_idx_file() ->
-    Dir = persistent_term:get({?MODULE, test_dir}),
+    %% when run via `make proper` rather than common_test there is no
+    %% init_per_testcase, so fall back to a temp dir
+    Dir = persistent_term:get({?MODULE, test_dir}, filename:basedir(user_cache, "osiris_prop")),
+    ok = filelib:ensure_dir(filename:join(Dir, "dummy")),
     filename:join(Dir, "prop_idx_" ++ integer_to_list(erlang:unique_integer([positive])) ++ ".index").
