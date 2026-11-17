@@ -2097,6 +2097,9 @@ idx_read_at(Fd, Pos) when is_integer(Pos) ->
     case file:pread(Fd, Pos, ?INDEX_RECORD_SIZE_B) of
         {ok, ?ZERO_IDX_MATCH(_)} ->
             {error, empty_idx_record};
+        {ok, Partial} when byte_size(Partial) < ?INDEX_RECORD_SIZE_B ->
+            %% torn trailing index record (e.g. after power loss)
+            {error, partial_idx_record};
         Ret ->
             Ret
     end.
