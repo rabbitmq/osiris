@@ -2176,7 +2176,9 @@ committed_offset_calculate_with_cluster(Config) ->
     {ok, Replica2Pid2} = osiris_replica:start(Replica2Node, ReplicaConf2),
     Pids2 = [LeaderPid2, Replica1Pid2, Replica2Pid2],
 
-    [?assertEqual(2 * Num - 1, committed_offset(Pid)) || Pid <- Pids2],
+    [await_condition(fun() ->
+                             committed_offset(Pid) =:= 2 * Num - 1
+                     end, 100, 20) || Pid <- Pids2],
 
     ok = osiris:stop_cluster(WriterConf),
 
