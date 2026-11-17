@@ -106,6 +106,7 @@ all_tests() ->
      overview_with_initial_offset,
      init_partial_writes,
      overview_torn_index_tail,
+     overview_torn_index_tail_at_peek,
      init_with_unexpected_file,
      overview_with_missing_segment,
      overview_with_missing_index_at_start,
@@ -1680,6 +1681,25 @@ overview_torn_index_tail(Config) ->
     Log = seed_log(LDir, EpochChunks, Config),
     osiris_log:close(Log),
     Expected = osiris_log:overview(LDir),
+    IdxPath = filename:join(LDir, "00000000000000000000.index"),
+    {ok, IdxFd} = file:open(IdxPath, [raw, binary, read, write]),
+    {ok, _} = file:position(IdxFd, eof),
+    ok = file:write(IdxFd, <<0, 0, 0, 0, 0, 0, 77, 61, 0, 0, 1, 161, 229, 144, 148>>),
+    ok = file:close(IdxFd),
+    ?assertEqual(Expected, osiris_log:overview(LDir)),
+    ok.
+
+overview_torn_index_tail_at_peek(Config) ->
+    %% torn record located exactly at the first skip search peek position
+    %% (2049 valid records followed by a partial one) must not cause the
+    %% preceding block to be skipped
+    EpochChunks = [{1, [<<"one">>]} |
+                   [{2, [<<"x">>]} || _ <- lists:seq(1, 2048)]],
+    LDir = ?config(leader_dir, Config),
+    Log = seed_log(LDir, EpochChunks, Config),
+    osiris_log:close(Log),
+    Expected = osiris_log:overview(LDir),
+    ?assertMatch({{0, 2048}, [{1, 0}, {2, 2048}]}, Expected),
     IdxPath = filename:join(LDir, "00000000000000000000.index"),
     {ok, IdxFd} = file:open(IdxPath, [raw, binary, read, write]),
     {ok, _} = file:position(IdxFd, eof),
